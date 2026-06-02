@@ -18,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # material3 vendors material-color-utilities (provides the dynamiccolor package) as a submodule.
+          submodules: recursive
 
       # Daemon JVM criteria pins JetBrains Runtime 21 (gradle/gradle-daemon-jvm.properties).
       - uses: actions/setup-java@v4
