@@ -62,14 +62,16 @@ jobs:
           }
           EOF
 
+      # :web:buildWebUi shells out to pnpm to build the React frontend — orthogonal
+      # to the Kotlin/Android gate and absent on the runner, so it is excluded.
       - name: Compile (all modules, debug)
-        run: ./gradlew compileDebugKotlin --stacktrace
+        run: ./gradlew compileDebugKotlin -x :web:buildWebUi --stacktrace
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: ./gradlew testDebugUnitTest -x :web:buildWebUi --stacktrace
 
       - name: Android Lint
-        run: ./gradlew lintDebug --stacktrace
+        run: ./gradlew lintDebug -x :web:buildWebUi --stacktrace
 
       - name: Upload reports
         if: failure()
