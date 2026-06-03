@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.dao.KnowledgeChunkDAO
@@ -157,6 +158,7 @@ class KnowledgeBaseVM(
                         _events.value = Event.IngestFailed(kbId, "No extractable text in this file")
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 // Ingestion rolled back its partial chunks (see IngestKnowledgeBaseUseCase) and
                 // rethrew; surface the failure to the user instead of letting the coroutine die
                 // silently with orphaned UI state.
@@ -176,6 +178,9 @@ class KnowledgeBaseVM(
                 target.outputStream().use { output -> input.copyTo(output) }
             } ?: error("Cannot open input stream for $uri")
             target
-        }.getOrNull()
+        }.getOrElse { e ->
+            if (e is CancellationException) throw e
+            null
+        }
     }
 }
