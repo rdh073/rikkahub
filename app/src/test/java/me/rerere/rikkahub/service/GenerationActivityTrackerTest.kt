@@ -63,25 +63,35 @@ class GenerationActivityTrackerTest {
         val pool = Executors.newFixedThreadPool(16)
         val ready = CountDownLatch(1)
 
+        // `pending` is the atomic budget of acquires that have happened but not yet been released.
+        // Each acquire bumps it; each release task claims a unit before calling release(). This makes
+        // every release() correspond to a genuine prior acquire so the N/N run stays balanced.
+        val pending = AtomicInteger(0)
+
         try {
             val acquireTasks = (0 until n).map {
                 pool.submit {
                     ready.await()
                     if (tracker.acquire() == Transition.STARTED) started.incrementAndGet()
+                    pending.incrementAndGet()
                 }
             }
+            // Each release task must consume exactly ONE acquire, otherwise the run is not balanced
+            // and the final count is nondeterministic. Gating purely on `tracker.count > 0` is a
+            // TOCTOU race: two tasks can both observe count == 1, one decrements to 0 (a real release)
+            // while the other's release() hits the clamp and no-ops — yet both terminate, leaving a
+            // net deficit of decrements. Claiming a unit from `pending` first guarantees every
+            // release() pairs with a genuine acquire, regardless of thread interleaving.
             val releaseTasks = (0 until n).map {
                 pool.submit {
                     ready.await()
-                    // Spin until there is something to release so every acquire is balanced.
                     while (true) {
-                        if (tracker.count > 0) {
-                            val t = tracker.release()
-                            if (t == Transition.STOPPED) stopped.incrementAndGet()
-                            if (t != Transition.NONE || tracker.count >= 0) break
-                        } else {
-                            Thread.onSpinWait()
+                        val budget = pending.get()
+                        if (budget > 0 && pending.compareAndSet(budget, budget - 1)) {
+                            if (tracker.release() == Transition.STOPPED) stopped.incrementAndGet()
+                            break
                         }
+                        Thread.onSpinWait()
                     }
                 }
             }
