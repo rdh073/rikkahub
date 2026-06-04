@@ -10,7 +10,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -717,8 +716,11 @@ class ClaudeProvider(
 // than send an invalid block; a signed, native-Claude reasoning part is preserved verbatim.
 internal fun reasoningContentBlock(reasoning: String, metadata: JsonObject?): JsonObject? {
     if (metadata == null) return null
-    val signature = metadata["signature"]
-    if (signature == null || signature is JsonNull) return null
+    // The signature must be a non-blank STRING. A missing key, JsonNull, an empty/blank
+    // string, or a non-string (array/object) is not a usable Anthropic signature — keeping
+    // any of those would only move the 400 from "field required" to "invalid signature".
+    val signature = metadata["signature"] as? JsonPrimitive ?: return null
+    if (!signature.isString || signature.content.isBlank()) return null
     return buildJsonObject {
         put("type", "thinking")
         put("thinking", reasoning)

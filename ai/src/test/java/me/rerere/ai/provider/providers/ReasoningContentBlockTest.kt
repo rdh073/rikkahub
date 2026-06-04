@@ -46,4 +46,18 @@ class ReasoningContentBlockTest {
         val md = buildJsonObject { put("signature", JsonNull) }
         assertNull(reasoningContentBlock("x", md))
     }
+
+    @Test
+    fun `blank or empty signature is dropped`() {
+        // An empty/blank signature would only move the 400 from "field required" to
+        // "invalid signature" — treat it as no signature.
+        assertNull(reasoningContentBlock("x", buildJsonObject { put("signature", "") }))
+        assertNull(reasoningContentBlock("x", buildJsonObject { put("signature", "   ") }))
+    }
+
+    @Test
+    fun `non-string signature is dropped`() {
+        val objSig = buildJsonObject { put("signature", buildJsonObject { put("nested", "v") }) }
+        assertNull(reasoningContentBlock("x", objSig))
+    }
 }
