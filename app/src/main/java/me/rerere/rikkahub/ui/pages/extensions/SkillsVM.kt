@@ -284,7 +284,7 @@ class SkillsVM(
             val item = array.getJSONObject(i)
             SkillImportLimits.GitHubEntry(
                 path = item.getString("path"),
-                isDir = item.getString("type") == "dir",
+                type = item.getString("type"),
                 downloadUrl = item.optString("download_url"),
             )
         }

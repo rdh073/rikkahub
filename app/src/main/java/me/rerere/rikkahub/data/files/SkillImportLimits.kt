@@ -90,31 +90,39 @@ internal object SkillImportLimits {
         var totalUncompressed = 0L
         while (true) {
             val entry = zipInput.nextEntry ?: break
-            try {
-                if (!entry.isDirectory) {
-                    entryCount++
-                    val entryBytes = readBytesLimited(zipInput, MAX_ENTRY_BYTES, entry.name)
-                    totalUncompressed += entryBytes.size
-                    checkTotalAndCount(totalUncompressed, entryCount)
-                    val path = normalizePath(entry.name)
-                    if (path != null) {
-                        files[path] = entryBytes
-                    }
+            // Count and cap EVERY entry, including directories: a zip with millions
+            // of directory records and no files must still trip MAX_ENTRY_COUNT.
+            entryCount++
+            checkTotalAndCount(totalUncompressed, entryCount)
+            if (!entry.isDirectory) {
+                // readBytesLimited throws on the per-entry cap. We deliberately do NOT
+                // call closeEntry() on that path: closeEntry() drains the unconsumed
+                // remainder of the entry by inflating it to EOF, which would fully
+                // expand a zip bomb even though the size guard already fired. Letting
+                // the exception propagate aborts the scan; the caller's use{} closes
+                // the whole ZipInputStream and releases the deflater.
+                val entryBytes = readBytesLimited(zipInput, MAX_ENTRY_BYTES, entry.name)
+                totalUncompressed += entryBytes.size
+                checkTotalAndCount(totalUncompressed, entryCount)
+                val path = normalizePath(entry.name)
+                if (path != null) {
+                    files[path] = entryBytes
                 }
-            } finally {
-                zipInput.closeEntry()
             }
+            zipInput.closeEntry()
         }
         return files
     }
 
     /**
-     * A single entry returned by the GitHub Contents API: either a file (with a
-     * non-blank [downloadUrl]) or a directory. [path] is the repo-relative path.
+     * A single entry returned by the GitHub Contents API. [type] preserves the API's
+     * tri-state ("file", "dir", or anything else such as "submodule"/"symlink") so the
+     * walk can ignore unknown types instead of forcing them down the file path. [path]
+     * is the repo-relative path; [downloadUrl] is only meaningful for files.
      */
     data class GitHubEntry(
         val path: String,
-        val isDir: Boolean,
+        val type: String,
         val downloadUrl: String?,
     )
 
@@ -144,15 +152,25 @@ internal object SkillImportLimits {
         }
         val entries = fetchDir(dirPath) ?: return false
         for (entry in entries) {
+            // Preserve the GitHub Contents API tri-state: only "file" and "dir" are
+            // handled. Other types (submodule, symlink) are silently skipped, exactly
+            // as the pre-limit code did — a repo containing a submodule (download_url
+            // null) must still import, and symlinks must not be downloaded.
             val relativePath = entry.path.removePrefix("$basePath/").removePrefix(basePath)
-            visited[0]++
-            checkTotalAndCount(currentTotal = 0, currentCount = visited[0])
-            if (entry.isDir) {
-                val ok = traverseGitHubTree(entry.path, basePath, result, visited, depth + 1, fetchDir)
-                if (!ok) return false
-            } else {
-                val downloadUrl = entry.downloadUrl?.takeIf { it.isNotBlank() } ?: return false
-                result.add(relativePath to downloadUrl)
+            when (entry.type) {
+                "dir" -> {
+                    visited[0]++
+                    checkTotalAndCount(currentTotal = 0, currentCount = visited[0])
+                    val ok = traverseGitHubTree(entry.path, basePath, result, visited, depth + 1, fetchDir)
+                    if (!ok) return false
+                }
+
+                "file" -> {
+                    visited[0]++
+                    checkTotalAndCount(currentTotal = 0, currentCount = visited[0])
+                    val downloadUrl = entry.downloadUrl?.takeIf { it.isNotBlank() } ?: return false
+                    result.add(relativePath to downloadUrl)
+                }
             }
         }
         return true
