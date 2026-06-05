@@ -30,6 +30,24 @@ fun redactHeaders(headers: Headers): Map<String, String> {
     }
 }
 
+// AC #1 (issue #97): in-app request logs must NOT store raw AI prompts or document
+// contents by default. This OkHttp client carries only AI-provider traffic, so every
+// request body is an AI request body — user prompts, document text, base64 image/audio
+// payloads, and provider-specific secret fields. Storing the body (even truncated, even
+// with known secret fields stripped) still persists raw prompt/document text into the
+// in-memory log buffer that LogPage renders and lets the user copy out. Truncation is not
+// equivalent to "do not store raw prompts", and field-name redaction cannot cover secrets
+// nested in objects/arrays/numbers. So we store safe metadata only — never body content.
+//
+// Per-field redaction + truncation is intentionally not offered behind an opt-in here:
+// that is a separate "verbose logging" product decision outside issue #97's scope, and
+// keeping a single safe default avoids a fail-open path on unrecognized self-hosted hosts.
+fun bodyMetadataForLog(byteCount: Long?, contentType: String?): String? {
+    if (byteCount == null) return null
+    val type = contentType?.takeIf { it.isNotBlank() } ?: "unknown"
+    return "<redacted request body: $byteCount bytes, content-type=$type>"
+}
+
 fun redactUrlSecrets(url: String): String {
     val httpUrl = url.toHttpUrlOrNull() ?: return url
     if (httpUrl.queryParameterNames.none { it.lowercase() in SECRET_QUERY_PARAMS }) return url
@@ -50,9 +68,13 @@ class RequestLoggingInterceptor : Interceptor {
         val requestHeaders = redactHeaders(request.headers)
         val requestUrl = redactUrlSecrets(request.url.toString())
         val requestBody = request.body?.let { body ->
-            val buffer = Buffer()
-            body.writeTo(buffer)
-            buffer.readUtf8()
+            // contentLength() can be -1 (unknown, e.g. streamed); fall back to writing the
+            // body to a counting buffer so the size is still reported without retaining it.
+            val byteCount = body.contentLength().takeIf { it >= 0 } ?: Buffer().use { buffer ->
+                body.writeTo(buffer)
+                buffer.size
+            }
+            bodyMetadataForLog(byteCount, body.contentType()?.toString())
         }
 
         val response: Response
