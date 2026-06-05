@@ -3,7 +3,6 @@ package me.rerere.rikkahub.data.ai
 import okhttp3.Headers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -66,7 +65,7 @@ class RequestLoggingInterceptorRedactionTest {
         """.trimIndent()
 
         // The interceptor only has byte size + content type, never the body string.
-        val meta = bodyMetadataForLog(byteCount = body.toByteArray().size.toLong(), contentType = "application/json")!!
+        val meta = bodyMetadataForLog(byteCount = body.toByteArray().size.toLong(), contentType = "application/json")
 
         // No raw prompt, document, base64, or nested/array secret survives.
         listOf(
@@ -84,14 +83,19 @@ class RequestLoggingInterceptorRedactionTest {
 
     @Test
     fun `bodyMetadataForLog reports size and falls back to unknown content type`() {
-        val meta = bodyMetadataForLog(byteCount = 1234L, contentType = null)!!
+        val meta = bodyMetadataForLog(byteCount = 1234L, contentType = null)
 
         assertTrue(meta.contains("1234"))
         assertTrue(meta.contains("unknown"))
     }
 
     @Test
-    fun `bodyMetadataForLog handles absent body`() {
-        assertNull(bodyMetadataForLog(byteCount = null, contentType = "application/json"))
+    fun `bodyMetadataForLog reports unknown bytes when length is unavailable`() {
+        // A streamed (unknown-length) body must still produce metadata WITHOUT reading the
+        // body to measure it; size degrades to "unknown bytes", content-type is preserved.
+        val meta = bodyMetadataForLog(byteCount = null, contentType = "application/json")
+
+        assertTrue(meta.contains("unknown bytes"))
+        assertTrue(meta.contains("application/json"))
     }
 }

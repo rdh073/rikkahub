@@ -6,7 +6,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.Response
-import okio.Buffer
 
 const val REDACTED = "<redacted>"
 
@@ -42,10 +41,13 @@ fun redactHeaders(headers: Headers): Map<String, String> {
 // Per-field redaction + truncation is intentionally not offered behind an opt-in here:
 // that is a separate "verbose logging" product decision outside issue #97's scope, and
 // keeping a single safe default avoids a fail-open path on unrecognized self-hosted hosts.
-fun bodyMetadataForLog(byteCount: Long?, contentType: String?): String? {
-    if (byteCount == null) return null
+// Called only for a present request body. byteCount is the body's known content length, or
+// null when the length is unknown (e.g. streamed) — we report "unknown" rather than read the
+// body to measure it, because reading raw AI/document content back is exactly what AC #1 bans.
+fun bodyMetadataForLog(byteCount: Long?, contentType: String?): String {
+    val size = byteCount?.let { "$it bytes" } ?: "unknown bytes"
     val type = contentType?.takeIf { it.isNotBlank() } ?: "unknown"
-    return "<redacted request body: $byteCount bytes, content-type=$type>"
+    return "<redacted request body: $size, content-type=$type>"
 }
 
 fun redactUrlSecrets(url: String): String {
@@ -68,12 +70,11 @@ class RequestLoggingInterceptor : Interceptor {
         val requestHeaders = redactHeaders(request.headers)
         val requestUrl = redactUrlSecrets(request.url.toString())
         val requestBody = request.body?.let { body ->
-            // contentLength() can be -1 (unknown, e.g. streamed); fall back to writing the
-            // body to a counting buffer so the size is still reported without retaining it.
-            val byteCount = body.contentLength().takeIf { it >= 0 } ?: Buffer().use { buffer ->
-                body.writeTo(buffer)
-                buffer.size
-            }
+            // contentLength() can be -1 (unknown, e.g. streamed). NEVER call body.writeTo()
+            // here: a one-shot source would be exhausted before chain.proceed() sends it,
+            // and writing the body into a buffer reintroduces raw prompt/document retention
+            // that AC #1 forbids (see bodyMetadataForLog doc above). Report "unknown" size.
+            val byteCount = body.contentLength().takeIf { it >= 0 }
             bodyMetadataForLog(byteCount, body.contentType()?.toString())
         }
 
