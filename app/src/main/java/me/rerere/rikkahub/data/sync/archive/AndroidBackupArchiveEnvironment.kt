@@ -30,8 +30,10 @@ class AndroidBackupArchiveEnvironment(
             val migratedJson = SettingsJsonMigrator.migrate(json)
             val settings = this.json.decodeFromString<Settings>(migratedJson)
             settingsStore.update(settings)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            throw Exception("Failed to restore settings: ${e.message}")
+            throw Exception("Failed to restore settings", e)
         }
     }
 }

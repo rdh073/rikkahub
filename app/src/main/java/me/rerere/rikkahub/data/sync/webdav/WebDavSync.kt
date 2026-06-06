@@ -131,6 +131,8 @@ class WebDavSync(
         try {
             restorer.restore(file, config.toArchiveSelection())
             Log.i(TAG, "restoreFromLocalFile: Restore completed successfully")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "restoreFromLocalFile: Failed to restore from local file", e)
             throw Exception("Restore failed: ${e.message}")

@@ -132,6 +132,86 @@ class BackupArchiveTest {
         }
     }
 
+    // --- NUL-byte entry must be skipped, not abort the whole restore ---
+
+    @Test
+    fun `isSafeEntryName rejects NUL and control characters`() {
+        assertFalse(SafeZipPaths.isSafeEntryName("upload/evil\u0000.txt"))
+        assertFalse(SafeZipPaths.isSafeEntryName("upload/evil\u0007.txt"))
+    }
+
+    @Test
+    fun `resolveChild returns null for NUL entry instead of throwing`() {
+        val root = Files.createTempDirectory("nulroot").toFile()
+        try {
+            assertNull(SafeZipPaths.resolveChild(root, "evil\u0000.txt"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `restore skips NUL-byte upload entry and still restores sibling legit entry`() = runBlocking {
+        val temp = Files.createTempDirectory("nulrestore").toFile()
+        try {
+            val env = FakeBackupArchiveEnvironment(temp)
+            val zip = File(temp, "backup.zip")
+            zipWith(
+                zip,
+                listOf(
+                    "${FileFolders.UPLOAD}/evil\u0000.txt" to "pwned".toByteArray(),
+                    "${FileFolders.UPLOAD}/ok.txt" to "good".toByteArray(),
+                ),
+            )
+
+            // Must not throw: a single hostile entry cannot abort the restore.
+            val report = BackupArchiveRestorer(env).restore(
+                zip,
+                BackupArchiveSelection(includeDatabase = false, includeFiles = true),
+            )
+
+            val uploadRoot = File(env.filesDir, FileFolders.UPLOAD)
+            assertTrue(File(uploadRoot, "ok.txt").exists())
+            assertEquals("good", File(uploadRoot, "ok.txt").readText())
+
+            assertTrue(report.skipped.contains("${FileFolders.UPLOAD}/evil\u0000.txt"))
+            assertTrue(report.restored.contains("${FileFolders.UPLOAD}/ok.txt"))
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `restore skips NUL-byte skill entry and still restores sibling legit entry`() = runBlocking {
+        val temp = Files.createTempDirectory("nulskillrestore").toFile()
+        try {
+            val env = FakeBackupArchiveEnvironment(temp)
+            val zip = File(temp, "backup.zip")
+            zipWith(
+                zip,
+                listOf(
+                    "${FileFolders.SKILLS}/foo/evil\u0000.txt" to "pwned".toByteArray(),
+                    "${FileFolders.SKILLS}/foo/SKILL.md" to "good".toByteArray(),
+                ),
+            )
+
+            // Must not throw: a NUL-byte skill entry cannot abort the restore.
+            val report = BackupArchiveRestorer(env).restore(
+                zip,
+                BackupArchiveSelection(includeDatabase = false, includeFiles = true),
+            )
+
+            val skillDir = File(env.filesDir, "${FileFolders.SKILLS}/foo")
+            assertTrue(File(skillDir, "SKILL.md").exists())
+            assertEquals("good", File(skillDir, "SKILL.md").readText())
+
+            assertTrue(report.skipped.contains("${FileFolders.SKILLS}/foo/evil\u0000.txt"))
+            assertTrue(report.restored.contains("${FileFolders.SKILLS}/foo/SKILL.md"))
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
     // --- Builder includes expected entries by selection (locks format) ---
 
     @Test
