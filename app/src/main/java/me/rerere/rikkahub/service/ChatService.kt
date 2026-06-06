@@ -124,6 +124,22 @@ internal fun shouldRenewWakeLock(
     intervalMs: Long = WAKE_LOCK_RENEW_INTERVAL_MS,
 ): Boolean = now - lastRenewAt >= intervalMs
 
+// 流式 UI 状态合并窗口：约两帧（60Hz）。远大于单 token 间隔（合并掉逐 token 的整 Conversation
+// StateFlow 重写，避免聊天页每 token 全量重组），又小到足以保持"实时"观感。落在 issue #108 建议的
+// 16-50ms 区间内。仅决定"何时"把已合并好的状态推给 UI，绝不改变合并出的规范状态本身——最终值总会被强制刷新。
+internal const val STREAMING_UI_COALESCE_INTERVAL_MS = 32L
+
+/**
+ * 纯函数：给定上次发布时刻与当前时刻，判断是否应把流式合并状态写入 UI StateFlow。抽出以便 JVM 单测
+ * （无 Android/协程依赖），与 [shouldRenewWakeLock] 同构。
+ * [lastPublishAt] 为 0 表示尚未发布过——首个 chunk 立即发布，使首 token 无启动延迟地显示。
+ */
+internal fun shouldPublishStreamingUpdate(
+    lastPublishAt: Long,
+    now: Long,
+    intervalMs: Long = STREAMING_UI_COALESCE_INTERVAL_MS,
+): Boolean = now - lastPublishAt >= intervalMs
+
 /**
  * 纯函数：判断是否应在下一次请求前自动压缩对话历史。抽出以便 JVM 单测（无 Android/网络/模型依赖）。
  *
@@ -615,6 +631,12 @@ class ChatService(
 
             // start generating
             val session = getOrCreateSession(conversationId)
+
+            // 流式 UI 合并状态：每个 chunk 都算出规范的合并 Conversation 并记住它，但按时间窗口节流
+            // 写入 StateFlow（见 shouldPublishStreamingUpdate）。lastPublishedConversation 持有最后一次
+            // 算出的合并值，供 onCompletion 末尾强制刷新，确保最终状态永不被节流丢弃。
+            var lastPublishedConversation: Conversation? = null
+            var lastPublishAt = 0L
             generationHandler.generateText(
                 settings = settings,
                 model = model,
@@ -673,6 +695,13 @@ class ChatService(
                 // stopForeground(STOP_FOREGROUND_REMOVE) 唯一负责，这里不再 per-conversation 取消，
                 // 否则多会话并发时单个会话结束会误删其它会话仍在使用的共享常驻通知。
 
+                // 强制刷新被节流丢弃的最终合并状态：流式发布按窗口节流（shouldPublishStreamingUpdate），
+                // 末个 chunk 可能落在窗口内而未写 StateFlow。这里在任何终止路径（正常结束/工具暂停/取消）
+                // 把最后一次算出的合并值刷入 StateFlow，使下面读 getConversationFlow().value 的定型保存、
+                // .onSuccess 的保存、以及通知预览都看到精确的最终状态。仅写内存 StateFlow（非可取消），
+                // 故无需 NonCancellable；写库由下方块负责。
+                lastPublishedConversation?.let { updateConversationStateOnly(conversationId, it) }
+
                 // 可能被取消了，或者意外结束，兜底更新。
                 // 中断的 assistant turn 在这里第一次被定型；必须把清洗后的有效状态
                 // 持久化（saveConversation），否则 .onSuccess 没跑时下一次发送会 400。
@@ -701,9 +730,16 @@ class ChatService(
                         // 跨多段子-120s SSE）在息屏下不会在 15 分钟处误超时停机。按时间节流，避免逐 token IPC。
                         foregroundCoordinator.onStreamingProgress()
 
+                        // 每个 chunk 都重新算出规范合并状态（chunk.messages 是累计全量、按 id 合并，
+                        // 见 GenerationHandler；故跳过中间写入不影响合并正确性）并记住，但仅按窗口节流写 UI。
                         val updatedConversation = getConversationFlow(conversationId).value
                             .updateCurrentMessages(chunk.messages)
-                        updateConversationStateOnly(conversationId, updatedConversation)
+                        lastPublishedConversation = updatedConversation
+                        val now = System.currentTimeMillis()
+                        if (shouldPublishStreamingUpdate(lastPublishAt, now)) {
+                            lastPublishAt = now
+                            updateConversationStateOnly(conversationId, updatedConversation)
+                        }
 
                         // 如果应用不在前台，发送 Live Update 通知
                         if (!isForeground.value && settings.displaySetting.enableNotificationOnMessageGeneration && settings.displaySetting.enableLiveUpdateNotification) {
