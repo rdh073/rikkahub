@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import androidx.core.content.edit
 import me.rerere.common.android.SensitiveLogPolicy
+import java.util.Collections
+import java.util.IdentityHashMap
 
 private const val TAG = "CrashHandler"
 private const val PREFS_NAME = "crash_handler"
@@ -58,17 +60,31 @@ object CrashHandler {
     internal fun buildRedactedStackTrace(threadName: String, throwable: Throwable): String {
         return buildString {
             appendLine("Thread: $threadName")
-            appendThrowable(throwable, prefix = "Exception")
+            // Cause chains can be cyclic (Throwable.initCause only rejects self-causation,
+            // so an A<->B cycle is constructible). Track visited throwables by identity —
+            // the same guard Throwable.printStackTrace uses ("dejaVu") — so a cyclic cause
+            // chain terminates instead of recursing to StackOverflowError. This handler is
+            // the last line of defense; it must not itself crash.
+            val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
+            appendThrowable(throwable, prefix = "Exception", seen = seen)
         }.take(MAX_STACKTRACE_LENGTH)
     }
 
-    private fun StringBuilder.appendThrowable(throwable: Throwable, prefix: String) {
+    private fun StringBuilder.appendThrowable(
+        throwable: Throwable,
+        prefix: String,
+        seen: MutableSet<Throwable>,
+    ) {
+        if (!seen.add(throwable)) {
+            appendLine("$prefix: [CIRCULAR REFERENCE]")
+            return
+        }
         appendLine("$prefix: ${SensitiveLogPolicy.safeExceptionMessage(throwable)}")
         throwable.stackTrace.forEach { frame ->
             appendLine("\tat $frame")
         }
         throwable.cause?.let { cause ->
-            appendThrowable(cause, prefix = "Caused by")
+            appendThrowable(cause, prefix = "Caused by", seen = seen)
         }
     }
 }

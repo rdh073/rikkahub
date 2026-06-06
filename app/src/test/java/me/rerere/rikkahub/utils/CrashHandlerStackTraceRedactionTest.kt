@@ -40,4 +40,24 @@ class CrashHandlerStackTraceRedactionTest {
         assertTrue("cause class identity kept", trace.contains("IllegalStateException"))
         assertTrue("cause section labelled", trace.contains("Caused by"))
     }
+
+    // Regression guard: a cyclic cause chain (A<->B, constructible because
+    // Throwable.initCause only rejects self-causation) must NOT infinite-recurse.
+    // The previous appendThrowable had no cycle guard, so this input blew the stack
+    // (StackOverflowError) INSIDE the uncaught-exception handler — the last line of
+    // defense — aborting markCrashed and the chained defaultHandler. take(MAX) does
+    // not help: buildString materializes the full string before take() runs.
+    @Test(timeout = 5_000)
+    fun `cyclic cause chain terminates instead of overflowing the stack`() {
+        val a = RuntimeException("a")
+        val b = IllegalStateException("b")
+        a.initCause(b)
+        b.initCause(a) // A -> B -> A cycle
+
+        val trace = CrashHandler.buildRedactedStackTrace("main", a)
+
+        assertTrue("cycle must be marked, not recursed", trace.contains("[CIRCULAR REFERENCE]"))
+        assertTrue("first exception still rendered", trace.contains("RuntimeException"))
+        assertTrue("second exception still rendered", trace.contains("IllegalStateException"))
+    }
 }
