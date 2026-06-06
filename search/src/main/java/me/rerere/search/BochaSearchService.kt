@@ -78,8 +78,8 @@ object BochaSearchService : SearchService<SearchServiceOptions.BochaOptions> {
                     json.decodeFromString<BochaResponse>(bodyRaw)
                 }.onFailure {
                     it.printStackTrace()
-                    println(bodyRaw)
-                    error("Failed to decode response: $bodyRaw")
+                    println("Bocha decode failed")
+                    error("Failed to decode response: ${it.message}")
                 }.getOrThrow()
 
                 if (bochaResponse.code != 200) {
@@ -98,7 +98,7 @@ object BochaSearchService : SearchService<SearchServiceOptions.BochaOptions> {
                     )
                 )
             } else {
-                println(response.body.string())
+                println("Bocha request failed: code=${response.code}")
                 error("response failed #${response.code}")
             }
         }

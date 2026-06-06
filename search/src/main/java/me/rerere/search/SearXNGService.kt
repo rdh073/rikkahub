@@ -85,7 +85,7 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
                 }
                 .build()
 
-            Log.i(TAG, "search: $url")
+            Log.i(TAG, "search: host=${url.host}")
 
             val response = httpClient.newCall(request).await()
             if (response.isSuccessful) {
@@ -94,7 +94,7 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
                     json.decodeFromString<SearXNGResponse>(bodyRaw)
                 }.onFailure {
                     it.printStackTrace()
-                    println("SearXNG response body: $bodyRaw")
+                    Log.w(TAG, "SearXNG decode failed: service=SearXNG")
                     error("Failed to decode SearXNG response: ${it.message}")
                 }.getOrThrow()
 
@@ -111,8 +111,7 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
 
                 return@withContext Result.success(SearchResult(items = items))
             } else {
-                val errorBody = response.body?.string()
-                println("SearXNG API error: ${response.code} - $errorBody")
+                Log.w(TAG, "SearXNG request failed: code=${response.code}")
                 error("SearXNG request failed with status ${response.code}")
             }
         }

@@ -90,7 +90,7 @@ object GrokSearchService : SearchService<SearchServiceOptions.GrokOptions> {
                 put("store", JsonPrimitive(false))
             }
 
-            Log.i(TAG, "search: $query")
+            Log.i(TAG, "search: service=Grok")
 
             val request = Request.Builder()
                 .url(serviceOptions.customUrl)

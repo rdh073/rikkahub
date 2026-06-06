@@ -61,7 +61,7 @@ object RikkaHubSearchService : SearchService<SearchServiceOptions.RikkaHubOption
                 .addHeader("Content-Type", "application/json")
                 .build()
 
-            Log.i(TAG, "search: $query")
+            Log.i(TAG, "search: service=RikkaHub")
 
             val response = httpClient.newCall(request).await()
             if (response.isSuccessful) {

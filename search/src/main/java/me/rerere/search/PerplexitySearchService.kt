@@ -81,7 +81,7 @@ object PerplexitySearchService : SearchService<SearchServiceOptions.PerplexityOp
                 }
             }
 
-            Log.i(TAG, "search: $body")
+            Log.i(TAG, "search: service=Perplexity")
 
             val request = Request.Builder()
                 .url(PERPLEXITY_ENDPOINT)

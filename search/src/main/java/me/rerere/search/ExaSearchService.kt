@@ -92,8 +92,8 @@ object ExaSearchService : SearchService<SearchServiceOptions.ExaOptions> {
                     json.decodeFromString<ExaData>(bodyRaw)
                 }.onFailure {
                     it.printStackTrace()
-                    println(bodyRaw)
-                    error("Failed to decode response: $bodyRaw")
+                    println("Exa decode failed")
+                    error("Failed to decode response: ${it.message}")
                 }.getOrThrow()
 
                 return@withContext Result.success(
@@ -108,7 +108,7 @@ object ExaSearchService : SearchService<SearchServiceOptions.ExaOptions> {
                         }
                     ))
             } else {
-                println(response.body.string())
+                println("Exa request failed: code=${response.code}")
                 error("response failed #${response.code}")
             }
         }

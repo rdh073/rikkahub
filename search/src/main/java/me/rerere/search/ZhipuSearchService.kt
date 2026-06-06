@@ -77,8 +77,8 @@ object ZhipuSearchService : SearchService<SearchServiceOptions.ZhipuOptions> {
                     json.decodeFromString<ZhipuDto>(bodyRaw)
                 }.onFailure {
                     it.printStackTrace()
-                    println(bodyRaw)
-                    error("Failed to decode response: $bodyRaw")
+                    println("Zhipu decode failed")
+                    error("Failed to decode response: ${it.message}")
                 }.getOrThrow()
 
                 return@withContext Result.success(
@@ -92,7 +92,7 @@ object ZhipuSearchService : SearchService<SearchServiceOptions.ZhipuOptions> {
                         }
                     ))
             } else {
-                println(response.body?.string())
+                println("Zhipu request failed: code=${response.code}")
                 error("response failed #${response.code}")
             }
         }
