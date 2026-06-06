@@ -141,6 +141,19 @@ internal fun shouldPublishStreamingUpdate(
 ): Boolean = now - lastPublishAt >= intervalMs
 
 /**
+ * 纯函数：流终止时是否需要强制刷新最后一次合并的 chunk。抽出以便 JVM 单测直接覆盖 #108 的核心修复
+ * （onCompletion 的强制刷新），删掉生产代码的刷新调用会令此函数的单测变红。
+ *
+ * 仅当存在已记住的最后一帧（[hasLastMessages]）且它尚未被节流窗口发布出去（[lastChunkPublished] 为
+ * false）时才需刷新——否则末帧已经在 UI StateFlow 里，再写一次纯属重复。慢流（每帧都越过窗口）的末帧
+ * 已发布，返回 false，不产生重复写。
+ */
+internal fun shouldFlushFinalStreamingUpdate(
+    hasLastMessages: Boolean,
+    lastChunkPublished: Boolean,
+): Boolean = hasLastMessages && !lastChunkPublished
+
+/**
  * 纯函数：判断是否应在下一次请求前自动压缩对话历史。抽出以便 JVM 单测（无 Android/网络/模型依赖）。
  *
  * 仅当以下全部成立才触发：
@@ -632,10 +645,14 @@ class ChatService(
             // start generating
             val session = getOrCreateSession(conversationId)
 
-            // 流式 UI 合并状态：每个 chunk 都算出规范的合并 Conversation 并记住它，但按时间窗口节流
-            // 写入 StateFlow（见 shouldPublishStreamingUpdate）。lastPublishedConversation 持有最后一次
-            // 算出的合并值，供 onCompletion 末尾强制刷新，确保最终状态永不被节流丢弃。
-            var lastPublishedConversation: Conversation? = null
+            // 流式 UI 合并状态：每个 chunk 携带累计全量 messages（按 id 合并，见 GenerationHandler），
+            // 按时间窗口节流写入 StateFlow（见 shouldPublishStreamingUpdate）。这里只记住最后一帧的
+            // chunk.messages（而非整个合并出的 Conversation 快照），供 onCompletion 末尾按当时的 live
+            // StateFlow 重新合并刷新——这样一次并发的 UI 写入（收藏切换/编辑/标题等非消息字段，
+            // updateCurrentMessages 按节点 id 合并只动 messages，保留 isFavorite 等）不会被一个陈旧的整
+            // Conversation 快照覆盖（last-writer-wins → idempotent merge-onto-current）。
+            var lastChunkMessages: List<UIMessage>? = null
+            var lastChunkPublished = false
             var lastPublishAt = 0L
             generationHandler.generateText(
                 settings = settings,
@@ -697,10 +714,16 @@ class ChatService(
 
                 // 强制刷新被节流丢弃的最终合并状态：流式发布按窗口节流（shouldPublishStreamingUpdate），
                 // 末个 chunk 可能落在窗口内而未写 StateFlow。这里在任何终止路径（正常结束/工具暂停/取消）
-                // 把最后一次算出的合并值刷入 StateFlow，使下面读 getConversationFlow().value 的定型保存、
-                // .onSuccess 的保存、以及通知预览都看到精确的最终状态。仅写内存 StateFlow（非可取消），
-                // 故无需 NonCancellable；写库由下方块负责。
-                lastPublishedConversation?.let { updateConversationStateOnly(conversationId, it) }
+                // 把最后一帧 chunk.messages 重新合并进**当时的** live StateFlow（而非写回一个陈旧的整
+                // Conversation 快照），使下面读 getConversationFlow().value 的定型保存、.onSuccess 的保存、
+                // 以及通知预览都看到精确的最终状态，且不覆盖流式期间发生的并发 UI 写入。仅写内存
+                // StateFlow（非可取消），故无需 NonCancellable；写库由下方块负责。
+                if (shouldFlushFinalStreamingUpdate(lastChunkMessages != null, lastChunkPublished)) {
+                    lastChunkMessages?.let { messages ->
+                        val merged = getConversationFlow(conversationId).value.updateCurrentMessages(messages)
+                        updateConversationStateOnly(conversationId, merged)
+                    }
+                }
 
                 // 可能被取消了，或者意外结束，兜底更新。
                 // 中断的 assistant turn 在这里第一次被定型；必须把清洗后的有效状态
@@ -730,15 +753,18 @@ class ChatService(
                         // 跨多段子-120s SSE）在息屏下不会在 15 分钟处误超时停机。按时间节流，避免逐 token IPC。
                         foregroundCoordinator.onStreamingProgress()
 
-                        // 每个 chunk 都重新算出规范合并状态（chunk.messages 是累计全量、按 id 合并，
-                        // 见 GenerationHandler；故跳过中间写入不影响合并正确性）并记住，但仅按窗口节流写 UI。
-                        val updatedConversation = getConversationFlow(conversationId).value
-                            .updateCurrentMessages(chunk.messages)
-                        lastPublishedConversation = updatedConversation
+                        // 记住最后一帧 chunk.messages（累计全量、按 id 合并，见 GenerationHandler；故跳过
+                        // 中间写入不影响合并正确性），按窗口节流时把它合并进 live StateFlow 写 UI。
+                        lastChunkMessages = chunk.messages
                         val now = System.currentTimeMillis()
                         if (shouldPublishStreamingUpdate(lastPublishAt, now)) {
                             lastPublishAt = now
+                            lastChunkPublished = true
+                            val updatedConversation = getConversationFlow(conversationId).value
+                                .updateCurrentMessages(chunk.messages)
                             updateConversationStateOnly(conversationId, updatedConversation)
+                        } else {
+                            lastChunkPublished = false
                         }
 
                         // 如果应用不在前台，发送 Live Update 通知

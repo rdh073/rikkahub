@@ -16,38 +16,47 @@ import org.junit.Test
  * work), yet the final merged state must NEVER be dropped. The canonical merged conversation is
  * computed per chunk regardless; only the StateFlow publish is gated, with a mandatory final flush.
  *
- * The model below mirrors the production loop in [ChatService.handleMessageComplete]: a publish gate
- * over (clock, lastPublishAt) plus a mandatory flush of the last remembered value after the stream
- * ends. The "naive sample" model (gate only, no flush) is included to prove why the issue's named
- * anti-pattern drops the final state.
+ * The replay model below drives BOTH production pure functions exactly as
+ * [ChatService.handleMessageComplete] does: the per-chunk publish gate [shouldPublishStreamingUpdate]
+ * AND the terminal flush decision [shouldFlushFinalStreamingUpdate]. Because the model calls the real
+ * flush predicate (not a hand-rolled `lastPublishedValue != v` copy), deleting or weakening the
+ * production flush — e.g. making it always-false or dropping the `!lastChunkPublished` guard — turns
+ * these tests red. The "naive sample" model (gate only, no flush) is included to prove why the issue's
+ * named anti-pattern drops the final state.
  */
 class StreamingUiCoalesceTest {
 
     private val interval = STREAMING_UI_COALESCE_INTERVAL_MS
 
     /**
-     * Replays a chunk stream through the production gate+flush logic and records every UI publish.
-     * [times] is the per-chunk arrival clock (epoch-style millis); [value] is the merged value the
-     * chunk would carry (here an Int standing in for the merged Conversation).
+     * Replays a chunk stream through the production gate ([shouldPublishStreamingUpdate]) plus the
+     * production terminal flush predicate ([shouldFlushFinalStreamingUpdate]) and records every UI
+     * publish. [times] is the per-chunk arrival clock (epoch-style millis); [values] is the merged
+     * value the chunk would carry (here an Int standing in for the merged Conversation).
+     *
+     * Mirrors the production loop variables 1:1: lastChunkMessages -> lastValue,
+     * lastChunkPublished -> lastChunkPublished.
      */
     private fun publishesWithFlush(times: List<Long>, values: List<Int>): List<Int> {
         require(times.size == values.size)
         val published = mutableListOf<Int>()
         var lastPublishAt = 0L
         var lastValue: Int? = null
-        var lastPublishedValue: Int? = null
+        var lastChunkPublished = false
         times.forEachIndexed { i, now ->
             val v = values[i]
             lastValue = v // canonical merged value is remembered every chunk
             if (shouldPublishStreamingUpdate(lastPublishAt, now)) {
                 lastPublishAt = now
-                lastPublishedValue = v
+                lastChunkPublished = true
                 published.add(v)
+            } else {
+                lastChunkPublished = false
             }
         }
-        // Mandatory final flush: publish the last remembered value if it was not the last published.
-        lastValue?.let { v ->
-            if (lastPublishedValue != v) published.add(v)
+        // Terminal flush, gated by the production predicate (not a hand-rolled comparison).
+        if (shouldFlushFinalStreamingUpdate(lastValue != null, lastChunkPublished)) {
+            lastValue?.let { published.add(it) }
         }
         return published
     }
@@ -154,5 +163,28 @@ class StreamingUiCoalesceTest {
     fun `coalesce window sits in the issue's suggested 16-50 ms band`() {
         // The window must be small enough to feel real-time yet large enough to cut per-token writes.
         assertTrue(STREAMING_UI_COALESCE_INTERVAL_MS in 16L..50L)
+    }
+
+    // ---- Terminal flush decision: directly covers the #108 fix (onCompletion force-flush) ----
+
+    @Test
+    fun `flushes when the last chunk was throttled (not yet published)`() {
+        // The bug to guard: a final chunk that landed inside the throttle window was remembered but
+        // never written to the StateFlow. The terminal flush MUST fire so the final state is not lost.
+        assertTrue(shouldFlushFinalStreamingUpdate(hasLastMessages = true, lastChunkPublished = false))
+    }
+
+    @Test
+    fun `does not flush when the last chunk was already published`() {
+        // Slow stream / wide spacing: the final chunk crossed the window and was already published.
+        // Re-flushing would be a redundant duplicate StateFlow write — must not fire.
+        assertFalse(shouldFlushFinalStreamingUpdate(hasLastMessages = true, lastChunkPublished = true))
+    }
+
+    @Test
+    fun `does not flush when no chunk was ever received`() {
+        // Empty stream (immediate cancel / no tokens): nothing remembered, nothing to flush.
+        assertFalse(shouldFlushFinalStreamingUpdate(hasLastMessages = false, lastChunkPublished = false))
+        assertFalse(shouldFlushFinalStreamingUpdate(hasLastMessages = false, lastChunkPublished = true))
     }
 }
