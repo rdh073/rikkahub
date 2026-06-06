@@ -151,7 +151,12 @@ class RoomVectorStore(
                 // real number, so a descending sort would put it first, and +Infinity also slips past
                 // the minScore `>=` filter. Drop such rows — the chunk row stays in Room untouched.
                 if (!score.isFinite()) return@forEach
-                if (request.minScore?.let { score < it } == true) return@forEach
+                // Mirror the old `.filter { score >= minScore }` exactly, including its NaN edge:
+                // a NaN minScore makes `score >= minScore` false for every row, so all rows are
+                // dropped. Writing the negated form `score < minScore` would instead KEEP every row
+                // (`score < NaN` is always false), flipping reject-all to keep-all and breaking the
+                // stated behavior-preserving contract.
+                if (request.minScore?.let { !(score >= it) } == true) return@forEach
                 candidates.add(Scored(chunk, score, index++))
             }
 
