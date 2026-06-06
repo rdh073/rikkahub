@@ -103,7 +103,9 @@ class MiniMaxTTSProvider : TTSProvider<TTSProviderSetting.MiniMax> {
                         )
                         hasEmittedAudio = true
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to process audio chunk", e)
+                        // Issue #99: the throwable message embeds a snippet of the SSE
+                        // payload (the TTS audio hex), so log the class only.
+                        Log.e(TAG, "Failed to process audio chunk: ${e::class.simpleName}")
                     }
                 }
 

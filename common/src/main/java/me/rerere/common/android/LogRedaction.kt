@@ -15,3 +15,12 @@ fun redactAndTruncate(body: String?): String {
     if (body.isNullOrBlank()) return "<no body>"
     return "<redacted body: ${body.length} chars>"
 }
+
+// Issue #99: a decode failure's throwable message is NOT safe to log. kotlinx-
+// serialization's JsonDecodingException embeds a snippet of the offending JSON input
+// ("... JSON input: <snippet>"), so interpolating throwable.message re-leaks the very
+// response body the redaction policy exists to keep out of logs. Surface the exception
+// class only — enough to distinguish a parse failure from other errors, with no input.
+fun redactDecodeError(throwable: Throwable): String {
+    return throwable::class.simpleName ?: "decode failed"
+}

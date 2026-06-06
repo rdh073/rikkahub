@@ -13,6 +13,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
+import me.rerere.common.android.redactDecodeError
 import me.rerere.search.SearchResult.SearchResultItem
 import me.rerere.search.SearchService.Companion.httpClient
 import me.rerere.search.SearchService.Companion.json
@@ -87,32 +88,32 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
 
             Log.i(TAG, "search: host=${url.host}")
 
-            val response = httpClient.newCall(request).await()
-            if (response.isSuccessful) {
-                val bodyRaw = response.body.string()
-                val searchResponse = runCatching {
-                    json.decodeFromString<SearXNGResponse>(bodyRaw)
-                }.onFailure {
-                    it.printStackTrace()
-                    Log.w(TAG, "SearXNG decode failed: service=SearXNG")
-                    error("Failed to decode SearXNG response: ${it.message}")
-                }.getOrThrow()
+            httpClient.newCall(request).await().use { response ->
+                if (response.isSuccessful) {
+                    val bodyRaw = response.body.string()
+                    val searchResponse = runCatching {
+                        json.decodeFromString<SearXNGResponse>(bodyRaw)
+                    }.onFailure {
+                        Log.w(TAG, "SearXNG decode failed: ${redactDecodeError(it)}")
+                        error("Failed to decode SearXNG response: ${redactDecodeError(it)}")
+                    }.getOrThrow()
 
-                // 转换为标准格式，取前 N 个结果
-                val items = searchResponse.results
-                    .take(commonOptions.resultSize)
-                    .map { result ->
-                        SearchResultItem(
-                            title = result.title,
-                            url = result.url,
-                            text = result.content
-                        )
-                    }
+                    // 转换为标准格式，取前 N 个结果
+                    val items = searchResponse.results
+                        .take(commonOptions.resultSize)
+                        .map { result ->
+                            SearchResultItem(
+                                title = result.title,
+                                url = result.url,
+                                text = result.content
+                            )
+                        }
 
-                return@withContext Result.success(SearchResult(items = items))
-            } else {
-                Log.w(TAG, "SearXNG request failed: code=${response.code}")
-                error("SearXNG request failed with status ${response.code}")
+                    return@withContext Result.success(SearchResult(items = items))
+                } else {
+                    Log.w(TAG, "SearXNG request failed: code=${response.code}")
+                    error("SearXNG request failed with status ${response.code}")
+                }
             }
         }
     }
