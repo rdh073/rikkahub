@@ -5,7 +5,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -13,50 +12,65 @@ import org.junit.Test
 import java.io.ByteArrayOutputStream
 
 /**
- * Regression for #88: a file export/import must NOT be cancelled by leaving the screen.
+ * Regression for #88: a file export must NOT be cancelled by leaving the screen.
  *
- * The bug: [rememberExporter]/[rememberImporter] bound the write/read coroutine to
- * `rememberCoroutineScope()`, whose Job is cancelled on composition disposal. Navigating away
- * mid-export tore down that scope, so [writeExportBytes] never flushed and the user's chosen file
- * was left empty — silent data loss with no error surfaced.
+ * The bug: [rememberExporter] passed `rememberCoroutineScope()` to [ExporterState], so
+ * [ExporterState.writeToUri] launched the write as a CHILD of the composition scope. Navigating
+ * away mid-export cancelled that scope, the write never flushed, and the user's chosen file was left
+ * empty — silent data loss with no error surfaced.
  *
- * The fix moves the post-URI work onto the application-wide AppScope (SupervisorJob, outlives
- * composition). These tests pin the ownership invariant via the pure [writeExportBytes] seam so it
- * runs on the JVM (testDebugUnitTest) without a ContentResolver or Android.
+ * These tests drive the REAL production launch seam [launchOwnedWrite] — the exact path
+ * `writeToUri` now takes — to pin the scope-ownership invariant: a write launched on an
+ * AppScope-like owner survives caller cancellation, and a write launched on a caller-child owner
+ * does not. Revert `rememberExporter` to `rememberCoroutineScope()` and the owner it hands to
+ * `launchOwnedWrite` becomes a caller-child scope — the behaviour the first test proves is lossy.
+ *
+ * Runs on the JVM (testDebugUnitTest) without a ContentResolver or Android: the Android-coupled
+ * `openOutputStream` is supplied here as a plain [ByteArrayOutputStream] write action, while the
+ * scope-launch decision under test stays in production code.
  */
 class ExportHooksOwnershipTest {
 
-    private val content = "{\"hello\":\"world\"}"
+    private val content = "{\"hello\":\"world\"}".toByteArray()
 
-    /** Pre-fix model: write launched as a CHILD of the composition scope. Disposal loses the write. */
+    /**
+     * Pre-fix model: the owner IS the caller scope (what `rememberCoroutineScope()` yields). On
+     * navigation-away the composition scope is already cancelled by the time the write is launched
+     * onto it, so the production launcher schedules the IO onto a dead scope and the file stays
+     * empty. Cancelling before the launch (rather than racing a cancel against it) deterministically
+     * models disposal-then-write and pins the loss to the SCOPE choice, not to dispatcher timing.
+     */
     @Test
-    fun `write bound to caller scope is lost when that scope is cancelled`() = runBlocking {
-        val composition = CoroutineScope(Job() + Dispatchers.Default)
+    fun `write owned by the caller scope is lost when that scope is cancelled`() = runBlocking {
+        val caller = CoroutineScope(Job() + Dispatchers.Unconfined)
         val sink = ByteArrayOutputStream()
 
-        val writeJob = composition.launch { writeExportBytes(content, sink) }
-        composition.cancel() // user navigates away before the IO completes
+        caller.cancel() // user navigated away: the composition scope is already dead
+        val writeJob = launchOwnedWrite(caller, Dispatchers.Unconfined) { sink.write(content) }
         writeJob.join()
 
-        assertEquals("cancelled composition scope must drop the write", 0, sink.size())
+        assertEquals("caller-owned write must drop on caller cancellation", 0, sink.size())
     }
 
-    /** Post-fix model: write launched on an independent owner scope (AppScope stand-in). Survives. */
+    /**
+     * Post-fix model: the owner is an independent AppScope stand-in (SupervisorJob, outlives
+     * composition). Cancelling the caller that merely triggered the action does not touch it, so the
+     * write launched onto the live owner completes.
+     */
     @Test
-    fun `write launched on owner scope survives caller cancellation`() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default) // AppScope stand-in
-        val caller = CoroutineScope(Job() + Dispatchers.Default)
+    fun `write owned by AppScope survives caller cancellation`() = runBlocking {
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined) // AppScope stand-in
+        val caller = CoroutineScope(Job() + Dispatchers.Unconfined)
         val sink = ByteArrayOutputStream()
 
-        // The caller only triggers the work; the work's lifetime is the owner scope.
-        val ownerJob = owner.launch { writeExportBytes(content, sink) }
-        caller.launch { /* triggering UI action */ }
-        caller.cancel() // user navigates away
-        ownerJob.join()
+        caller.cancel() // user navigated away
+        // writeToUri launches on the injected AppScope; the caller only triggered it.
+        val writeJob = launchOwnedWrite(owner, Dispatchers.Unconfined) { sink.write(content) }
+        writeJob.join()
 
         assertArrayEquals(
-            "owner-scoped write must complete despite caller cancellation",
-            content.toByteArray(),
+            "AppScope-owned write must complete despite caller cancellation",
+            content,
             sink.toByteArray()
         )
     }

@@ -14,15 +14,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import me.rerere.rikkahub.AppScope
 import org.koin.compose.koinInject
 import java.io.File
-import java.io.OutputStream
 
 @Stable
 class ExporterState<T>(
@@ -67,24 +68,35 @@ class ExporterState<T>(
 
     internal fun writeToUri(uri: Uri) {
         val content = value
-        scope.launch(Dispatchers.IO) {
+        launchOwnedWrite(scope) {
             context.contentResolver.openOutputStream(uri)?.use { output ->
-                writeExportBytes(content, output)
+                output.write(content.toByteArray())
             }
         }
     }
 }
 
 /**
- * Pure write-copy seam for [ExporterState.writeToUri], extracted so the scope-ownership invariant
- * (#88) can be unit-tested on the JVM without a ContentResolver. The [yield] makes a cancelled
- * caller scope observable: if this runs as a child of a scope that is cancelled before the write,
- * the output is never flushed — which is exactly the data-loss the AppScope move prevents.
+ * Scope-ownership seam for [ExporterState.writeToUri] (#88). The fix is that [scope] here is the
+ * application-wide AppScope, not `rememberCoroutineScope()`: the IO must outlive the screen that
+ * started it. This helper is the exact production launch path, extracted so the ownership invariant
+ * can be unit-tested on the JVM without a ContentResolver — pass an AppScope-like owner and a
+ * caller-child owner to prove the write survives caller cancellation only on the former.
+ *
+ * The [yield] surrenders the dispatcher before the write runs, so a caller that cancels right after
+ * triggering the action loses the write iff the work is bound to its (cancelled) Job — which is the
+ * data-loss the AppScope move prevents. [dispatcher] defaults to IO for production; tests inject a
+ * confined dispatcher to make the cancel-before-resume ordering deterministic.
  */
-internal suspend fun writeExportBytes(content: String, output: OutputStream) {
-    yield()
-    output.write(content.toByteArray())
-}
+internal fun launchOwnedWrite(
+    owner: CoroutineScope,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    write: suspend () -> Unit,
+): Job =
+    owner.launch(dispatcher) {
+        yield()
+        write()
+    }
 
 @Composable
 fun <T> rememberExporter(
