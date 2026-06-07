@@ -3,12 +3,14 @@ package me.rerere.rikkahub.ui.pages.extensions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.data.files.SkillFrontmatterParser
 import me.rerere.rikkahub.data.files.SkillManager
+import me.rerere.rikkahub.utils.launchEmitting
 import java.io.File
 
 data class SkillFile(
@@ -25,12 +27,22 @@ sealed class SkillFileNode {
     ) : SkillFileNode()
 }
 
+sealed interface SkillDetailEvent {
+    object SaveDone : SkillDetailEvent
+    data class SaveFailed(val message: String) : SkillDetailEvent
+    object DeleteDone : SkillDetailEvent
+    object DeleteFailed : SkillDetailEvent
+}
+
 class SkillDetailVM(
     private val skillManager: SkillManager,
 ) : ViewModel() {
 
     private val _tree = MutableStateFlow<List<SkillFileNode>>(emptyList())
     val tree = _tree.asStateFlow()
+
+    private val _events = MutableSharedFlow<SkillDetailEvent>(extraBufferCapacity = 1)
+    val events = _events.asSharedFlow()
 
     private var skillName = ""
 
@@ -62,27 +74,38 @@ class SkillDetailVM(
 
     fun readFile(skillFile: SkillFile): String = skillFile.file.readText()
 
-    // Returns null on success, error message on failure
-    fun saveFile(relativePath: String, content: String, onResult: (String?) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
+    fun saveFile(relativePath: String, content: String) {
+        launchEmitting(
+            events = _events,
+            context = Dispatchers.IO,
+            onError = { SkillDetailEvent.SaveFailed(it.message ?: "保存失败") },
+        ) {
             if (relativePath == "SKILL.md") {
                 val name = SkillFrontmatterParser.parse(content)["name"]
                 if (name != skillName) {
-                    withContext(Dispatchers.Main) { onResult("不允许修改技能名称（name 字段必须为 \"$skillName\"）") }
-                    return@launch
+                    _events.tryEmit(
+                        SkillDetailEvent.SaveFailed("不允许修改技能名称（name 字段必须为 \"$skillName\"）")
+                    )
+                    return@launchEmitting
                 }
             }
             val success = skillManager.saveSkillFile(skillName, relativePath, content)
             loadFiles()
-            withContext(Dispatchers.Main) { onResult(if (success) null else "保存失败") }
+            _events.tryEmit(
+                if (success) SkillDetailEvent.SaveDone else SkillDetailEvent.SaveFailed("保存失败")
+            )
         }
     }
 
-    fun deleteFile(skillFile: SkillFile, onResult: (Boolean) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
+    fun deleteFile(skillFile: SkillFile) {
+        launchEmitting(
+            events = _events,
+            context = Dispatchers.IO,
+            onError = { SkillDetailEvent.DeleteFailed },
+        ) {
             val success = skillManager.deleteSkillFile(skillName, skillFile.relativePath)
             if (success) loadFiles()
-            withContext(Dispatchers.Main) { onResult(success) }
+            _events.tryEmit(if (success) SkillDetailEvent.DeleteDone else SkillDetailEvent.DeleteFailed)
         }
     }
 }
