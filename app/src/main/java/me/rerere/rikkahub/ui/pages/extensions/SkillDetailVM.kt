@@ -3,10 +3,10 @@ package me.rerere.rikkahub.ui.pages.extensions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.files.SkillFrontmatterParser
 import me.rerere.rikkahub.data.files.SkillManager
@@ -49,8 +49,8 @@ class SkillDetailVM(
     private val _tree = MutableStateFlow<List<SkillFileNode>>(emptyList())
     val tree = _tree.asStateFlow()
 
-    private val _events = MutableSharedFlow<SkillDetailEvent>(extraBufferCapacity = 1)
-    val events = _events.asSharedFlow()
+    private val _events = Channel<SkillDetailEvent>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
 
     private var skillName = ""
 
@@ -91,7 +91,7 @@ class SkillDetailVM(
             if (relativePath == "SKILL.md") {
                 val name = SkillFrontmatterParser.parse(content)["name"]
                 if (name != skillName) {
-                    _events.emit(
+                    _events.send(
                         SkillDetailEvent.SaveFailed("不允许修改技能名称（name 字段必须为 \"$skillName\"）")
                     )
                     return@launchEmitting
@@ -99,7 +99,7 @@ class SkillDetailVM(
             }
             val success = skillManager.saveSkillFile(skillName, relativePath, content)
             loadFiles()
-            _events.emit(
+            _events.send(
                 if (success) SkillDetailEvent.SaveDone(origin) else SkillDetailEvent.SaveFailed("保存失败")
             )
         }
@@ -113,7 +113,7 @@ class SkillDetailVM(
         ) {
             val success = skillManager.deleteSkillFile(skillName, skillFile.relativePath)
             if (success) loadFiles()
-            _events.emit(if (success) SkillDetailEvent.DeleteDone else SkillDetailEvent.DeleteFailed)
+            _events.send(if (success) SkillDetailEvent.DeleteDone else SkillDetailEvent.DeleteFailed)
         }
     }
 }
