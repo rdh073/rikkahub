@@ -37,6 +37,10 @@ class StatsVM(
     private val _stats = MutableStateFlow(AppStats())
     val stats = _stats.asStateFlow()
 
+    fun clearError() {
+        _stats.value = _stats.value.copy(error = null)
+    }
+
     init {
         launchVm(onError = { t ->
             _stats.value = _stats.value.copy(isLoading = false, error = t)

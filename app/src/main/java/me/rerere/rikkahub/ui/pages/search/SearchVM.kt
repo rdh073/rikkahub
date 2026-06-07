@@ -37,6 +37,10 @@ class SearchVM(
     var searchError by mutableStateOf<Throwable?>(null)
         private set
 
+    fun clearError() {
+        searchError = null
+    }
+
     init {
         viewModelScope.launch {
             _searchQuery

@@ -30,6 +30,10 @@ class AssistantVM(
     var lastError by mutableStateOf<Throwable?>(null)
         private set
 
+    fun clearError() {
+        lastError = null
+    }
+
     fun updateSettings(settings: Settings) {
         launchVm(onError = { lastError = it }) {
             settingsStore.update(settings)
