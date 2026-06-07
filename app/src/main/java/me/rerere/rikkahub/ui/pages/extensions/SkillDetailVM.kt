@@ -27,16 +27,31 @@ sealed class SkillFileNode {
     ) : SkillFileNode()
 }
 
-/**
- * Which dialog started a save. Captured at the call site (the dialog's confirm handler) and carried on
- * the completion event, so routing never depends on live UI state that may have changed between launch
- * and completion. Without this identity, an in-flight edit's completion could dismiss an unrelated
- * add-file dialog the user had just opened.
- */
+/** Which dialog category started a save — selects which dialog-token the collector compares against. */
 enum class SkillSaveOrigin { EDIT, ADD }
 
+/**
+ * Identity of a single save INVOCATION, captured at the call site (the dialog's confirm handler) and
+ * carried on the completion event. [origin] selects the dialog category; [token] is an opaque per-confirm
+ * id. The collector dismisses a dialog only when BOTH match its currently-open instance, so a late
+ * completion whose dialog was already dismissed-and-reopened (same category, new token) never closes the
+ * fresh dialog. Without the token, routing collapsed to category alone: an in-flight edit-save of file A
+ * could dismiss the edit dialog the user had since reopened for file B.
+ */
+data class SkillSaveTarget(val origin: SkillSaveOrigin, val token: Long)
+
+/**
+ * Mints monotonically increasing, never-reused save-invocation tokens. Held by the page (single-thread
+ * Compose UI), so a plain counter is sufficient — no two open dialogs ever share a token, which is the
+ * property that lets a completion match exactly its own dialog instance.
+ */
+class SkillSaveTokens {
+    private var next = 0L
+    fun next(): Long = next++
+}
+
 sealed interface SkillDetailEvent {
-    data class SaveDone(val origin: SkillSaveOrigin) : SkillDetailEvent
+    data class SaveDone(val target: SkillSaveTarget) : SkillDetailEvent
     data class SaveFailed(val message: String) : SkillDetailEvent
     object DeleteDone : SkillDetailEvent
     object DeleteFailed : SkillDetailEvent
@@ -82,7 +97,7 @@ class SkillDetailVM(
 
     fun readFile(skillFile: SkillFile): String = skillFile.file.readText()
 
-    fun saveFile(relativePath: String, content: String, origin: SkillSaveOrigin) {
+    fun saveFile(relativePath: String, content: String, target: SkillSaveTarget) {
         launchEmitting(
             events = _events,
             context = Dispatchers.IO,
@@ -100,7 +115,7 @@ class SkillDetailVM(
             val success = skillManager.saveSkillFile(skillName, relativePath, content)
             loadFiles()
             _events.send(
-                if (success) SkillDetailEvent.SaveDone(origin) else SkillDetailEvent.SaveFailed("保存失败")
+                if (success) SkillDetailEvent.SaveDone(target) else SkillDetailEvent.SaveFailed("保存失败")
             )
         }
     }

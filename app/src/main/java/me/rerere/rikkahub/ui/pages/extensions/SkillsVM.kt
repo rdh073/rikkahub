@@ -37,8 +37,14 @@ enum class SkillImportSource { FILE, GITHUB }
 sealed interface SkillsEvent {
     data class ImportDone(val source: SkillImportSource, val name: String) : SkillsEvent
     data class ImportFailed(val source: SkillImportSource, val message: String) : SkillsEvent
-    object SaveDone : SkillsEvent
-    object SaveFailed : SkillsEvent
+
+    /**
+     * [token] is the manual-add dialog's save-invocation identity (minted at the confirm call site).
+     * The collector dismisses the add dialog only when the token still matches the open instance, so a
+     * stale save whose dialog was already dismissed-and-reopened never closes the fresh dialog.
+     */
+    data class SaveDone(val token: Long) : SkillsEvent
+    data class SaveFailed(val token: Long) : SkillsEvent
 }
 
 class SkillsVM(
@@ -60,15 +66,15 @@ class SkillsVM(
         }
     }
 
-    fun saveSkill(name: String, content: String) {
+    fun saveSkill(name: String, content: String, token: Long) {
         launchEmitting(
             events = _events,
             context = Dispatchers.IO,
-            onError = { SkillsEvent.SaveFailed },
+            onError = { SkillsEvent.SaveFailed(token) },
         ) {
             val result = skillManager.saveSkill(name, content)
             _skills.value = skillManager.listSkills()
-            _events.send(if (result != null) SkillsEvent.SaveDone else SkillsEvent.SaveFailed)
+            _events.send(if (result != null) SkillsEvent.SaveDone(token) else SkillsEvent.SaveFailed(token))
         }
     }
 
