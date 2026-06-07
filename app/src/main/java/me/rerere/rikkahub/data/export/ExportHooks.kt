@@ -11,7 +11,6 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
@@ -19,7 +18,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
+import me.rerere.rikkahub.AppScope
+import org.koin.compose.koinInject
 import java.io.File
+import java.io.OutputStream
 
 @Stable
 class ExporterState<T>(
@@ -63,12 +66,24 @@ class ExporterState<T>(
     }
 
     internal fun writeToUri(uri: Uri) {
+        val content = value
         scope.launch(Dispatchers.IO) {
             context.contentResolver.openOutputStream(uri)?.use { output ->
-                output.write(value.toByteArray())
+                writeExportBytes(content, output)
             }
         }
     }
+}
+
+/**
+ * Pure write-copy seam for [ExporterState.writeToUri], extracted so the scope-ownership invariant
+ * (#88) can be unit-tested on the JVM without a ContentResolver. The [yield] makes a cancelled
+ * caller scope observable: if this runs as a child of a scope that is cancelled before the write,
+ * the output is never flushed — which is exactly the data-loss the AppScope move prevents.
+ */
+internal suspend fun writeExportBytes(content: String, output: OutputStream) {
+    yield()
+    output.write(content.toByteArray())
 }
 
 @Composable
@@ -77,7 +92,7 @@ fun <T> rememberExporter(
     serializer: ExportSerializer<T>,
 ): ExporterState<T> {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val scope = koinInject<AppScope>()
 
     var pendingState by remember { mutableStateOf<ExporterState<T>?>(null) }
 
@@ -132,7 +147,7 @@ fun <T> rememberImporter(
     onResult: (Result<T>) -> Unit,
 ): ImporterState<T> {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val scope = koinInject<AppScope>()
 
     var pendingState by remember { mutableStateOf<ImporterState<T>?>(null) }
 
