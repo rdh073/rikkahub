@@ -28,11 +28,23 @@ sealed class SkillFileNode {
 }
 
 sealed interface SkillDetailEvent {
-    object SaveDone : SkillDetailEvent
+    data class SaveDone(val relativePath: String) : SkillDetailEvent
     data class SaveFailed(val message: String) : SkillDetailEvent
     object DeleteDone : SkillDetailEvent
     object DeleteFailed : SkillDetailEvent
 }
+
+/** Which open dialog a completed save belongs to, so only its owner closes. */
+enum class SkillSaveTarget { EDIT, ADD }
+
+/**
+ * Routes a completed [SkillDetailEvent.SaveDone] to the dialog that started it. An edit-save targets
+ * the file currently open in the edit dialog ([editingRelativePath]); any other path came from the
+ * add-file dialog. Without this, a single identity-less SaveDone closed both dialogs, so an in-flight
+ * edit's completion could dismiss an unrelated add-file dialog the user had just opened.
+ */
+fun skillSaveTarget(savedRelativePath: String, editingRelativePath: String?): SkillSaveTarget =
+    if (editingRelativePath == savedRelativePath) SkillSaveTarget.EDIT else SkillSaveTarget.ADD
 
 class SkillDetailVM(
     private val skillManager: SkillManager,
@@ -83,7 +95,7 @@ class SkillDetailVM(
             if (relativePath == "SKILL.md") {
                 val name = SkillFrontmatterParser.parse(content)["name"]
                 if (name != skillName) {
-                    _events.tryEmit(
+                    _events.emit(
                         SkillDetailEvent.SaveFailed("不允许修改技能名称（name 字段必须为 \"$skillName\"）")
                     )
                     return@launchEmitting
@@ -91,8 +103,8 @@ class SkillDetailVM(
             }
             val success = skillManager.saveSkillFile(skillName, relativePath, content)
             loadFiles()
-            _events.tryEmit(
-                if (success) SkillDetailEvent.SaveDone else SkillDetailEvent.SaveFailed("保存失败")
+            _events.emit(
+                if (success) SkillDetailEvent.SaveDone(relativePath) else SkillDetailEvent.SaveFailed("保存失败")
             )
         }
     }
@@ -105,7 +117,7 @@ class SkillDetailVM(
         ) {
             val success = skillManager.deleteSkillFile(skillName, skillFile.relativePath)
             if (success) loadFiles()
-            _events.tryEmit(if (success) SkillDetailEvent.DeleteDone else SkillDetailEvent.DeleteFailed)
+            _events.emit(if (success) SkillDetailEvent.DeleteDone else SkillDetailEvent.DeleteFailed)
         }
     }
 }

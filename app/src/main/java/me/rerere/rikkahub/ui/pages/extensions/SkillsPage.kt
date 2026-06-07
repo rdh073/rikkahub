@@ -92,16 +92,22 @@ fun SkillsPage() {
     LaunchedEffect(Unit) {
         vm.events.collect { event ->
             when (event) {
-                is SkillsEvent.ImportDone ->
+                is SkillsEvent.ImportDone -> {
+                    showImportDialog = false
                     toaster.show(context.getString(R.string.skills_page_import_success, event.name))
+                }
 
-                is SkillsEvent.ImportFailed ->
+                is SkillsEvent.ImportFailed -> {
+                    showImportDialog = false
                     toaster.show(context.getString(R.string.skills_page_import_failed, event.message))
+                }
 
-                SkillsEvent.SaveDone -> {}
+                SkillsEvent.SaveDone -> showAddDialog = false
 
-                SkillsEvent.SaveFailed ->
+                SkillsEvent.SaveFailed -> {
+                    showAddDialog = false
                     toaster.show(context.getString(R.string.skills_page_save_failed))
+                }
             }
         }
     }
@@ -196,7 +202,6 @@ fun SkillsPage() {
         AddSkillDialog(
             onDismiss = { showAddDialog = false },
             onConfirm = { name, content ->
-                showAddDialog = false
                 vm.saveSkill(name, content)
             },
         )
@@ -206,7 +211,6 @@ fun SkillsPage() {
         ImportSkillDialog(
             onDismiss = { showImportDialog = false },
             onConfirm = { repoUrl ->
-                showImportDialog = false
                 vm.importSkillFromGitHub(repoUrl)
             },
         )

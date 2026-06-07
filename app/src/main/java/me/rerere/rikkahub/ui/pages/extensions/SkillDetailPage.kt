@@ -75,10 +75,11 @@ fun SkillDetailPage(skillName: String) {
     LaunchedEffect(Unit) {
         vm.events.collect { event ->
             when (event) {
-                SkillDetailEvent.SaveDone -> {
-                    editingFile = null
-                    showAddDialog = false
-                }
+                is SkillDetailEvent.SaveDone ->
+                    when (skillSaveTarget(event.relativePath, editingFile?.relativePath)) {
+                        SkillSaveTarget.EDIT -> editingFile = null
+                        SkillSaveTarget.ADD -> showAddDialog = false
+                    }
 
                 is SkillDetailEvent.SaveFailed -> toaster.show(event.message)
                 SkillDetailEvent.DeleteDone -> {}

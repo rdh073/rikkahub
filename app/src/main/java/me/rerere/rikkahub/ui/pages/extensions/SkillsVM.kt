@@ -60,7 +60,7 @@ class SkillsVM(
         ) {
             val result = skillManager.saveSkill(name, content)
             _skills.value = skillManager.listSkills()
-            _events.tryEmit(if (result != null) SkillsEvent.SaveDone else SkillsEvent.SaveFailed)
+            _events.emit(if (result != null) SkillsEvent.SaveDone else SkillsEvent.SaveFailed)
         }
     }
 
@@ -89,7 +89,7 @@ class SkillsVM(
                 )
             }
                 ?: run {
-                    _events.tryEmit(SkillsEvent.ImportFailed("无法读取文件"))
+                    _events.emit(SkillsEvent.ImportFailed("无法读取文件"))
                     return@launchEmitting
                 }
 
@@ -100,7 +100,7 @@ class SkillsVM(
             }
 
             _skills.value = skillManager.listSkills()
-            _events.tryEmit(SkillsEvent.ImportDone(importedNames.joinToString()))
+            _events.emit(SkillsEvent.ImportDone(importedNames.joinToString()))
         }
     }
 
@@ -114,7 +114,7 @@ class SkillsVM(
             },
         ) {
             val info = parseGitHubUrl(repoUrl) ?: run {
-                _events.tryEmit(SkillsEvent.ImportFailed("无效的 GitHub 仓库链接"))
+                _events.emit(SkillsEvent.ImportFailed("无效的 GitHub 仓库链接"))
                 return@launchEmitting
             }
 
@@ -123,24 +123,24 @@ class SkillsVM(
             val visited = intArrayOf(0)
             val listed = listFilesRecursively(info.owner, info.repo, info.branch, info.path, info.path, files, visited, depth = 0)
             if (!listed) {
-                _events.tryEmit(SkillsEvent.ImportFailed("读取 GitHub 目录失败"))
+                _events.emit(SkillsEvent.ImportFailed("读取 GitHub 目录失败"))
                 return@launchEmitting
             }
 
             val skillMdEntry = files.find { it.first == "SKILL.md" } ?: run {
-                _events.tryEmit(SkillsEvent.ImportFailed("目录中未找到 SKILL.md"))
+                _events.emit(SkillsEvent.ImportFailed("目录中未找到 SKILL.md"))
                 return@launchEmitting
             }
 
             val skillMdContent = downloadText(skillMdEntry.second) ?: run {
-                _events.tryEmit(SkillsEvent.ImportFailed("下载 SKILL.md 失败，请检查链接或网络"))
+                _events.emit(SkillsEvent.ImportFailed("下载 SKILL.md 失败，请检查链接或网络"))
                 return@launchEmitting
             }
 
             val frontmatter = SkillFrontmatterParser.parse(skillMdContent)
             val name = frontmatter["name"]
             if (name.isNullOrBlank()) {
-                _events.tryEmit(SkillsEvent.ImportFailed("SKILL.md 格式错误：缺少 name 字段"))
+                _events.emit(SkillsEvent.ImportFailed("SKILL.md 格式错误：缺少 name 字段"))
                 return@launchEmitting
             }
 
@@ -149,7 +149,7 @@ class SkillsVM(
             for ((relativePath, downloadUrl) in files) {
                 val content = downloadText(downloadUrl)
                 if (content == null) {
-                    _events.tryEmit(SkillsEvent.ImportFailed("下载文件失败：$relativePath"))
+                    _events.emit(SkillsEvent.ImportFailed("下载文件失败：$relativePath"))
                     return@launchEmitting
                 }
                 totalDownloaded += content.toByteArray(Charsets.UTF_8).size
@@ -159,12 +159,12 @@ class SkillsVM(
 
             val saved = skillManager.saveSkillFilesAtomically(name, fileContents)
             if (!saved) {
-                _events.tryEmit(SkillsEvent.ImportFailed("保存失败"))
+                _events.emit(SkillsEvent.ImportFailed("保存失败"))
                 return@launchEmitting
             }
 
             _skills.value = skillManager.listSkills()
-            _events.tryEmit(SkillsEvent.ImportDone(name))
+            _events.emit(SkillsEvent.ImportDone(name))
         }
     }
 
