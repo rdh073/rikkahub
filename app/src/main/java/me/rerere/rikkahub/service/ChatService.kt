@@ -24,7 +24,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
@@ -1083,20 +1082,25 @@ class ChatService(
         session.state.value = conversation
     }
 
-    // 把 UI 侧的 read-modify-write 折成单次 CAS（getAndUpdate），使其无法丢失一次并发的流式 publish 或另一处
-    // UI 写入（#108 的第二个竞态读写口）。CAS 闭包必须无副作用——[update] 在三个调用点都是纯变换（.copy/返回
-    // 新 Conversation），可在竞争下安全重跑。保留原 id-guard 语义：变换后 id 与会话不符则不换（早退不写、不清理
-    // 文件），与旧 updateConversationWithFileCleanup 的 id 校验一致。文件清理副作用在 CAS 之外只跑一次：用
-    // getAndUpdate 捕获的旧值与换入后的新值算差量；仅当状态真的换了（new !== old）才清理，避免 id-guard 早退时
-    // 误删。
+    // 把 UI 侧的 read-modify-write 折成单次 CAS，使其无法丢失一次并发的流式 publish 或另一处 UI 写入（#108 的第
+    // 二个竞态读写口）。CAS 闭包必须无副作用——[update] 在三个调用点都是纯变换（.copy/返回新 Conversation），可在
+    // 竞争下安全重跑。保留原 id-guard 语义：变换后 id 与会话不符则不换（早退不写、不清理文件），与旧
+    // updateConversationWithFileCleanup 的 id 校验一致。
+    //
+    // 关键：文件清理这一破坏性副作用必须配对“本次 CAS 真正换入的那一对（old, new）”。这里用 compareAndSet 自旋，
+    // 在同一次成功的迭代里同时拿到 old 与本次换入的 new，CAS 成功后才在闭包之外只跑一次 checkFilesDelete。不能用
+    // getAndUpdate(原子 old) 再 .value 读 new：那是两次非原子读，跨调度器竞争下别的 writer 会在两步之间把状态换掉，
+    // 使 new 与 old 并非相邻转换，差量算错可能误删仍被最终会话引用的文件（悬空 URI / 丢数据）。
     fun updateConversationState(conversationId: Uuid, update: (Conversation) -> Conversation) {
         val session = getOrCreateSession(conversationId)
-        val old = session.state.getAndUpdate { current ->
-            val updated = update(current)
-            if (updated.id != conversationId) current else updated
-        }
-        val new = session.state.value
-        if (new !== old) checkFilesDelete(new, old)
+        casUpdateState(
+            state = session.state,
+            update = { current ->
+                val updated = update(current)
+                if (updated.id != conversationId) current else updated
+            },
+            onTransition = { old, new -> checkFilesDelete(newConversation = new, oldConversation = old) },
+        )
     }
 
     private fun checkFilesDelete(newConversation: Conversation, oldConversation: Conversation) {
@@ -1316,6 +1320,39 @@ internal fun removedFileUris(oldFiles: List<String>, newFiles: List<String>): Li
  */
 internal fun publishStreamingMessages(state: MutableStateFlow<Conversation>, messages: List<UIMessage>) {
     state.update { current -> current.updateCurrentMessages(messages) }
+}
+
+/**
+ * Atomic state read-modify-write that PAIRS a destructive side effect with the exact transition it
+ * installed (issue #108).
+ *
+ * [update] must be side-effect-free: under contention it is re-run on the LATEST value each lost-CAS
+ * iteration. [onTransition] runs at most once, AFTER a successful [MutableStateFlow.compareAndSet],
+ * with the precise `(old, new)` pair that this call's CAS swapped — `old` is the value the CAS
+ * replaced, `new` is the value it installed, and they are guaranteed adjacent.
+ *
+ * Why not `getAndUpdate { ... }` then a second `state.value` read: that is two non-atomic reads. A
+ * cross-dispatcher writer can swap the state between them, so the second read is some LATER value, not
+ * the one paired with the `old` from `getAndUpdate`. Diffing that mismatched pair drives
+ * [ChatService.checkFilesDelete] to delete bytes the live conversation still references (dangling URI /
+ * data loss). Extracted as a top-level generic function so this pairing invariant is JVM-unit-tested
+ * against the production wiring rather than a hand-copied mirror, and over a plain [T] so the test need
+ * not construct a `Conversation` whose `files` route through `android.net.Uri` (null under unit tests).
+ */
+internal inline fun <T> casUpdateState(
+    state: MutableStateFlow<T>,
+    update: (T) -> T,
+    onTransition: (old: T, new: T) -> Unit,
+) {
+    while (true) {
+        val old = state.value
+        val new = update(old)
+        if (new === old) return
+        if (state.compareAndSet(old, new)) {
+            onTransition(old, new)
+            return
+        }
+    }
 }
 
 /**
