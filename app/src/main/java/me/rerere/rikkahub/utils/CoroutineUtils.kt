@@ -47,8 +47,9 @@ fun ViewModel.launchVm(
  * wrapper only owns the EXCEPTIONAL path: a non-cancellation throwable that escapes [block] is turned
  * into a failure event via [onError] and emitted, while cancellation is rethrown (per
  * [shouldRethrowVmError]) so a disposed screen tearing the VM down is never reported as a failed
- * operation. Emission uses [MutableSharedFlow.tryEmit] so the error path stays non-suspending and a
- * missing collector during teardown can never block the IO coroutine.
+ * operation. Emission uses suspending [MutableSharedFlow.emit] so the failure event — the one path
+ * that must be delivered reliably — is never dropped; a missing collector during teardown makes emit
+ * return immediately, so there is nothing to block on.
  *
  * Root cause this addresses: VMs used to invoke a Composable-captured callback after long IO work,
  * which the screen may already have disposed (stale lambda). Routing results through a
@@ -79,7 +80,7 @@ suspend fun <E> CoroutineScope.runEmitting(
         block()
     } catch (t: Throwable) {
         if (shouldRethrowVmError(t)) throw t
-        events.tryEmit(onError(t))
+        events.emit(onError(t))
     }
 }
 

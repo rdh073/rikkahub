@@ -93,12 +93,12 @@ fun SkillsPage() {
         vm.events.collect { event ->
             when (event) {
                 is SkillsEvent.ImportDone -> {
-                    showImportDialog = false
+                    if (event.source == SkillImportSource.GITHUB) showImportDialog = false
                     toaster.show(context.getString(R.string.skills_page_import_success, event.name))
                 }
 
                 is SkillsEvent.ImportFailed -> {
-                    showImportDialog = false
+                    if (event.source == SkillImportSource.GITHUB) showImportDialog = false
                     toaster.show(context.getString(R.string.skills_page_import_failed, event.message))
                 }
 

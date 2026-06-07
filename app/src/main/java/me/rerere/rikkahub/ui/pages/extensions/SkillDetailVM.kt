@@ -27,24 +27,20 @@ sealed class SkillFileNode {
     ) : SkillFileNode()
 }
 
+/**
+ * Which dialog started a save. Captured at the call site (the dialog's confirm handler) and carried on
+ * the completion event, so routing never depends on live UI state that may have changed between launch
+ * and completion. Without this identity, an in-flight edit's completion could dismiss an unrelated
+ * add-file dialog the user had just opened.
+ */
+enum class SkillSaveOrigin { EDIT, ADD }
+
 sealed interface SkillDetailEvent {
-    data class SaveDone(val relativePath: String) : SkillDetailEvent
+    data class SaveDone(val origin: SkillSaveOrigin) : SkillDetailEvent
     data class SaveFailed(val message: String) : SkillDetailEvent
     object DeleteDone : SkillDetailEvent
     object DeleteFailed : SkillDetailEvent
 }
-
-/** Which open dialog a completed save belongs to, so only its owner closes. */
-enum class SkillSaveTarget { EDIT, ADD }
-
-/**
- * Routes a completed [SkillDetailEvent.SaveDone] to the dialog that started it. An edit-save targets
- * the file currently open in the edit dialog ([editingRelativePath]); any other path came from the
- * add-file dialog. Without this, a single identity-less SaveDone closed both dialogs, so an in-flight
- * edit's completion could dismiss an unrelated add-file dialog the user had just opened.
- */
-fun skillSaveTarget(savedRelativePath: String, editingRelativePath: String?): SkillSaveTarget =
-    if (editingRelativePath == savedRelativePath) SkillSaveTarget.EDIT else SkillSaveTarget.ADD
 
 class SkillDetailVM(
     private val skillManager: SkillManager,
@@ -86,7 +82,7 @@ class SkillDetailVM(
 
     fun readFile(skillFile: SkillFile): String = skillFile.file.readText()
 
-    fun saveFile(relativePath: String, content: String) {
+    fun saveFile(relativePath: String, content: String, origin: SkillSaveOrigin) {
         launchEmitting(
             events = _events,
             context = Dispatchers.IO,
@@ -104,7 +100,7 @@ class SkillDetailVM(
             val success = skillManager.saveSkillFile(skillName, relativePath, content)
             loadFiles()
             _events.emit(
-                if (success) SkillDetailEvent.SaveDone(relativePath) else SkillDetailEvent.SaveFailed("保存失败")
+                if (success) SkillDetailEvent.SaveDone(origin) else SkillDetailEvent.SaveFailed("保存失败")
             )
         }
     }

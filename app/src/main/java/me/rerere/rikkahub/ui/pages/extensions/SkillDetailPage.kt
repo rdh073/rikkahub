@@ -76,9 +76,9 @@ fun SkillDetailPage(skillName: String) {
         vm.events.collect { event ->
             when (event) {
                 is SkillDetailEvent.SaveDone ->
-                    when (skillSaveTarget(event.relativePath, editingFile?.relativePath)) {
-                        SkillSaveTarget.EDIT -> editingFile = null
-                        SkillSaveTarget.ADD -> showAddDialog = false
+                    when (event.origin) {
+                        SkillSaveOrigin.EDIT -> editingFile = null
+                        SkillSaveOrigin.ADD -> showAddDialog = false
                     }
 
                 is SkillDetailEvent.SaveFailed -> toaster.show(event.message)
@@ -126,7 +126,7 @@ fun SkillDetailPage(skillName: String) {
             initialContent = remember(skillFile.relativePath) { vm.readFile(skillFile) },
             onDismiss = { editingFile = null },
             onConfirm = { content ->
-                vm.saveFile(skillFile.relativePath, content)
+                vm.saveFile(skillFile.relativePath, content, SkillSaveOrigin.EDIT)
             },
         )
     }
@@ -135,7 +135,7 @@ fun SkillDetailPage(skillName: String) {
         AddFileDialog(
             onDismiss = { showAddDialog = false },
             onConfirm = { fileName, content ->
-                vm.saveFile(fileName, content)
+                vm.saveFile(fileName, content, SkillSaveOrigin.ADD)
             },
         )
     }
