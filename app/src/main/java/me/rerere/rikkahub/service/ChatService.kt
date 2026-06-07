@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -90,6 +91,20 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatService"
+
+/**
+ * Terminal error handling for [ChatService.getConversationJobs]. That flow feeds a `stateIn(...)` in
+ * ChatVM; without a terminal catch, an upstream throw in the combine/flatMapLatest body would crash the
+ * StateFlow's collection coroutine. A real failure is logged (never silently swallowed) and replaced
+ * with the identity value [emptyMap] so the per-conversation job StateFlow stays alive, while a
+ * [CancellationException] is re-thrown so structured-concurrency teardown is never swallowed.
+ */
+internal fun Flow<Map<Uuid, Job?>>.catchConversationJobsErrors(): Flow<Map<Uuid, Job?>> =
+    catch { e ->
+        if (e is CancellationException) throw e
+        Log.e(TAG, "getConversationJobs flow failed; emitting empty map", e)
+        emit(emptyMap())
+    }
 
 internal fun backgroundTextGenerationParams(
     model: Model,
@@ -445,7 +460,7 @@ class ChatService(
                     pairs.filter { it.second != null }.toMap()
                 }
             }
-        }
+        }.catchConversationJobsErrors()
     }
 
     // ---- 初始化对话 ----
