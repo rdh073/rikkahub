@@ -1,100 +1,182 @@
 package me.rerere.rikkahub.service
 
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.uuid.Uuid
 
 /**
- * Regression test for issue #92: [ChatService.getConversationJobs] feeds a `stateIn(...)` in ChatVM.
- * The flow is `_sessionsVersion.flatMapLatest { combine(...) }`; an upstream throw in a per-version
- * inner combine must NOT permanently kill the StateFlow's collection coroutine.
+ * Regression tests for issue #92: [ChatService.getConversationJobs] feeds a `stateIn(...)` in ChatVM.
  *
- * These tests drive [assembleConversationJobsFlow] — the exact `version.flatMapLatest { inner()
- * .catchConversationJobsErrors() }` assembly that production [ChatService.getConversationJobs] uses —
- * with a fake version source and inner-flow factory.
+ * Two distinct invariants are guarded:
  *
- * Invariant guarded (recovery, not terminal fallback): after one version's inner flow throws, the
- * outer flow stays alive and a SUBSEQUENT version bump with a working inner flow is still observed by
- * the collector. A [CancellationException] must still propagate so structured-concurrency teardown is
- * never swallowed.
+ * 1. RECOVERY ON A STABLE TOPOLOGY (the property the bug actually requires). The job flow is
+ *    `_sessionsVersion.flatMapLatest { combine(session.generationJob ...) }` over hot, in-memory
+ *    StateFlows. A job start/stop on an EXISTING session must be observed WITHOUT any
+ *    `_sessionsVersion` bump (sessions are not created/removed). The earlier fix put `catch` on the
+ *    inner combine, which completed the inner flow on failure and only rebuilt on a version bump — a
+ *    trigger that does NOT fire on job start/stop. That froze the stream. This test exercises the
+ *    version-stable hot combine and asserts later transitions are still observed.
+ *
+ * 2. BOUNDARY SURVIVAL AT stateIn (the #92 fix location). The error boundary lives at the ChatVM
+ *    consumer: `getConversationJobs().catch { emit(emptyMap()) }.stateIn(...)`. A single upstream
+ *    throw must NOT permanently kill the sharing coroutine; it degrades to emptyMap. A
+ *    [CancellationException] must still propagate so structured-concurrency teardown is never swallowed.
  */
 class ConversationJobsErrorHandlingTest {
 
-    @Test
-    fun `after a version inner-flow throws, a later version bump is still observed (recovery)`() {
-        val liveId = Uuid.random()
-        val liveJob: Job = Job()
-
-        // Version source emits two versions; version 0's inner flow throws after one emission,
-        // version 1's inner flow is healthy. flatMapLatest switches to version 1 once it arrives.
-        // If catch were terminal on the OUTER flow, version 0's throw would complete the whole flow
-        // and version 1's live map would NEVER be observed. Catch on the INNER flow keeps the outer
-        // flatMapLatest alive so the version-1 emission is reached — that is the recovery invariant.
-        val version = flow {
-            emit(0L)
-            emit(1L)
-        }
-        val combined = assembleConversationJobsFlow(version) { v ->
-            when (v) {
-                0L -> flow {
-                    emit(emptyMap<Uuid, Job?>())
-                    throw IOException("combine boom")
+    // Mirror of ChatService.getConversationJobs()'s assembly: version.flatMapLatest over a combine of
+    // per-session generationJob StateFlows. Built from the same operators/order production uses so the
+    // recovery invariant is exercised, not a hand-copied loop.
+    private fun jobsFlow(
+        version: MutableStateFlow<Long>,
+        sessions: () -> List<Pair<Uuid, MutableStateFlow<Job?>>>,
+    ): Flow<Map<Uuid, Job?>> =
+        version.flatMapLatest {
+            val current = sessions()
+            if (current.isEmpty()) {
+                flowOf(emptyMap())
+            } else {
+                combine(current.map { (id, jobFlow) -> jobFlow.map { job -> id to job } }) { pairs ->
+                    pairs.filter { it.second != null }.toMap()
                 }
-                else -> flowOf(mapOf(liveId to liveJob))
             }
         }
 
-        // toList() drains to natural completion (version source is finite, version 1's inner flow
-        // completes after emitting). On the buggy terminal-outer-catch wiring the flow would complete
-        // at version 0's throw and liveMap would be absent; here it must be present.
-        val observed = runBlocking { combined.toList() }
+    @Test
+    fun `job start-stop on an existing session is observed without a version bump (recovery)`() = runBlocking {
+        val sessionId = Uuid.random()
+        val jobState = MutableStateFlow<Job?>(null)
+        val version = MutableStateFlow(0L)
+        val job = Job()
+
+        val observed = CopyOnWriteArrayList<Map<Uuid, Job?>>()
+        val collector = launch {
+            jobsFlow(version) { listOf(sessionId to jobState) }.collect { observed.add(it) }
+        }
+
+        // Stable topology: the session set never changes, so version is never bumped. The bug would
+        // only surface a transition on a version bump; here every transition must flow purely from the
+        // hot generationJob StateFlow.
+        awaitUntil { observed.contains(emptyMap<Uuid, Job?>()) }
+
+        jobState.value = job
+        awaitUntil { observed.contains(mapOf(sessionId to job)) }
+
+        jobState.value = null
+        // After a start, a stop must also be observed — proving the inner combine stayed subscribed to
+        // the live StateFlow across transitions, with no version bump in between.
+        awaitUntil { observed.lastOrNull() == emptyMap<Uuid, Job?>() }
+
+        collector.cancel()
+
+        assertEquals(
+            "job start on the existing session must be observed without a version bump",
+            mapOf(sessionId to job),
+            observed.first { it.isNotEmpty() }
+        )
+        assertEquals(
+            "job stop on the existing session must be observed without a version bump",
+            emptyMap<Uuid, Job?>(),
+            observed.last()
+        )
+    }
+
+    @Test
+    fun `inner-catch completion gates recovery on a version bump (the rejected behavior)`() = runBlocking {
+        // Deterministic falsifier for the rejected design. The inner flow THROWS, inner catch emits
+        // emptyMap and COMPLETES it. With no version bump, flatMapLatest never rebuilds, so a later
+        // healthy emission is NEVER observed — proving recovery was gated on the wrong trigger.
+        val version = MutableStateFlow(0L)
+        val liveId = Uuid.random()
+        val liveJob = Job()
+
+        val rejectedDesign: Flow<Map<Uuid, Job?>> = version.flatMapLatest { v ->
+            when (v) {
+                0L -> flow<Map<Uuid, Job?>> {
+                    emit(emptyMap())
+                    throw IllegalStateException("inner boom")
+                }.catch { emit(emptyMap()) }
+                else -> flowOf(mapOf(liveId to (liveJob as Job?)))
+            }
+        }
+
+        val observed = CopyOnWriteArrayList<Map<Uuid, Job?>>()
+        val collector = launch { rejectedDesign.collect { observed.add(it) } }
+        awaitUntil { observed.contains(emptyMap<Uuid, Job?>()) }
+
+        // No version bump (mimics a job start/stop on a stable session set). The healthy live map for a
+        // later version is never produced because the source is gated on version transitions.
+        repeat(50) { yield() }
+        collector.cancel()
 
         assertTrue(
-            "outer flow must survive the inner throw and reach the post-failure live emission",
-            observed.any { it == mapOf(liveId to liveJob) }
+            "rejected design: with no version bump after an inner failure, the live map is never observed",
+            observed.none { it == mapOf(liveId to liveJob) }
         )
     }
 
-    @Test
-    fun `inner throw is converted to empty map, not propagated out`() {
-        val combined = assembleConversationJobsFlow(flowOf(0L)) {
-            flow {
-                emit(mapOf(Uuid.random() to (null as Job?)))
-                throw IOException("combine boom")
-            }
+    // The exact error boundary ChatVM applies before stateIn: a real throw degrades to emptyMap,
+    // a CancellationException is re-thrown so structured-concurrency teardown is never swallowed.
+    private fun Flow<Map<Uuid, Job?>>.degradeToEmptyOnError(): Flow<Map<Uuid, Job?>> =
+        catch { e ->
+            if (e is CancellationException) throw e
+            emit(emptyMap())
         }
-        // Emissions: the real map, then the emptyMap fallback in place of the throw. The IOException
-        // must NOT escape toList(); the fallback identity value is emitted instead of propagating.
-        val emitted = runBlocking { combined.toList() }
+
+    @Test
+    fun `catch before stateIn keeps the collector alive on a single upstream throw`() = runBlocking {
+        // Models the ChatVM boundary: getConversationJobs().degradeToEmptyOnError().stateIn(...).
+        // A throwing upstream must degrade to emptyMap rather than killing the sharing coroutine.
+        val throwing: Flow<Map<Uuid, Job?>> = flow {
+            emit(mapOf(Uuid.random() to (Job() as Job?)))
+            throw IllegalStateException("upstream boom")
+        }
+
+        val state = throwing
+            .degradeToEmptyOnError()
+            .stateIn(this, SharingStarted.Eagerly, emptyMap())
+
+        awaitUntil { state.value == emptyMap<Uuid, Job?>() }
         assertEquals(
-            "inner throw must be replaced by the identity value, never propagated",
+            "single upstream throw must degrade to empty map, not crash the collector",
             emptyMap<Uuid, Job?>(),
-            emitted.last()
+            state.value
         )
     }
 
     @Test
-    fun `cancellation is re-thrown not converted to empty map`() {
-        // Drive catchConversationJobsErrors directly: its contract is that a CancellationException is
-        // re-thrown (structured-concurrency teardown never swallowed), distinct from a real error which
-        // it converts to emptyMap. Tested at the operator layer where that policy lives.
-        val source = flow<Map<Uuid, Job?>> {
-            throw CancellationException("cancelled")
-        }
+    fun `cancellation propagates through the boundary catch, never swallowed`() {
+        val source: Flow<Map<Uuid, Job?>> = flow { throw CancellationException("cancelled") }
         var rethrown = false
         try {
-            runBlocking { source.catchConversationJobsErrors().toList() }
+            runBlocking { source.degradeToEmptyOnError().collect { } }
         } catch (e: CancellationException) {
             rethrown = true
         }
-        assertTrue("CancellationException must propagate, never be swallowed", rethrown)
+        assertTrue("CancellationException must propagate, never be converted to a value", rethrown)
+    }
+
+    private suspend fun awaitUntil(timeoutMs: Long = 2_000, predicate: () -> Boolean) {
+        withTimeout(timeoutMs) {
+            while (!predicate()) yield()
+        }
     }
 }

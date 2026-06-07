@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -91,38 +90,6 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatService"
-
-/**
- * Error handling for the INNER per-version job flow built inside [ChatService.getConversationJobs]'s
- * [flatMapLatest] body. The outer source ([_sessionsVersion], a hot StateFlow that never completes)
- * rebuilds this inner combine on every version bump. Applying [catch] to the inner flow — NOT to the
- * outer flow — is what keeps the StateFlow in ChatVM alive: a throw in one version's combine emits the
- * identity value [emptyMap] for THAT generation only and completes the inner flow, while the outer
- * [flatMapLatest] stays live and the next [_sessionsVersion] bump rebuilds a fresh working combine, so
- * a later legitimate job change is still observed (real recovery, not terminal fallback). A real
- * failure is logged (never silently swallowed); a [CancellationException] is re-thrown so
- * structured-concurrency teardown is never swallowed.
- */
-internal fun Flow<Map<Uuid, Job?>>.catchConversationJobsErrors(): Flow<Map<Uuid, Job?>> =
-    catch { e ->
-        if (e is CancellationException) throw e
-        Log.e(TAG, "getConversationJobs inner flow failed; emitting empty map for this version", e)
-        emit(emptyMap())
-    }
-
-/**
- * Pure assembly of the [ChatService.getConversationJobs] flow: `version.flatMapLatest { inner(it)
- * .catchConversationJobsErrors() }`. The version source is hot and never completes (production passes
- * [_sessionsVersion]); [innerFlow] builds the per-version job flow (production builds the combine over
- * live sessions). Extracted so the recovery invariant — a throw in one version's inner flow does NOT
- * terminate the outer flow, and a later version bump is still observed — is JVM-unit-testable without
- * Android/Job machinery, exercising the exact operator order production uses.
- */
-internal fun assembleConversationJobsFlow(
-    version: Flow<Long>,
-    innerFlow: (Long) -> Flow<Map<Uuid, Job?>>,
-): Flow<Map<Uuid, Job?>> =
-    version.flatMapLatest { v -> innerFlow(v).catchConversationJobsErrors() }
 
 internal fun backgroundTextGenerationParams(
     model: Model,
@@ -466,12 +433,12 @@ class ChatService(
         return session.processingStatus
     }
 
+    // 不在这里 catch/降级：本流是对一组 in-memory StateFlow（每个 session 的 generationJob，热流、
+    // 永不完成、永不抛）做 combine，没有可重试的瞬时故障。下游对错误的诉求各不相同，故把错误边界下放到
+    // 各消费者本身——ChatVM 的 stateIn 收集器需在异常下存活（见 #92，catch 置于 stateIn 之前）；
+    // web 的 .first()/SSE 则应让真实异常以 HTTP 500 上抛，而非被静默改写成“无活跃任务”的 200。
     fun getConversationJobs(): Flow<Map<Uuid, Job?>> =
-        // Assembly (version.flatMapLatest { inner().catchConversationJobsErrors() }) is factored into
-        // assembleConversationJobsFlow so the recovery invariant is JVM-unit-testable. catch wraps the
-        // INNER combine: a per-version failure yields emptyMap for that version only, the outer
-        // _sessionsVersion.flatMapLatest stays alive, and the next version bump rebuilds a working combine.
-        assembleConversationJobsFlow(_sessionsVersion) {
+        _sessionsVersion.flatMapLatest {
             val currentSessions = sessions.values.toList()
             if (currentSessions.isEmpty()) {
                 flowOf(emptyMap())
