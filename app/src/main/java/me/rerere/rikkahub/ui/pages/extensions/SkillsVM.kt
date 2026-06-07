@@ -56,6 +56,11 @@ class SkillsVM(
     private val _events = Channel<SkillsEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    private val saveTokens = SkillSaveTokens()
+
+    /** Mint a save-invocation token. VM-owned so it survives config change with the in-flight save. */
+    fun nextSaveToken(): Long = saveTokens.next()
+
     init {
         loadSkills()
     }

@@ -138,4 +138,63 @@ class SkillSaveTargetTest {
             SkillSaveTarget(SkillSaveOrigin.ADD, 0L).origin,
         )
     }
+
+    /**
+     * Reopened-after-recreation finding (the mustFix this commit fixes): token routing only survives a
+     * config change if BOTH the page's recorded token AND the token authority outlive it. The page side
+     * is now rememberSaveable; the authority side is now VM-owned ([SkillsVM.nextSaveToken] /
+     * [SkillDetailVM.nextSaveToken]) instead of a page-held `remember { SkillSaveTokens() }`.
+     *
+     * Why this matters and why two authorities can collide: a page-held authority is re-created on
+     * recreation and its counter resets to 0, while rememberSaveable dialog state survives — so a
+     * stale in-flight save (token 0) and a post-recreation re-confirm (token 0 again) share a value and
+     * the late completion dismisses the WRONG, reopened dialog. The case below pins that collision:
+     * routing is only safe because the surviving VM authority never re-mints a live token.
+     *
+     * The cross-recreation coroutine/Compose path itself is not JVM-unit-testable here (no Robolectric
+     * in this source set; viewModelScope binds Dispatchers.Main), so the bug — a token-LIFETIME bug — is
+     * pinned at its routing-safety contract: under token reuse, routing mis-fires.
+     */
+    @Test
+    fun `routing mis-fires when a reset authority reuses a live token (why the authority must survive)`() {
+        // Old behavior: page-held authority A starts save A (token 0) and is then thrown away on
+        // recreation; a fresh authority B (re-remembered, counter 0) mints the reopened dialog's token.
+        val authorityBeforeRecreation = SkillSaveTokens()
+        val staleInFlightToken = authorityBeforeRecreation.next() // save A still running on viewModelScope
+
+        val authorityAfterRecreation = SkillSaveTokens() // page-held authorities do NOT survive recreation
+        val reopenedDialogToken = authorityAfterRecreation.next()
+
+        // Two independent authorities both start at 0 -> the value is reused across the boundary.
+        assertEquals(staleInFlightToken, reopenedDialogToken)
+        // ...and that reuse makes save A's late completion dismiss the reopened dialog (the bug).
+        assertTrue(
+            "reused token => stale completion wrongly dismisses the reopened dialog",
+            shouldDismiss(
+                completion = SkillSaveTarget(SkillSaveOrigin.ADD, staleInFlightToken),
+                openEditToken = null,
+                openAddToken = reopenedDialogToken,
+            )
+        )
+    }
+
+    @Test
+    fun `a single surviving authority never reuses a token, so no stale completion can collide`() {
+        // Fixed behavior: ONE VM-owned authority survives the recreation, so the save started before and
+        // the re-confirm after draw from the same monotonic counter and cannot share a value. Routing is
+        // then never tricked: the stale completion's token matches no open dialog.
+        val survivingAuthority = SkillSaveTokens()
+        val staleInFlightToken = survivingAuthority.next() // save A, dialog open with this token
+        // ... config change: VM + authority survive, dialog token restored from rememberSaveable ...
+        val reopenedDialogToken = survivingAuthority.next() // re-confirm draws the NEXT value
+        assertNotEquals(staleInFlightToken, reopenedDialogToken)
+        assertFalse(
+            "surviving authority => stale completion's token matches no open dialog",
+            shouldDismiss(
+                completion = SkillSaveTarget(SkillSaveOrigin.ADD, staleInFlightToken),
+                openEditToken = null,
+                openAddToken = reopenedDialogToken,
+            )
+        )
+    }
 }

@@ -41,9 +41,13 @@ enum class SkillSaveOrigin { EDIT, ADD }
 data class SkillSaveTarget(val origin: SkillSaveOrigin, val token: Long)
 
 /**
- * Mints monotonically increasing, never-reused save-invocation tokens. Held by the page (single-thread
- * Compose UI), so a plain counter is sufficient — no two open dialogs ever share a token, which is the
- * property that lets a completion match exactly its own dialog instance.
+ * Mints monotonically increasing, never-reused save-invocation tokens. The counter MUST live on the
+ * ViewModel, not the page: the save runs on [viewModelScope] and its completion is delivered across a
+ * config change (the VM survives, the Channel retains the event). A page-held counter resets to 0 on
+ * recreation while [rememberSaveable] dialog state survives — so the restored dialog's recorded token
+ * could no longer match the echoed completion (dialog stuck open), and a re-confirm would re-mint a
+ * value an in-flight save already carries (wrong-dialog dismissal). Co-locating the counter with the
+ * job that carries the token keeps tokens unique for exactly as long as a completion can arrive.
  */
 class SkillSaveTokens {
     private var next = 0L
@@ -67,7 +71,12 @@ class SkillDetailVM(
     private val _events = Channel<SkillDetailEvent>(Channel.BUFFERED)
     val events = _events.receiveAsFlow()
 
+    private val saveTokens = SkillSaveTokens()
+
     private var skillName = ""
+
+    /** Mint a save-invocation token. VM-owned so it survives config change with the in-flight save. */
+    fun nextSaveToken(): Long = saveTokens.next()
 
     fun init(name: String) {
         if (skillName == name) return

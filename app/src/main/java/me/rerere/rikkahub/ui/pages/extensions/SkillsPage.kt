@@ -83,11 +83,12 @@ fun SkillsPage() {
     var showImportDialog by rememberSaveable { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<SkillMetadata?>(null) }
 
-    // Save-invocation identity for the manual-add dialog: a completion dismisses the dialog only when
-    // its token still matches the open instance, so a stale save (dialog dismissed then reopened) does
-    // not close the fresh one.
-    val saveTokens = remember { SkillSaveTokens() }
-    var addSaveToken by remember { mutableStateOf<Long?>(null) }
+    // Save-invocation identity for the manual-add dialog. The token is minted by the VM
+    // (vm.nextSaveToken) so it survives config change with the in-flight save, and the page's recorded
+    // token is held in rememberSaveable so it survives the same recreation as showAddDialog above. A
+    // completion dismisses the dialog only when its token still matches the open instance, so a stale
+    // save (dialog dismissed then reopened) does not close the fresh one.
+    var addSaveToken by rememberSaveable { mutableStateOf<Long?>(null) }
     val fileImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -209,7 +210,7 @@ fun SkillsPage() {
         AddSkillDialog(
             onDismiss = { showAddDialog = false; addSaveToken = null },
             onConfirm = { name, content ->
-                val token = saveTokens.next()
+                val token = vm.nextSaveToken()
                 addSaveToken = token
                 vm.saveSkill(name, content, token)
             },

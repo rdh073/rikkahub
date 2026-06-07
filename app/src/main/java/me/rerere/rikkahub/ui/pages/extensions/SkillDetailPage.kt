@@ -72,12 +72,15 @@ fun SkillDetailPage(skillName: String) {
     var deleteTarget by remember { mutableStateOf<SkillFile?>(null) }
     val deleteFailedMsg = stringResource(R.string.skill_detail_page_delete_failed)
 
-    // Per-dialog save-invocation identity. A fresh token is minted on each confirm; a completion
-    // dismisses its dialog only when its token still matches the open instance, so a late save whose
-    // dialog was already dismissed-and-reopened (same category, newer token) never closes the new one.
-    val saveTokens = remember { SkillSaveTokens() }
-    var editSaveToken by remember { mutableStateOf<Long?>(null) }
-    var addSaveToken by remember { mutableStateOf<Long?>(null) }
+    // Per-dialog save-invocation identity. The token is minted by the VM (vm.nextSaveToken) so it
+    // survives config change with the in-flight save on viewModelScope, and the page's recorded token is
+    // held in rememberSaveable so it never has a shorter lifetime than the dialog state it guards
+    // (showAddDialog above is also rememberSaveable, so addSaveToken must survive the same recreation;
+    // editingFile is plain remember, so its dialog auto-closes on config change and editSaveToken being
+    // saveable is simply harmless). A completion dismisses its dialog only when its token still matches
+    // the open instance, so a late save whose dialog was dismissed-and-reopened never closes the new one.
+    var editSaveToken by rememberSaveable { mutableStateOf<Long?>(null) }
+    var addSaveToken by rememberSaveable { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(Unit) {
         vm.events.collect { event ->
@@ -133,7 +136,7 @@ fun SkillDetailPage(skillName: String) {
             initialContent = remember(skillFile.relativePath) { vm.readFile(skillFile) },
             onDismiss = { editingFile = null; editSaveToken = null },
             onConfirm = { content ->
-                val token = saveTokens.next()
+                val token = vm.nextSaveToken()
                 editSaveToken = token
                 vm.saveFile(skillFile.relativePath, content, SkillSaveTarget(SkillSaveOrigin.EDIT, token))
             },
@@ -144,7 +147,7 @@ fun SkillDetailPage(skillName: String) {
         AddFileDialog(
             onDismiss = { showAddDialog = false; addSaveToken = null },
             onConfirm = { fileName, content ->
-                val token = saveTokens.next()
+                val token = vm.nextSaveToken()
                 addSaveToken = token
                 vm.saveFile(fileName, content, SkillSaveTarget(SkillSaveOrigin.ADD, token))
             },
