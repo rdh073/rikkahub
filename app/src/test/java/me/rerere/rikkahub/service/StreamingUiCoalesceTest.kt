@@ -1,76 +1,65 @@
 package me.rerere.rikkahub.service
 
+import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure-logic test for [shouldPublishStreamingUpdate], the throttle predicate that decides whether a
- * streaming chunk should be written to the UI-facing conversation StateFlow. Keeping the decision
- * pure lets it run on the JVM without any Android / coroutine machinery, exactly like
- * [shouldRenewWakeLock] and its [WakeLockRenewTest].
+ * Regression test for the #108 streaming-UI coalescing. The whole UI-publish lifecycle — per-chunk
+ * window throttle AND the mandatory terminal flush on every termination path — lives in
+ * [StreamingUiCoalescer.coalesce], the exact same Flow-decorating seam
+ * [ChatService.handleMessageComplete] uses. The test drives that production operator with a fake chunk
+ * Flow and an injected clock + recording publish lambda, so it exercises the production wiring, NOT a
+ * hand-rolled copy of the collect/onCompletion loop.
  *
  * The invariant this guards (issue #108): for a fast SSE token stream, the whole-conversation UI
  * StateFlow must NOT be rewritten on every chunk (each rewrite triggers full recomposition + derived
- * work), yet the final merged state must NEVER be dropped. The canonical merged conversation is
- * computed per chunk regardless; only the StateFlow publish is gated, with a mandatory final flush.
- *
- * The replay model below drives BOTH production pure functions exactly as
- * [ChatService.handleMessageComplete] does: the per-chunk publish gate [shouldPublishStreamingUpdate]
- * AND the terminal flush decision [shouldFlushFinalStreamingUpdate]. Because the model calls the real
- * flush predicate (not a hand-rolled `lastPublishedValue != v` copy), deleting or weakening the
- * production flush — e.g. making it always-false or dropping the `!lastChunkPublished` guard — turns
- * these tests red. The "naive sample" model (gate only, no flush) is included to prove why the issue's
- * named anti-pattern drops the final state.
+ * work), yet the final merged state must NEVER be dropped. Because the terminal-flush CALL lives inside
+ * [StreamingUiCoalescer.coalesce] (via its `onCompletion { finish() }`), deleting that call — the #108
+ * regression — drops the final value and reddens [final value is always flushed...]. Likewise removing
+ * the throttle gate inside [StreamingUiCoalescer.onChunk] reddens [coalesces a fast burst...]. The
+ * finish-before-finalize ordering production relies on is guarded by [terminal flush runs upstream...].
  */
 class StreamingUiCoalesceTest {
 
     private val interval = STREAMING_UI_COALESCE_INTERVAL_MS
 
     /**
-     * Replays a chunk stream through the production gate ([shouldPublishStreamingUpdate]) plus the
-     * production terminal flush predicate ([shouldFlushFinalStreamingUpdate]) and records every UI
-     * publish. [times] is the per-chunk arrival clock (epoch-style millis); [values] is the merged
-     * value the chunk would carry (here an Int standing in for the merged Conversation).
-     *
-     * Mirrors the production loop variables 1:1: lastChunkMessages -> lastValue,
-     * lastChunkPublished -> lastChunkPublished.
+     * Drives the PRODUCTION [StreamingUiCoalescer.coalesce] operator over a fake chunk stream and
+     * records every publish. [times] is the per-chunk arrival clock (epoch-style millis); [values] is
+     * the merged value the chunk carries (an Int standing in for the merged conversation). The clock is
+     * advanced deterministically per emitted chunk via the injected `now` lambda.
      */
-    private fun publishesWithFlush(times: List<Long>, values: List<Int>): List<Int> {
+    private fun publishesViaCoalescer(
+        times: List<Long>,
+        values: List<Int>,
+    ): List<Int> = runBlocking {
         require(times.size == values.size)
         val published = mutableListOf<Int>()
-        var lastPublishAt = 0L
-        var lastValue: Int? = null
-        var lastChunkPublished = false
-        times.forEachIndexed { i, now ->
-            val v = values[i]
-            lastValue = v // canonical merged value is remembered every chunk
-            if (shouldPublishStreamingUpdate(lastPublishAt, now)) {
-                lastPublishAt = now
-                lastChunkPublished = true
-                published.add(v)
-            } else {
-                lastChunkPublished = false
-            }
-        }
-        // Terminal flush, gated by the production predicate (not a hand-rolled comparison).
-        if (shouldFlushFinalStreamingUpdate(lastValue != null, lastChunkPublished)) {
-            lastValue?.let { published.add(it) }
-        }
-        return published
+        val coalescer = StreamingUiCoalescer<Int>(publish = { published.add(it) })
+        var i = 0
+        coalescer.coalesce(
+            source = values.asFlow(),
+            now = { times[i++] },
+        ).collect { /* drain */ }
+        published
     }
 
-    /** The issue's named anti-pattern: gate only, NO final flush. Used to prove it drops the tail. */
-    private fun publishesNaiveSample(times: List<Long>, values: List<Int>): List<Int> {
+    /**
+     * Drives only the per-chunk throttle gate ([StreamingUiCoalescer.onChunk]) WITHOUT the terminal
+     * flush — i.e. the issue's named anti-pattern (naive `sample()`-style gate that can drop the tail).
+     * Used to establish the precondition that the gate alone drops a final chunk landing in the window.
+     */
+    private fun publishesViaGateOnly(times: List<Long>, values: List<Int>): List<Int> {
+        require(times.size == values.size)
         val published = mutableListOf<Int>()
-        var lastPublishAt = 0L
-        times.forEachIndexed { i, now ->
-            if (shouldPublishStreamingUpdate(lastPublishAt, now)) {
-                lastPublishAt = now
-                published.add(values[i])
-            }
-        }
+        val coalescer = StreamingUiCoalescer<Int>(publish = { published.add(it) })
+        times.forEachIndexed { i, now -> coalescer.onChunk(now, values[i]) }
         return published
     }
 
@@ -99,12 +88,12 @@ class StreamingUiCoalesceTest {
     @Test
     fun `coalesces a fast burst into far fewer UI publishes`() {
         // 50 chunks arriving 1 ms apart, all inside a few coalesce windows. The unfixed per-chunk
-        // publish writes the StateFlow 50 times; the gate must publish far fewer.
+        // publish writes the StateFlow 50 times; the coalescer must publish far fewer.
         val base = 1_000_000L
         val n = 50
         val times = (0 until n).map { base + it.toLong() } // +1ms spacing
         val values = (0 until n).toList()
-        val published = publishesWithFlush(times, values)
+        val published = publishesViaCoalescer(times, values)
         assertTrue(
             "expected far fewer than $n publishes, got ${published.size}",
             published.size < n / 2
@@ -114,21 +103,24 @@ class StreamingUiCoalesceTest {
     @Test
     fun `final value is always flushed even when it lands inside the throttle window`() {
         // Burst whose last chunk lands well inside the window after the previous publish, so the gate
-        // alone would not publish it. The mandatory flush must publish the LAST merged value.
+        // alone would not publish it. The throttle drops the tail, then collectCoalescing's
+        // onCompletion { finish() } MUST publish the LAST merged value. Deleting that finish() call —
+        // the #108 regression — drops the tail and reddens this assertion.
         val base = 1_000_000L
         val n = 50
         val times = (0 until n).map { base + it.toLong() }
         val values = (0 until n).toList()
 
-        val withFlush = publishesWithFlush(times, values)
-        assertEquals("final merged value must be the last published", values.last(), withFlush.last())
-
-        // Prove why naive sample() (the issue's named anti-pattern) is wrong: it drops the final value.
-        val naive = publishesNaiveSample(times, values)
+        // The last chunk was throttled (its time is 1 ms after the previous), so without the terminal
+        // flush it would NOT appear; the gate alone never publishes the final value here.
+        val gateOnly = publishesViaGateOnly(times, values)
         assertFalse(
-            "naive gate-only must NOT publish the final value (this is the bug to avoid)",
-            naive.last() == values.last()
+            "precondition: the gate alone must NOT publish the final value (it lands in the window)",
+            gateOnly.lastOrNull() == values.last()
         )
+
+        val published = publishesViaCoalescer(times, values)
+        assertEquals("final merged value must be the last published", values.last(), published.last())
     }
 
     @Test
@@ -138,7 +130,7 @@ class StreamingUiCoalesceTest {
         val base = 1_000_000L
         val times = (0 until 200).map { base + it.toLong() }
         val values = (0 until 200).toList()
-        val published = publishesWithFlush(times, values)
+        val published = publishesViaCoalescer(times, values)
         for (i in 1 until published.size) {
             assertTrue(
                 "publish must never go backwards: ${published[i]} after ${published[i - 1]}",
@@ -155,8 +147,41 @@ class StreamingUiCoalesceTest {
         val n = 10
         val times = (0 until n).map { base + it.toLong() * (interval + 5L) }
         val values = (0 until n).toList()
-        val published = publishesWithFlush(times, values)
+        val published = publishesViaCoalescer(times, values)
         assertEquals(values, published)
+    }
+
+    @Test
+    fun `empty stream publishes nothing even with terminal flush`() {
+        // No chunks received (immediate cancel / no tokens): collectCoalescing's terminal flush must
+        // not publish anything (nothing was ever remembered).
+        val published = runBlocking {
+            val out = mutableListOf<Int>()
+            StreamingUiCoalescer<Int>(publish = { out.add(it) })
+                .coalesce(source = emptyFlow())
+                .collect { /* drain */ }
+            out
+        }
+        assertTrue("empty stream must publish nothing, got $published", published.isEmpty())
+    }
+
+    @Test
+    fun `terminal flush runs upstream of a downstream onCompletion (finish before finalize)`() {
+        // Production composes coalesce(source).onCompletion { persist-and-notify }.collect{} and relies
+        // on the terminal flush firing BEFORE the downstream finalize reads the live state (#108: the
+        // final-flushed state must be the one persisted). coalesce's onCompletion sits upstream, so its
+        // finish() must run before any downstream onCompletion. Guard that ordering here.
+        val order = mutableListOf<String>()
+        runBlocking {
+            val coalescer = StreamingUiCoalescer<Int>(publish = { order.add("publish-$it") })
+            var i = 0
+            val times = listOf(1_000_000L, 1_000_001L) // 2nd chunk throttled -> only finish() publishes it
+            coalescer.coalesce(source = listOf(10, 20).asFlow(), now = { times[i++] })
+                .onCompletion { order.add("downstream-finalize") }
+                .collect { /* drain */ }
+        }
+        // finish() publishes the throttled tail (20) before the downstream finalize sees completion.
+        assertEquals(listOf("publish-10", "publish-20", "downstream-finalize"), order)
     }
 
     @Test
