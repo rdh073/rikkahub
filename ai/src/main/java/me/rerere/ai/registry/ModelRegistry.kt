@@ -577,12 +577,14 @@ object ModelRegistry {
     /**
      * Single source of truth for a model's usable context window (tokens), resolved in priority
      * order: explicit [Model.contextWindow] override -> registry family lookup -> conservative
-     * [DEFAULT_CONTEXT_WINDOW]. Always returns a value > 0 (a non-positive explicit override is
-     * ignored so a bad config can never disable the safety guard downstream).
+     * [DEFAULT_CONTEXT_WINDOW]. Always returns a value >= 2 — the minimum every downstream consumer
+     * (`tokenPressure` / `computeAllowedTokens` both `require(window >= 2)`) needs, so a sub-2 explicit
+     * override (reachable on a @Serializable Model via config import / backup-restore / hand-edit) is
+     * ignored rather than poisoning the trigger with an IllegalArgumentException.
      */
     fun getContextWindowForModel(model: Model): Int =
-        model.contextWindow?.takeIf { it > 0 }
-            ?: MODEL_CONTEXT_WINDOW.getData(model.modelId)?.takeIf { it > 0 }
+        model.contextWindow?.takeIf { it >= 2 }
+            ?: MODEL_CONTEXT_WINDOW.getData(model.modelId)?.takeIf { it >= 2 }
             ?: DEFAULT_CONTEXT_WINDOW
 
     private fun resolveModels(modelId: String): List<ModelDefinition> {

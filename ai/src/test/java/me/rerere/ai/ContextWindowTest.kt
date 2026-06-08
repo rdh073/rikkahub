@@ -14,8 +14,9 @@ import org.junit.Test
 /**
  * P6 (design #193, architecture-design:114): [ModelRegistry.getContextWindowForModel] resolution
  * order is `Model.contextWindow override -> registry family lookup -> DEFAULT_CONTEXT_WINDOW`, and it
- * never returns a value <= 0. Pure, JVM-testable: the resolver depends only on a [Model] value, no
- * Android/network.
+ * never returns a value < 2 — the floor every downstream consumer (`tokenPressure` /
+ * `computeAllowedTokens` both `require(window >= 2)`) needs. Pure, JVM-testable: the resolver depends
+ * only on a [Model] value, no Android/network.
  */
 class ContextWindowTest {
 
@@ -27,9 +28,11 @@ class ContextWindowTest {
     }
 
     @Test
-    fun `non-positive override is ignored and falls through`() {
-        // A bad config (0 or negative) must NOT disable the downstream safety guard. Falls through to
-        // the registry value for a known family.
+    fun `sub-2 override is ignored and falls through`() {
+        // A bad config (0, negative, or 1) must NOT disable the downstream safety guard: every
+        // downstream consumer requires window >= 2, so an override < 2 falls through to the registry
+        // value for a known family rather than poisoning the trigger. Regression: contextWindow = 1
+        // passed the old `> 0` floor and then threw IllegalArgumentException in tokenPressure.
         assertEquals(
             400_000,
             ModelRegistry.getContextWindowForModel(Model(modelId = "gpt-5", contextWindow = 0))
@@ -37,6 +40,10 @@ class ContextWindowTest {
         assertEquals(
             400_000,
             ModelRegistry.getContextWindowForModel(Model(modelId = "gpt-5", contextWindow = -1))
+        )
+        assertEquals(
+            400_000,
+            ModelRegistry.getContextWindowForModel(Model(modelId = "gpt-5", contextWindow = 1))
         )
     }
 
@@ -70,9 +77,11 @@ class ContextWindowTest {
     }
 
     @Test
-    fun `P6 resolver always returns a positive window for any id and any override`() {
-        // Property: regardless of id or override sign, the resolved window is strictly positive and
-        // equals the override exactly when the override is positive.
+    fun `P6 resolver always returns a window at least 2 and honors overrides at least 2`() {
+        // Property: regardless of id or override sign, the resolved window is >= 2 — the floor
+        // tokenPressure/computeAllowedTokens require — and equals the override exactly when the
+        // override is itself >= 2. Composes the resolver with its downstream contract so a sub-2
+        // override can never leak through (the prior `> 0` property blessed an illegal `1`).
         runBlocking {
             checkAll(
                 Arb.string(0..20),
@@ -80,8 +89,8 @@ class ContextWindowTest {
             ) { id, override ->
                 val model = Model(modelId = id, contextWindow = override)
                 val resolved = ModelRegistry.getContextWindowForModel(model)
-                assertTrue("resolved window must be > 0 (id='$id', override=$override)", resolved > 0)
-                if (override > 0) {
+                assertTrue("resolved window must be >= 2 (id='$id', override=$override)", resolved >= 2)
+                if (override >= 2) {
                     assertEquals(override, resolved)
                 }
             }
