@@ -863,6 +863,38 @@ class ChatService(
                                 runner = subagentRunner,
                                 parentModelId = assistant.chatModelId,
                                 settings = settings,
+                                // The subagent's pool is built from the TARGET (sub) assistant's own
+                                // allowlist — local tools + skills + MCP keyed off `sub` (the C3
+                                // MCP-by-target-assistant fix). The spawn tool is never built here
+                                // for the sub, so it can't recurse; SubagentRunner additionally
+                                // filters it, and needsApproval tools are dropped at the spawn site.
+                                buildSubagentTools = { sub ->
+                                    buildList {
+                                        addAll(localTools.getTools(sub.localTools))
+                                        if (sub.enabledSkills.isNotEmpty()) {
+                                            addAll(
+                                                createSkillTools(
+                                                    enabledSkills = sub.enabledSkills,
+                                                    allSkills = skillManager.listSkills(),
+                                                    skillManager = skillManager,
+                                                )
+                                            )
+                                        }
+                                        mcpManager.getAllAvailableTools(sub).forEach { (serverId, tool) ->
+                                            add(
+                                                Tool(
+                                                    name = "mcp__" + tool.name,
+                                                    description = tool.description ?: "",
+                                                    parameters = { tool.inputSchema },
+                                                    needsApproval = tool.needsApproval,
+                                                    execute = {
+                                                        mcpManager.callTool(serverId, tool.name, it.jsonObject)
+                                                    },
+                                                )
+                                            )
+                                        }
+                                    }
+                                },
                                 processingStatus = session.processingStatus,
                                 progressLabel = { subName ->
                                     context.getString(R.string.chat_subagent_running, subName)

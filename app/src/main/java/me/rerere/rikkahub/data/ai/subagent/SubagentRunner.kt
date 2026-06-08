@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai.subagent
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.data.ai.GenerationChunk
@@ -22,6 +23,7 @@ typealias SubagentGenerate = (
     model: Model,
     messages: List<UIMessage>,
     assistant: Assistant,
+    tools: List<Tool>,
     maxSteps: Int,
     processingStatus: MutableStateFlow<String?>,
 ) -> Flow<GenerationChunk>
@@ -43,24 +45,31 @@ class SubagentRunner(
 ) {
     /** DI/composition-root constructor: bind the engine to [GenerationHandler.generateText]. */
     constructor(generationHandler: GenerationHandler) : this(
-        generate = { settings, model, messages, assistant, maxSteps, processingStatus ->
+        generate = { settings, model, messages, assistant, tools, maxSteps, processingStatus ->
             generationHandler.generateText(
                 settings = settings,
                 model = model,
                 messages = messages,
                 assistant = assistant,
-                tools = emptyList(),
+                tools = tools,
                 maxSteps = maxSteps,
                 processingStatus = processingStatus,
             )
         }
     )
 
+    /**
+     * @param tools the subagent's own tool pool, built from the TARGET (sub) assistant's allowlist
+     *   by the caller. The runner applies [filterToolsForSubagent] to it unconditionally, so the
+     *   spawn tool can never reach a subagent regardless of how the caller assembled the pool —
+     *   the recursion guard (depth bounded at 1) is enforced here at the lowest correct point.
+     */
     suspend fun run(
         sub: Assistant,
         prompt: String,
         parentModelId: Uuid?,
         settings: Settings,
+        tools: List<Tool> = emptyList(),
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
     ): String {
         val modelId = resolveSubagentModel(sub, parentModelId, settings)
@@ -84,8 +93,12 @@ class SubagentRunner(
         // A fresh, throwaway message list — the sub-task starts from just the prompt.
         val messages = listOf(UIMessage.user(prompt))
 
+        // Strip the spawn tool from the sub's pool (recursion guard, depth bounded at 1). Enforced
+        // here so the guard holds no matter how the caller built `tools`.
+        val subagentTools = filterToolsForSubagent(tools)
+
         var finalMessages: List<UIMessage> = messages
-        generate(settings, model, messages, ephemeralSub, maxSteps, processingStatus).collect { chunk ->
+        generate(settings, model, messages, ephemeralSub, subagentTools, maxSteps, processingStatus).collect { chunk ->
             when (chunk) {
                 is GenerationChunk.Messages -> finalMessages = chunk.messages
             }

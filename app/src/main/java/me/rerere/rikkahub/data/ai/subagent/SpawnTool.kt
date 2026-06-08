@@ -29,6 +29,11 @@ import kotlin.uuid.Uuid
  *   each by its `description` and resolves the `subagent` argument against this set by name.
  * @param parentModelId the spawning assistant's model, inherited by a sub that pins none
  *   ([resolveSubagentModel]).
+ * @param buildSubagentTools builds the TARGET (sub) assistant's own tool pool from its allowlist
+ *   (local + skills + MCP). Supplied by the caller (`ChatService`) so this factory stays free of
+ *   Android `Context` / managers. The pool is filtered before it reaches the engine: the spawn tool
+ *   is stripped by [SubagentRunner.run] ([filterToolsForSubagent]) and `needsApproval=true` tools
+ *   are dropped here, because the approval UI is unreachable mid-subagent (v1 security note).
  * @param progressLabel produces the parent-facing processingStatus string for a running subagent
  *   (kept as a lambda so this factory stays free of Android `Context`).
  */
@@ -37,6 +42,7 @@ fun buildSpawnTool(
     runner: SubagentRunner,
     parentModelId: Uuid?,
     settings: Settings,
+    buildSubagentTools: (sub: Assistant) -> List<Tool>,
     processingStatus: MutableStateFlow<String?>,
     progressLabel: (subName: String) -> String,
 ): Tool = Tool(
@@ -73,14 +79,29 @@ fun buildSpawnTool(
         val sub = spawnableAssistants.firstOrNull { it.name == subName }
             ?: error("No spawnable subagent named \"$subName\". Available: ${spawnableAssistants.joinToString { it.name }}")
 
+        // The sub's own tool pool, minus tools whose approval UI is unreachable mid-subagent
+        // (v1 security note: a subagent runs only needsApproval=false tools). The spawn tool is
+        // additionally stripped inside SubagentRunner.run (recursion guard).
+        val subTools = buildSubagentTools(sub).filterNot { it.needsApproval }
+
+        // Set-then-clear discipline (mirrors OcrTransformer / KnowledgeRetrievalTransformer):
+        // restore the prior status on EVERY terminal path so a stale "Running <sub>" label can't
+        // leak into the parent's loading UI — including the error() throw on an unknown subagent
+        // / unresolvable model bubbling out of runner.run.
+        val prevStatus = processingStatus.value
         processingStatus.value = progressLabel(sub.name)
-        val result = runner.run(
-            sub = sub,
-            prompt = prompt,
-            parentModelId = parentModelId,
-            settings = settings,
-            processingStatus = processingStatus,
-        )
+        val result = try {
+            runner.run(
+                sub = sub,
+                prompt = prompt,
+                parentModelId = parentModelId,
+                settings = settings,
+                tools = subTools,
+                processingStatus = processingStatus,
+            )
+        } finally {
+            processingStatus.value = prevStatus
+        }
         listOf(UIMessagePart.Text(result))
     },
 )

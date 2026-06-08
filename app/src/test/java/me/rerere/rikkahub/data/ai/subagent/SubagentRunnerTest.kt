@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
@@ -13,6 +14,7 @@ import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.uuid.Uuid
 
@@ -42,6 +44,7 @@ class SubagentRunnerTest {
         lateinit var model: Model
         lateinit var messages: List<UIMessage>
         lateinit var assistant: Assistant
+        lateinit var tools: List<Tool>
         var maxSteps: Int = -1
         lateinit var processingStatus: MutableStateFlow<String?>
     }
@@ -50,16 +53,20 @@ class SubagentRunnerTest {
         captured: Captured,
         emit: List<GenerationChunk>,
     ): SubagentRunner = SubagentRunner(
-        generate = { settings, model, messages, assistant, maxSteps, processingStatus ->
+        generate = { settings, model, messages, assistant, tools, maxSteps, processingStatus ->
             captured.settings = settings
             captured.model = model
             captured.messages = messages
             captured.assistant = assistant
+            captured.tools = tools
             captured.maxSteps = maxSteps
             captured.processingStatus = processingStatus
             flowOf(*emit.toTypedArray())
         },
     )
+
+    private fun tool(name: String): Tool =
+        Tool(name = name, description = name, execute = { emptyList() })
 
     private fun assistantMsg(text: String): UIMessage =
         UIMessage(role = MessageRole.ASSISTANT, parts = listOf(UIMessagePart.Text(text)))
@@ -141,6 +148,31 @@ class SubagentRunnerTest {
         }
 
         assertEquals("answer-in-tool-output", result)
+    }
+
+    @Test
+    fun `run threads the subagent tool pool to the engine and strips the spawn tool`() {
+        val captured = Captured()
+        val sub = Assistant(name = "Sub", chatModelId = subModel.id)
+        val runner = runnerCapturing(captured, listOf(GenerationChunk.Messages(listOf(assistantMsg("x")))))
+
+        runBlocking {
+            runner.run(
+                sub = sub,
+                prompt = "go",
+                parentModelId = null,
+                settings = settingsWith(subModel),
+                // Pool includes the spawn tool itself — the recursion guard must remove it.
+                tools = listOf(tool("mcp__search"), tool(SPAWN_TOOL_NAME), tool("use_skill")),
+            )
+        }
+
+        // The engine receives the sub's tools (not emptyList()), and never the spawn tool.
+        assertEquals(listOf("mcp__search", "use_skill"), captured.tools.map { it.name })
+        assertTrue(
+            "the spawn tool must never reach a subagent (recursion guard)",
+            captured.tools.none { it.name == SPAWN_TOOL_NAME },
+        )
     }
 
     @Test
