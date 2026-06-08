@@ -167,6 +167,34 @@ class TokenEstimateTest {
     }
 
     @Test
+    fun `M1 a non-null zero usage does not shadow an earlier real total`() {
+        // Regression (design #193, finding #1): ChatCompletionsAPI.parseTokenUsage returns null ONLY
+        // when the whole `usage` object is absent; a chunk carrying `"usage": {}` (or a cancelled /
+        // interrupted stream) yields a non-null TokenUsage(0,0,0,0), which TokenUsage?.merge preserves
+        // as a non-null zero on a fresh assistant turn. Anchoring on `usage != null` would pick that
+        // later zero (anchorTotal = 0) and SHADOW the earlier turn's real 50k total, collapsing
+        // contextTokens to ~0 and silently disabling the trigger/warning. The anchor must key on a real
+        // reading (totalTokens > 0), so the real 50k stays the footprint.
+        val messages = listOf(
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(text("first reply")),
+                usage = TokenUsage(promptTokens = 49_000, completionTokens = 1_000, totalTokens = 50_000),
+            ),
+            userText("next question"),
+            UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(text("interrupted reply")),
+                usage = TokenUsage(0, 0, 0, 0), // non-null but all-zero (e.g. "usage": {})
+            ),
+        )
+        assertTrue(
+            "a zero-usage later turn must not collapse the footprint below the real 50k total",
+            contextTokens(messages) >= 50_000,
+        )
+    }
+
+    @Test
     fun `M1 clearing stale usage drops the anchor to a conservative estimate`() {
         // Models the post-compaction invariant (design #193): a kept assistant message whose usage
         // recorded a now-summarized prefix is a stale-high anchor. With usage present, contextTokens

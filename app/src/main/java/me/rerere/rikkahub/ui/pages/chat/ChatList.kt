@@ -264,7 +264,12 @@ private fun ChatListNormal(
     val chatModel = remember(modelById, assistant, settings.chatModelId) {
         modelById[assistant?.chatModelId ?: settings.chatModelId]
     }
-    val sizeInfo = rememberConversationSizeInfo(conversation, chatModel, assistant?.maxTokens)
+    val sizeInfo = rememberConversationSizeInfo(
+        conversation = conversation,
+        model = chatModel,
+        assistantMaxTokens = assistant?.maxTokens,
+        autoCompactThreshold = assistant?.autoCompactThreshold,
+    )
     var showSizeWarningDialog by rememberSaveable(conversation.id) { mutableStateOf(true) }
     if (sizeInfo.showWarning && showSizeWarningDialog) {
         ConversationSizeWarningDialog(

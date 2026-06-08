@@ -77,12 +77,21 @@ private fun fudgedChars(chars: Int, charsPerToken: Double): Int =
  * AFTER that anchor — the pending user turn and any just-added attachments/tool results — so a huge
  * single paste can't escape the trigger by being one turn ahead of the real count.
  *
- * Cold start (no message has usage yet, e.g. first turn or a cancelled stream that omitted usage):
- * estimate the whole list. If that is also empty, the result is 0 -> the caller treats it as "no
- * decision yet" (the no-op guard).
+ * The anchor keys on a REAL reading (`totalTokens > 0`), not mere `usage != null`: an all-zero
+ * [TokenUsage] (0,0,0,0) is reachable and persisted — an OpenAI-compatible chunk carrying `"usage": {}`
+ * or a cancelled/interrupted stream parses to a non-null zero usage (ChatCompletionsAPI.parseTokenUsage
+ * returns null ONLY when the whole `usage` object is absent), and a new assistant turn whose only seen
+ * usage is zero merges to a non-null TokenUsage(0,0,0,0). Anchoring on nullability would pick that
+ * later zero as the anchor (anchorTotal = 0) and SHADOW an earlier turn's real total (e.g. 50k),
+ * collapsing the footprint to ~0 and silently disabling the trigger/warning. A zero total carries no
+ * signal, so it is transparent to the anchor: we fall back to the last turn that actually has one.
+ *
+ * Cold start (no message has a real usage yet, e.g. first turn or a cancelled stream that omitted
+ * usage): estimate the whole list. If that is also empty, the result is 0 -> the caller treats it as
+ * "no decision yet" (the no-op guard).
  */
 fun contextTokens(messages: List<UIMessage>): Int {
-    val anchorIndex = messages.indexOfLast { it.usage != null }
+    val anchorIndex = messages.indexOfLast { (it.usage?.totalTokens ?: 0) > 0 }
     if (anchorIndex < 0) {
         return estimateTokensForMessages(messages)
     }

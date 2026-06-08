@@ -89,6 +89,7 @@ import me.rerere.rikkahub.service.mutation.ConversationMutations
 import me.rerere.rikkahub.service.notification.ChatNotificationSender
 import me.rerere.rikkahub.web.NotFoundException
 import me.rerere.rikkahub.utils.applyPlaceholders
+import me.rerere.rikkahub.utils.shouldRethrowVmError
 import java.time.Instant
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -519,7 +520,14 @@ class ChatService(
 
                 _generationDoneFlow.emit(conversationId)
             } catch (e: Exception) {
-                if (e !is CancellationException) Log.e(TAG, "sendMessage: generation pipeline failed", e)
+                // 用户主动停止（stopGeneration 取消本 job）是协作式取消，不是“发送失败”：CancellationException
+                // 必须重新抛出让取消沿结构化并发向上传播，绝不被当作普通异常吞掉。旧代码 catch(Exception) 捕获了
+                // 它却不重抛、落到 addError（addError 虽对取消早退、不上报，但本 job 会“正常完成”而非传播取消，破坏
+                // 结构化并发）。maybeAutoCompact 在取消路径重新抛出的 CancellationException 同样经此重抛传播。
+                // 复用全局分类器 shouldRethrowVmError（与 launchVm/runEmitting 同一约定）；仅捕获 Exception，保留
+                // 原 Error 不被本块捕获的语义。
+                if (shouldRethrowVmError(e)) throw e
+                Log.e(TAG, "sendMessage: generation pipeline failed", e)
                 addError(e, conversationId, title = context.getString(R.string.error_title_send_message))
             }
         }
@@ -1113,11 +1121,20 @@ class ChatService(
         //
         // Strip usage from the kept messages (design #193): a kept message's TokenUsage recorded the
         // prompt size of a request that INCLUDED the now-summarized prefix. After this rewrite that
-        // total is stale-high, and contextTokens() anchors on the last usage-bearing message — leaving
-        // it would make the token trigger / size warning re-fire every turn on a conversation we just
-        // shrank, defeating the very point of compaction (and the circuit breaker). Clearing it lets
-        // contextTokens fall back to a conservative estimate of the smaller post-compaction history
-        // until the next real generation writes a fresh, accurate usage.
+        // total is stale-high, and contextTokens() anchors on the last message with a real total —
+        // leaving it would make the token trigger / size warning re-fire every turn on a conversation we
+        // just shrank, defeating the very point of compaction (and tripping the circuit breaker in ~3
+        // turns). Clearing it lets contextTokens fall back to a conservative estimate of the smaller
+        // post-compaction history until the next real generation writes a fresh, accurate usage.
+        //
+        // This is a deliberate Stage-1 trade-off (NOT a summarizer change): the strip is the minimal
+        // honest invalidation of a now-false measurement anchor, and it lives at the compaction write
+        // site because the compaction IS the event that makes prior usage stale. The contextTokens-side
+        // `totalTokens > 0` anchor fix only covers all-zero usage, not a stale NON-zero total; making
+        // the measurement skip stale anchors generically would require a compaction-boundary marker,
+        // which is an explicit Stage-2 non-goal (design R7: boundary metadata recorded but not consumed
+        // in Stage 1). Known cost: the kept recent messages lose their per-message token stats in the
+        // nerd line (ChatMessageNerdLine, when showTokenUsage is on) until the next generation.
         val newMessageNodes = buildList {
             compressedSummaries.forEach { summary ->
                 add(UIMessage.user(summary).toMessageNode())
