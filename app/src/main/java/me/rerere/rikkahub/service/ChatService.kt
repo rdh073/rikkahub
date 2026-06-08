@@ -34,6 +34,7 @@ import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.Tool
+import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.core.contextTokens
 import me.rerere.ai.core.resolveReserveOutput
 import me.rerere.ai.core.shouldAutoCompact
@@ -265,6 +266,24 @@ internal fun nextAutoCompactFailureCount(
     AutoCompactOutcome.FAILURE -> current + 1
     AutoCompactOutcome.CANCELLATION -> current
 }
+
+/**
+ * 纯函数：把一条「保留」消息的 [TokenUsage] 中**唯一**因压缩而失真的字段——压力锚 [TokenUsage.totalTokens]
+ * ——置零，其余三项（prompt/completion/cached）原样保留。抽出以便 JVM 单测（无 Android/协程依赖）。
+ *
+ * 为什么只清 totalTokens：压缩把被保留消息之前的历史折成摘要后，这些消息记录的 totalTokens 反映的是一个
+ * **包含已被摘要前缀**的旧请求大小，已偏高且失真；而 contextTokens 的锚谓词正是 `totalTokens > 0`
+ * （[me.rerere.ai.core.contextTokens]），故把它置零即让锚跳过该消息、回落到对压缩后较小历史的保守估算，
+ * 避免 token 触发/尺寸告警每回合误触（并在约三回合内拉闸熔断）。
+ *
+ * 为什么**不**清整个 usage：prompt/completion/cachedTokens 是该消息真实的逐条统计，并非失真的锚——
+ * 它们被 [me.rerere.rikkahub.data.db.dao.getTokenStats] 的终身聚合（直接 SUM 持久化 JSON 里的
+ * `$.usage.promptTokens/completionTokens/cachedTokens`）与 nerd 行逐条读取。压缩会 saveConversation 把
+ * 结果写回 Room，故置 null 会**永久**抹掉这些 token、不可还原；只清锚则两者均不受损。这是设计 #193 Stage-1
+ * 对失真测量锚的最小化诚实失效，非 summarizer 行为变更（仍是 Stage-2 非目标）。
+ */
+internal fun invalidateStalePressureAnchor(usage: TokenUsage?): TokenUsage? =
+    usage?.copy(totalTokens = 0)
 
 data class ChatError(
     val id: Uuid = Uuid.random(),
@@ -1119,27 +1138,36 @@ class ChatService(
 
         // Create new conversation with compressed history as multiple user messages + kept messages.
         //
-        // Strip usage from the kept messages (design #193): a kept message's TokenUsage recorded the
-        // prompt size of a request that INCLUDED the now-summarized prefix. After this rewrite that
-        // total is stale-high, and contextTokens() anchors on the last message with a real total —
-        // leaving it would make the token trigger / size warning re-fire every turn on a conversation we
-        // just shrank, defeating the very point of compaction (and tripping the circuit breaker in ~3
-        // turns). Clearing it lets contextTokens fall back to a conservative estimate of the smaller
-        // post-compaction history until the next real generation writes a fresh, accurate usage.
+        // Invalidate ONLY the stale pressure anchor on the kept messages (design #193), not the whole
+        // TokenUsage: a kept message's totalTokens recorded the prompt size of a request that INCLUDED
+        // the now-summarized prefix, so after this rewrite that total is stale-high. contextTokens()
+        // anchors on the last message whose totalTokens > 0, so leaving it would make the token trigger /
+        // size warning re-fire every turn on a conversation we just shrank, defeating the very point of
+        // compaction (and tripping the circuit breaker in ~3 turns). Zeroing totalTokens lets
+        // contextTokens fall back to a conservative estimate of the smaller post-compaction history until
+        // the next real generation writes a fresh, accurate usage. See invalidateStalePressureAnchor.
         //
-        // This is a deliberate Stage-1 trade-off (NOT a summarizer change): the strip is the minimal
-        // honest invalidation of a now-false measurement anchor, and it lives at the compaction write
-        // site because the compaction IS the event that makes prior usage stale. The contextTokens-side
-        // `totalTokens > 0` anchor fix only covers all-zero usage, not a stale NON-zero total; making
-        // the measurement skip stale anchors generically would require a compaction-boundary marker,
-        // which is an explicit Stage-2 non-goal (design R7: boundary metadata recorded but not consumed
-        // in Stage 1). Known cost: the kept recent messages lose their per-message token stats in the
-        // nerd line (ChatMessageNerdLine, when showTokenUsage is on) until the next generation.
+        // The other three fields (prompt/completion/cachedTokens) are NOT anchors — they are this
+        // message's true per-message stats. They feed the irreversible lifetime aggregate
+        // (getTokenStats SUMs them straight out of the persisted JSON) and the per-message nerd line,
+        // and saveConversation below persists this rewrite to Room. Nulling the whole usage (the prior
+        // approach) would erase those tokens permanently with no round-trip; invalidating only the
+        // anchor preserves them while still skipping the kept message in the trigger.
+        //
+        // This is a deliberate Stage-1 trade-off (NOT a summarizer change), at the compaction write site
+        // because compaction IS the event that makes prior totalTokens stale. The contextTokens-side
+        // `totalTokens > 0` anchor only covers all-zero usage, not a stale NON-zero total; making the
+        // measurement skip stale anchors generically would require a compaction-boundary marker, an
+        // explicit Stage-2 non-goal (design R7: boundary metadata recorded but not consumed in Stage 1).
         val newMessageNodes = buildList {
             compressedSummaries.forEach { summary ->
                 add(UIMessage.user(summary).toMessageNode())
             }
-            addAll(messagesToKeep.map { it.copy(usage = null).toMessageNode() })
+            addAll(
+                messagesToKeep.map {
+                    it.copy(usage = invalidateStalePressureAnchor(it.usage)).toMessageNode()
+                },
+            )
         }
         val newConversation = conversation.copy(
             messageNodes = newMessageNodes,
