@@ -1,5 +1,8 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -30,6 +33,14 @@ import me.rerere.rikkahub.data.model.Assistant
  *    enabled automation AND a non-null [CapabilityGuard] is supplied. A null guard = no authority.
  *  - **Guard BEFORE backend (S2):** [Tool.execute] calls [CapabilityGuard.authorize] first and only
  *    reaches [AutomationCore.observe] on ADMIT — the backend is never touched on a DENY.
+ *  - **Revoke cancels in-flight + closes the authorize→observe race (I9):** the capture runs inside
+ *    [CapabilityGuard.guardInFlight], so a kill-switch `revoke()` cancels the parked observe via the
+ *    owning [Job], and a revoke that fires after authorize() but before the backend hit denies
+ *    instead of capturing (mirrors the kernel's proven P20).
+ *  - **Captured target bound to the authorized target (TOCTOU):** the foreground package is read once
+ *    to authorize; after capture the snapshot's `foregroundPkg` is re-asserted to equal it, so a
+ *    foreground app switch between the two reads yields a denial, never a snapshot of an unauthorized
+ *    app.
  *  - **Authority is closed over, never model-supplied (I2):** the guard is captured here; the model's
  *    JSON args carry no caller context (a JSON-passed lease would be forgeable — gate finding 6).
  *  - **Fail-closed on malformed args (P24):** a non-object argument is reported `malformed=true` so
@@ -74,9 +85,10 @@ fun getUiAutomationTools(
                 // S2: authorize BEFORE the backend. Read the foreground package first so the guard
                 // decides on the real target (not the post-observe one). Authority is the closed-over
                 // guard, never anything in `args`.
+                val authorizedPkg = foregroundPkg()
                 val request = AuthRequest(
                     verb = Verb.OBSERVE,
-                    targetPkg = foregroundPkg(),
+                    targetPkg = authorizedPkg,
                     // ui_observe is a read: no sink, no sensitive/system write target.
                     malformed = args !is JsonObject,
                     rawArgs = args.toString(),
@@ -84,8 +96,30 @@ fun getUiAutomationTools(
                 if (guard.authorize(request) == Decision.DENY) {
                     listOf(UIMessagePart.Text(OBSERVE_DENIED_MESSAGE))
                 } else {
-                    val snapshot = core.observe()
-                    listOf(UIMessagePart.Text(renderCompactSnapshot(snapshot)))
+                    // I9 (revoke cancels in-flight) + close the authorize→observe window: route the
+                    // backend capture through the guard's shared RevocationToken. A concurrent
+                    // revoke()/kill-switch cancels the parked capture via the owning Job, and a
+                    // revoke that fires between authorize() and here lands in onAlreadyRevoked so the
+                    // backend is never hit. Mirrors the kernel's proven P20.
+                    val job = currentCoroutineContext()[Job]
+                    guard.guardInFlight(
+                        cancel = { job?.cancel(CancellationException("automation revoked")) },
+                        onAlreadyRevoked = { listOf(UIMessagePart.Text(OBSERVE_DENIED_MESSAGE)) },
+                        block = {
+                            val snapshot = core.observe()
+                            // TOCTOU on the authorization target (gate finding): the foreground app
+                            // may have switched between the authorize-read above and this capture.
+                            // Bind the captured snapshot to the authorized package — if they differ,
+                            // we captured an app the guard never admitted, so deny rather than
+                            // disclose it (the projector still stripped host/password content, but an
+                            // unauthorized foreign app must not be surfaced at all).
+                            if (snapshot.foregroundPkg != authorizedPkg) {
+                                listOf(UIMessagePart.Text(OBSERVE_DENIED_MESSAGE))
+                            } else {
+                                listOf(UIMessagePart.Text(renderCompactSnapshot(snapshot)))
+                            }
+                        },
+                    )
                 }
             },
         ),

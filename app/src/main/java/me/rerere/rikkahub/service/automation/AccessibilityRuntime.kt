@@ -120,25 +120,37 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
      * load-bearing: the caller fails closed and revokes the lease so `ui_observe` is not exposed
      * without a reachable STOP.
      *
-     * The `WindowManager` add must run on the service main thread, so this blocks the caller on a
-     * round-trip to [mainHandler]. The caller is the generation coroutine (never the main thread),
-     * so this never self-deadlocks.
+     * The `WindowManager` add must run on the service main thread. The activation that calls this is
+     * dispatched on `AppScope`'s `Dispatchers.Main` (RikkaHubApp.kt), so the calling thread IS the
+     * main thread — posting to [mainHandler] and then blocking on the result would deadlock (the
+     * Runnable can only run on the now-blocked main thread). [runOnMainSync] therefore runs the
+     * `WindowManager` add inline when already on the main looper, and only posts-then-blocks when
+     * genuinely off-main (where blocking is safe).
      */
-    fun showOverlay(onStop: () -> Unit): Boolean {
-        val shown = CompletableFuture<Boolean>()
-        mainHandler.post {
-            if (overlay == null) overlay = KillSwitchOverlay(this, onStop)
-            shown.complete(overlay?.show() == true)
-        }
-        return shown.get()
+    fun showOverlay(onStop: () -> Unit): Boolean = runOnMainSync {
+        if (overlay == null) overlay = KillSwitchOverlay(this, onStop)
+        overlay?.show() == true
     }
 
     /** Hide the floating STOP kill-switch (design §7) on the 1→0 edge — the last session ended. */
     fun hideOverlay() {
-        mainHandler.post {
+        runOnMainSync {
             overlay?.hide()
             overlay = null
         }
+    }
+
+    /**
+     * Run [block] on the service main thread, reusing the current thread when it already IS the main
+     * looper (so a main-dispatched caller never self-deadlocks waiting on a Runnable that can only run
+     * on the blocked main thread). Off-main callers post-then-block, which is safe. The block touches
+     * `WindowManager`, which is main-thread-only.
+     */
+    private fun <T> runOnMainSync(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) return block()
+        val result = CompletableFuture<T>()
+        mainHandler.post { result.complete(block()) }
+        return result.get()
     }
 
     /** The package owning the active window; null when nothing is reachable (fails closed upstream). */
@@ -210,9 +222,16 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
             val pkg = root.packageName?.toString() ?: return null
             RawWindow(
                 pkg = pkg,
-                // The a11y framework does not expose FLAG_SECURE on a window; a secure window simply
-                // returns no readable content (handled by the null-root branch above), so we report
-                // false rather than fabricate a flag we cannot read.
+                // The a11y framework exposes NO reliable FLAG_SECURE signal on a window, so this
+                // backend cannot set `secure` truthfully and reports false rather than fabricate a
+                // flag it cannot read. This is a genuine platform limitation, NOT a guarantee that a
+                // FLAG_SECURE window is empty: FLAG_SECURE blocks screenshots, not necessarily the
+                // a11y tree, so such a window MAY still expose non-password nodes here. The defenses
+                // that DO hold are node-level: password nodes are masked by SnapshotProjector (I1/P1),
+                // a window with no readable content is dropped by the null-root branch above, and the
+                // v1 surface is empty-by-default so nothing is projected without an explicit grant.
+                // (The projector's window-level `secure` short-circuit is wired for a future backend
+                // that CAN read the flag, e.g. an ADB backend; it is intentionally never true here.)
                 secure = false,
                 systemWindow = type == AccessibilityWindowInfo.TYPE_SYSTEM || pkg.isSystemUiPackage(),
                 root = root.toRawNode(),

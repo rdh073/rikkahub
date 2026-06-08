@@ -161,6 +161,98 @@ class AutomationActivationTrackerTest {
         assertFalse(overlay.visible)
     }
 
+    /**
+     * THE finding-2 (cancel-relaunch) regression. The tracker is keyed by conversationId, so two
+     * generations of the SAME conversation (a regenerate / tool-approval cancels an in-flight
+     * automation gen and re-enters handleMessageComplete, minting a fresh guard) share one refcount
+     * slot. handleMessageComplete's finally must therefore gate its `deactivate(conversationId)` on
+     * `session.activeAutomationGuard === thisGenerationsGuard` — exactly as it already gates the
+     * guard-clear — so the superseded old generation's late finally does NOT empty the refcount and
+     * hide the floating STOP while the NEW generation is live and observing a foreign app.
+     *
+     * This models that finally-gate (the production change) against the real tracker: an UNGUARDED
+     * old-gen deactivate drops the overlay (the regression), while the IDENTITY-GUARDED one preserves
+     * it. Each generation owns the same conversationId; `activeAutomationGuard` points at whichever
+     * generation is current.
+     */
+    @Test
+    fun `an unguarded stale deactivate drops the overlay - this is the finding-2 bug`() {
+        // EXECUTABLE PROOF OF THE BUG the fix removes. The pre-fix finally called
+        // `deactivate(conversationId)` UNCONDITIONALLY. With two generations sharing one conversationId
+        // (cancel-relaunch), the superseded old gen's late deactivate empties the conversationId-keyed
+        // refcount and hides the floating STOP — while the new gen is still live and observing a
+        // foreign app. This reproduces exactly that against the real tracker.
+        val overlay = FakeOverlay()
+        val tracker = tracker(overlay)
+        val conversationId = convId()
+
+        tracker.activate(conversationId)            // old generation
+        tracker.activate(conversationId)            // new generation supersedes (same key ⇒ refcount {conv})
+        tracker.deactivate(conversationId)          // old gen's UNGUARDED late finally
+
+        assertFalse("the unguarded stale deactivate hides the STOP overlay (the bug)", overlay.visible)
+        assertEquals(0, tracker.activeCount)
+    }
+
+    /**
+     * THE finding-2 (cancel-relaunch) regression — the fix. The tracker is keyed by conversationId, so
+     * two generations of the SAME conversation (a regenerate / tool-approval cancels an in-flight
+     * automation gen and re-enters handleMessageComplete, minting a fresh guard) share one refcount
+     * slot. handleMessageComplete's finally therefore gates its `deactivate(conversationId)` on
+     * `session.activeAutomationGuard === thisGenerationsGuard` — exactly as it already gates the
+     * guard-clear — so the superseded old generation's late finally does NOT empty the refcount and
+     * hide the floating STOP while the NEW generation is live and observing a foreign app.
+     *
+     * This drives that finally-gate (the production change) against the real tracker; contrast with
+     * `an unguarded stale deactivate drops the overlay` above, which shows the same sequence WITHOUT
+     * the gate dropping the overlay. `activeAutomationGuard` points at whichever generation is current.
+     */
+    @Test
+    fun `superseded generation must not deactivate the overlay for the live generation`() {
+        val overlay = FakeOverlay()
+        val tracker = tracker(overlay)
+        val conversationId = convId()
+
+        // Stand-ins for the two CapabilityGuard instances (object identity is all that matters here).
+        val oldGuard = Any()
+        val newGuard = Any()
+        // The session's currently-active guard reference (ChatService.session.activeAutomationGuard).
+        var activeAutomationGuard: Any? = null
+
+        // The exact finally-block gate from handleMessageComplete: only the generation that is still
+        // the session's active one releases the lease + overlay.
+        fun finallyRelease(thisGenerationsGuard: Any) {
+            if (activeAutomationGuard === thisGenerationsGuard) {
+                activeAutomationGuard = null
+                tracker.deactivate(conversationId)
+            }
+        }
+
+        // --- old generation activates ---
+        activeAutomationGuard = oldGuard
+        assertTrue(tracker.activate(conversationId))
+        assertTrue("overlay up for the old generation", overlay.visible)
+
+        // --- new generation supersedes it (cancel-relaunch on the same conversation): it mints a new
+        // guard, becomes the active one, and re-activates (refcount stays {conv}, overlay already up).
+        activeAutomationGuard = newGuard
+        assertTrue("re-activation on the same conversation is reachable via the live overlay", tracker.activate(conversationId))
+
+        // --- the OLD generation's cancelled job now runs its finally LATE. With the identity gate it
+        // is a no-op (its guard is no longer active), so the overlay survives for the new generation.
+        finallyRelease(oldGuard)
+
+        assertTrue("the live generation's STOP overlay must survive the stale old finally", overlay.visible)
+        assertEquals("the superseded finally must not hide the overlay", 0, overlay.hideCalls.get())
+        assertEquals(1, tracker.activeCount)
+
+        // --- when the NEW (live) generation finishes, its finally IS the active one ⇒ 1→0 hide. ---
+        finallyRelease(newGuard)
+        assertFalse("the last live generation releases the overlay", overlay.visible)
+        assertEquals(1, overlay.hideCalls.get())
+        assertEquals(0, tracker.activeCount)
+    }
+
     @Test
     fun `concurrent activate and deactivate of distinct sessions never lose the overlay`() {
         val overlay = FakeOverlay()

@@ -1063,14 +1063,20 @@ class ChatService(
                 // UI automation (#187): release the per-conversation lease + STOP overlay on EVERY
                 // terminal path — normal finish, error, cancellation, OR a throw while assembling
                 // generateText's eager arguments (which runs before the flow's onCompletion exists).
-                // Identity-compare before clearing so a stale completion of an old generation cannot
-                // null a NEWER generation's guard (setJob cancels the old job; its finally may run
-                // after the new one mints a fresh guard). deactivate refcounts the shared overlay:
-                // it hides only when THIS was the last active automation session.
-                if (automationGuard != null) {
-                    if (session.activeAutomationGuard === automationGuard) {
-                        session.activeAutomationGuard = null
-                    }
+                //
+                // BOTH the guard-clear AND the overlay deactivate are identity-guarded on
+                // `activeAutomationGuard === automationGuard`. The activation tracker is keyed by
+                // conversationId, so for a cancel-relaunch on the SAME conversation (regenerate /
+                // tool-approval cancel an in-flight gen, then re-enter handleMessageComplete WITHOUT
+                // sendMessage's previousJob.join() barrier) the old gen's late finally would otherwise
+                // deactivate(conversationId) — emptying the refcount and hiding the floating STOP —
+                // while the new gen's guard is already live and observing a foreign app. Gating the
+                // deactivate on identity means the superseded generation (whose guard is no longer the
+                // session's active one) touches neither the guard slot nor the overlay; the live
+                // generation owns the 1→0 deactivate when IT terminates. (sendMessage's join() makes
+                // the old finally run before the new activate, so identity holds there too.)
+                if (automationGuard != null && session.activeAutomationGuard === automationGuard) {
+                    session.activeAutomationGuard = null
                     automationActivation.deactivate(conversationId)
                 }
             }

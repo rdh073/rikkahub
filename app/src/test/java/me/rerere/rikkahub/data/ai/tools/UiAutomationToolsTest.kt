@@ -1,6 +1,12 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -265,5 +271,108 @@ class UiAutomationToolsTest {
 
         assertEquals(0, backend.snapshotCount)
         assertTrue((parts.single() as UIMessagePart.Text).text.contains("denied", ignoreCase = true))
+    }
+
+    // --- 5. I9: revoke() cancels an in-flight observe (gate finding "revoke cancels in-flight") ---
+
+    /**
+     * THE finding-3 regression. The unfixed factory called `core.observe()` directly after an ADMIT,
+     * so a kill-switch `revoke()` (which only denies FUTURE authorize) could not abort a capture
+     * already parked in the backend. The fix routes the capture through
+     * `CapabilityGuard.guardInFlight`, so revoking the guard while the observe is parked cancels the
+     * owning coroutine. Asserts the capture coroutine is cancelled rather than completing with a
+     * snapshot.
+     */
+    @Test
+    fun `revoke cancels an in-flight observe instead of letting it complete`() {
+        runBlocking {
+            val backend = FakeBackend(targetTree())
+            backend.armGate() // the next snapshotRawTree() parks until the owning coroutine is cancelled
+            val guard = healthyGuard()
+            val tool = observeTool(Assistant(uiAutomationEnabled = true), guard, backend).single()
+
+            val started = CompletableDeferred<Unit>()
+            val job: Job = launch(Dispatchers.Default) {
+                started.complete(Unit)
+                tool.execute(buildJsonObject { })
+            }
+            started.await()
+            // Give execute() ample scheduler turns to pass authorize() and park inside the backend
+            // gate (snapshotCount stays 0 until the gated await returns). The gate guarantees it
+            // cannot finish on its own, so this only needs to outlast the launch→authorize→park hop.
+            repeat(50) { yield() }
+            check(backend.snapshotCount == 0) { "precondition: capture must still be parked at the gate" }
+
+            guard.revoke() // the kill-switch trips while the capture is in flight
+
+            // On the FIXED factory, revoke() cancels the parked capture via the owning Job, so the
+            // join completes promptly. On the UNFIXED factory (direct core.observe(), nothing
+            // registered on the token) revoke() cannot reach the parked coroutine and the join would
+            // hang forever — the bounded wait turns that into a deterministic failure, not a flaky
+            // CI timeout.
+            withTimeout(5_000) { job.join() }
+
+            assertTrue("revoke must cancel the parked capture, not let it finish", job.isCancelled)
+            assertEquals("the gated snapshot must never complete", 0, backend.snapshotCount)
+        }
+    }
+
+    /**
+     * Companion to finding 3: a `revoke()` that fires AFTER authorize() admits but BEFORE the backend
+     * call must deny (onAlreadyRevoked), never capture — closing the authorize→observe window. Modeled
+     * by revoking the guard, then invoking execute: authorize() denies on REVOKED here, but the
+     * guarded-in-flight re-check is the production safety net for the same-instant race.
+     */
+    @Test
+    fun `a revoke between authorize and observe denies without capturing`() {
+        val backend = FakeBackend(targetTree())
+        val guard = healthyGuard()
+        val tool = observeTool(Assistant(uiAutomationEnabled = true), guard, backend).single()
+
+        guard.revoke()
+        val parts = runBlocking { tool.execute(buildJsonObject { }) }
+
+        assertEquals("a revoked guard must never reach the backend", 0, backend.snapshotCount)
+        assertTrue((parts.single() as UIMessagePart.Text).text.contains("denied", ignoreCase = true))
+    }
+
+    // --- 6. TOCTOU: the captured snapshot is bound to the authorized target ---
+
+    /**
+     * THE finding-4 regression. The factory reads the foreground package once to authorize, then the
+     * backend captures whatever is foreground at capture time. If the foreground app switched in
+     * between, the unfixed factory returned a snapshot for an app the guard never admitted —
+     * unauthorized screen disclosure. The fix re-asserts `snapshot.foregroundPkg == authorizedPkg`
+     * after capture and denies on mismatch. Here the guard authorizes `target` (the foreground at
+     * authorize-time) but the backend's tree reports a DIFFERENT foreground package.
+     */
+    @Test
+    fun `a foreground switch between authorize and capture is denied not disclosed`() {
+        // Authorized target is `target`; surface allows it AND the app it switched to, so the deny can
+        // ONLY come from the captured-target binding, not from the surface check.
+        val switchedTo = "com.evil.other"
+        val capturedAfterSwitch = RawTree(
+            stateSeq = 9L,
+            foregroundPkg = switchedTo, // the app changed after we authorized `target`
+            windows = listOf(
+                RawWindow(
+                    pkg = switchedTo,
+                    root = RawNode(text = "secret balance 1234", className = "android.widget.TextView"),
+                ),
+            ),
+        )
+        val backend = FakeBackend(capturedAfterSwitch)
+        val guard = healthyGuard(surface = setOf(target, switchedTo))
+        val tool = getUiAutomationTools(
+            assistant = Assistant(uiAutomationEnabled = true),
+            guard = guard,
+            core = AutomationCore(backend),
+            foregroundPkg = { target }, // authorize-time foreground is the authorized one
+        ).single()
+
+        val text = (runBlocking { tool.execute(buildJsonObject { }) }.single() as UIMessagePart.Text).text
+
+        assertTrue("a target mismatch must deny", text.contains("denied", ignoreCase = true))
+        assertFalse("the unauthorized app's content must never be disclosed", text.contains("secret balance"))
     }
 }
