@@ -1125,7 +1125,7 @@ private fun AnnotatedString.Builder.appendMarkdownNodeContent(
                     drawables.forEachIndexed { index, drawable ->
                         // Insert a zero-width space between segments to provide a wrap point.
                         if (index > 0) append('​')
-                        val key = "latex:${formula.hashCode()}:$index"
+                        val key = latexSegmentKey(latexColorArgb, formula, index)
                         appendInlineContent(key, "[Latex]")
                         val (width, height) = with(density) {
                             drawable.bounds.width().toSp() to drawable.bounds.height().toSp()

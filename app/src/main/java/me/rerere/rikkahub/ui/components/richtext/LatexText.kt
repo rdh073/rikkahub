@@ -20,6 +20,18 @@ import ru.noties.jlatexmath.JLatexMathSplitter
 
 private const val TAG = "LatexText"
 
+/**
+ * Cache key for one split inline-formula segment's [InlineTextContent].
+ *
+ * The segment's drawable bakes the text color in at build time and the caller's
+ * inlineContents map is remembered and never cleared, so the key MUST carry
+ * [colorArgb]: on a live theme toggle the color changes, the drawable is rebuilt,
+ * and a color-independent key would let the map's putIfAbsent no-op and keep
+ * rendering the stale-colored glyph.
+ */
+internal fun latexSegmentKey(colorArgb: Int, formula: String, index: Int): String =
+    "latex:$colorArgb:${formula.hashCode()}:$index"
+
 fun assumeLatexSize(latex: String, fontSize: Float): Rect {
     return runCatching {
         JLatexMathDrawable.builder(latex)
