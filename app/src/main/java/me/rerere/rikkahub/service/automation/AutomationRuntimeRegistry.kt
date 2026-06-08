@@ -27,16 +27,19 @@ class AutomationRuntimeRegistry {
     /** Foreground package of the device, read before observing (design S2). Null when disconnected. */
     fun foregroundPackage(): String? = AccessibilityRuntime.instance?.foregroundPackage
 
-    /** Kill-switch hook (design I9): cancel any in-flight capture on the live service. */
-    fun cancelInFlight() {
-        AccessibilityRuntime.instance?.cancelInFlight()
-    }
-
     /**
-     * Show/hide the floating STOP overlay on the live service (design §7). No-op when the service is
-     * not connected. [onStop] revokes the active guard(s) + cancels in-flight work.
+     * Show the floating STOP overlay on the live service (design §7) and report whether it is
+     * actually reachable. Returns `false` when the service is not connected OR the overlay could not
+     * attach — the caller fails closed (revokes the lease) so `ui_observe` is never exposed without
+     * a kill-switch. [onStop] trips the kill-switch (revoke active guard(s) + cancel their
+     * generations). No in-flight capture is cancelled here: a capture is a child of its own
+     * generation job and dies with it (I9), so a per-session stop never touches another session.
      */
-    fun setAutomationActive(active: Boolean, onStop: () -> Unit) {
-        AccessibilityRuntime.instance?.setAutomationActive(active, onStop)
+    fun showKillSwitch(onStop: () -> Unit): Boolean =
+        AccessibilityRuntime.instance?.showOverlay(onStop) ?: false
+
+    /** Hide the floating STOP overlay on the live service. No-op when not connected. */
+    fun hideKillSwitch() {
+        AccessibilityRuntime.instance?.hideOverlay()
     }
 }

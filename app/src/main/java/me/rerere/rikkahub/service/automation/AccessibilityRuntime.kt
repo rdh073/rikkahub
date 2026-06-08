@@ -7,11 +7,7 @@ import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -19,6 +15,8 @@ import me.rerere.automation.backend.AutomationBackend
 import me.rerere.automation.backend.RawNode
 import me.rerere.automation.backend.RawTree
 import me.rerere.automation.backend.RawWindow
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
@@ -40,9 +38,13 @@ import java.util.concurrent.atomic.AtomicLong
  * ([serviceDispatcher]) and serializes concurrent captures with a [Mutex] — the accessibility node
  * tree must be read off one thread and every [AccessibilityNodeInfo] recycled on every path.
  *
- * Cancellation (design I9): [cancelInFlight] cancels any parked capture so a kill-switch revoke
- * tears down in-flight backend work rather than letting it complete. The capability guard's
- * `revoke()` denies future authorize; this hook cancels the work already running.
+ * Cancellation (design I9): the capture runs as a child of the *caller's* coroutine job (via
+ * `withContext(serviceDispatcher)`, a plain dispatcher hop that preserves the Job — NOT a detached
+ * scope). So when a kill-switch or in-app Stop cancels conversation A's generation job, A's
+ * in-flight capture is torn down by structured concurrency, while conversation B's capture (a child
+ * of B's job) is untouched. There is intentionally no process-global "cancel all captures" hammer:
+ * a single-session stop cancelling every session's backend work was the bug. The capability guard's
+ * `revoke()` denies future authorize; cancelling the owning job cancels the work already running.
  */
 class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
 
@@ -50,13 +52,13 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
     // regressing seq as a backend bug, so this only ever increases.
     private val stateSeq = AtomicLong(0L)
 
-    // One dedicated thread for all node-tree reads. Recreated per connect so a reconnect after an
-    // unbind starts from a clean scope.
-    private val serviceExecutor = Executors.newSingleThreadExecutor { r ->
+    // One dedicated thread for all node-tree reads. A capture hops onto this via
+    // withContext(serviceDispatcher), which preserves the caller's Job — so cancelling the caller
+    // (a stopped/killed generation) cancels its own capture and no other's. Shut down on teardown.
+    private val serviceExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
         Thread(r, "rikkahub-a11y-snapshot").apply { isDaemon = true }
     }
     private val serviceDispatcher = serviceExecutor.asCoroutineDispatcher()
-    private var captureScope = CoroutineScope(SupervisorJob() + serviceDispatcher)
 
     // Serializes concurrent snapshot captures (one node-tree read at a time).
     private val captureMutex = Mutex()
@@ -100,34 +102,42 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
     }
 
     private fun teardown() {
-        cancelInFlight()
         mainHandler.post {
             overlay?.hide()
             overlay = null
         }
+        // Stop accepting/serving captures; in-flight captures are children of their generation jobs
+        // and fail out as the service dies (every node is recycled on every path).
+        serviceExecutor.shutdownNow()
         if (instance === this) instance = null
     }
 
-    /** Cancel any parked capture (design I9 kill-switch hook) and restart the scope for reuse. */
-    fun cancelInFlight() {
-        captureScope.cancel()
-        captureScope = CoroutineScope(SupervisorJob() + serviceDispatcher)
+    /**
+     * Show the floating STOP kill-switch (design §7) and report whether it is actually displayed.
+     * Called by `ChatService` (via [AutomationRuntimeRegistry] -> activation tracker) on the 0→1
+     * edge — the first active automation session. [onStop] trips the kill-switch (revoke every
+     * active guard + cancel their generations). A `false` return (overlay could not attach) is
+     * load-bearing: the caller fails closed and revokes the lease so `ui_observe` is not exposed
+     * without a reachable STOP.
+     *
+     * The `WindowManager` add must run on the service main thread, so this blocks the caller on a
+     * round-trip to [mainHandler]. The caller is the generation coroutine (never the main thread),
+     * so this never self-deadlocks.
+     */
+    fun showOverlay(onStop: () -> Unit): Boolean {
+        val shown = CompletableFuture<Boolean>()
+        mainHandler.post {
+            if (overlay == null) overlay = KillSwitchOverlay(this, onStop)
+            shown.complete(overlay?.show() == true)
+        }
+        return shown.get()
     }
 
-    /**
-     * Show or hide the floating STOP kill-switch (design §7). Called by `ChatService` (via
-     * [AutomationRuntimeRegistry]) when a per-conversation lease becomes active / is released.
-     * [onStop] revokes the active guard(s) and cancels in-flight work.
-     */
-    fun setAutomationActive(active: Boolean, onStop: () -> Unit) {
+    /** Hide the floating STOP kill-switch (design §7) on the 1→0 edge — the last session ended. */
+    fun hideOverlay() {
         mainHandler.post {
-            if (active) {
-                if (overlay == null) overlay = KillSwitchOverlay(this, onStop)
-                overlay?.show()
-            } else {
-                overlay?.hide()
-                overlay = null
-            }
+            overlay?.hide()
+            overlay = null
         }
     }
 
@@ -140,7 +150,9 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
         }
 
     override suspend fun snapshotRawTree(): RawTree = captureMutex.withLock {
-        withContext(captureScope.coroutineContext) {
+        // serviceDispatcher (NOT a detached scope): hops onto the single service thread while keeping
+        // the caller's Job, so cancelling the owning generation cancels exactly this capture (I9).
+        withContext(serviceDispatcher) {
             val seq = stateSeq.get()
             val foreground = foregroundPackage ?: HOST_PACKAGE
             // getWindows() hands out live AccessibilityWindowInfo handles; recycle each after copying

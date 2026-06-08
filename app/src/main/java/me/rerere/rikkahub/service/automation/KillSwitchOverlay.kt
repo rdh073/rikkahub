@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Build
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -30,9 +31,16 @@ class KillSwitchOverlay(
     private val windowManager = service.getSystemService<WindowManager>()
     private var view: View? = null
 
-    fun show() {
-        if (view != null) return
-        val wm = windowManager ?: return
+    /**
+     * Attach the floating STOP button. Returns `true` iff the overlay is actually displayed
+     * afterward (already up, or newly added). A `false` return is load-bearing: the caller fails
+     * closed and revokes the automation lease so `ui_observe` is never exposed without a reachable
+     * kill-switch (design I9/§7). An `addView` failure (e.g. `BadTokenException`) is logged rather
+     * than silently swallowed — a missing kill-switch is a safety event, not a benign no-op.
+     */
+    fun show(): Boolean {
+        if (view != null) return true
+        val wm = windowManager ?: return false
         val button = Button(service).apply {
             text = service.getString(R.string.automation_kill_switch_stop)
             setBackgroundColor(Color.parseColor("#B00020"))
@@ -49,8 +57,10 @@ class KillSwitchOverlay(
             gravity = Gravity.TOP or Gravity.END
             y = 96
         }
-        runCatching { wm.addView(button, params) }
+        return runCatching { wm.addView(button, params) }
             .onSuccess { view = button }
+            .onFailure { Log.e(TAG, "STOP overlay addView failed; automation must fail closed", it) }
+            .isSuccess
     }
 
     fun hide() {
@@ -66,4 +76,8 @@ class KillSwitchOverlay(
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
+
+    private companion object {
+        const val TAG = "KillSwitchOverlay"
+    }
 }

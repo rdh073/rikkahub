@@ -66,6 +66,7 @@ import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
 import me.rerere.rikkahub.data.ai.tools.createSkillTools
 import me.rerere.rikkahub.data.ai.tools.getUiAutomationTools
+import me.rerere.rikkahub.service.automation.AutomationActivationTracker
 import me.rerere.rikkahub.service.automation.AutomationKillSwitch
 import me.rerere.rikkahub.service.automation.AutomationRuntimeRegistry
 import me.rerere.rikkahub.data.files.SkillManager
@@ -366,6 +367,15 @@ class ChatService(
     // System.now directly so lease/TTL behaviour is reproducible in the :automation PBT suite.
     private val trustClock = TrustClock { System.currentTimeMillis() }
 
+    // Refcounts the conversations with a live automation lease and owns the single STOP overlay
+    // (#187 §7). The overlay is process-global but the leases are per-conversation: toggling it on
+    // a per-completion boolean removed the any-app kill-switch for a still-active concurrent session.
+    // Show on the 0→1 edge, hide on 1→0; showOverlay reports reachability so the caller fails closed.
+    private val automationActivation = AutomationActivationTracker(
+        showOverlay = { automationRegistry.showKillSwitch(onStop = { automationKillSwitch.trip() }) },
+        hideOverlay = { automationRegistry.hideKillSwitch() },
+    )
+
     // 错误状态
     private val _errors = MutableStateFlow<List<ChatError>>(emptyList())
     val errors: StateFlow<List<ChatError>> = _errors.asStateFlow()
@@ -411,8 +421,10 @@ class ChatService(
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
 
         // Kill-switch (#187 design §7/I9): the floating STOP overlay (reachable from any app) trips
-        // this — revoke EVERY active automation grant (future authorize ⇒ DENY), cancel the
-        // generation job (tears down the in-flight observe), and cancel any parked backend capture.
+        // this — revoke EVERY active automation grant (future authorize ⇒ DENY) and cancel its
+        // generation job. Cancelling the job tears down that session's in-flight capture by
+        // structured concurrency (the capture is a child of the generation coroutine), so this is
+        // the global kill-switch that legitimately stops ALL automation sessions at once.
         automationKillSwitch.register {
             sessions.values.forEach { session ->
                 if (session.activeAutomationGuard != null) {
@@ -420,7 +432,6 @@ class ChatService(
                     session.getJob()?.cancel()
                 }
             }
-            automationRegistry.cancelInFlight()
         }
     }
 
@@ -827,8 +838,11 @@ class ChatService(
             // when the assistant has automation enabled (gate finding 11 / S1 — bound to THIS
             // conversation, not a standing per-assistant grant). Default-empty surface = deny-all
             // until a per-app whitelist is granted (a later UI); the read-only OBSERVE verb is the
-            // only authority. Registered on the session + the floating STOP overlay shown, so a
-            // kill-switch can revoke it; released in onCompletion below.
+            // only authority. Registered on the session; the floating STOP overlay is then activated
+            // (refcounted across sessions) so a kill-switch can revoke it. Released in the finally
+            // below on EVERY terminal path — including a throw while assembling generateText's
+            // arguments (memory/skill/MCP lookups are eager, BEFORE the flow's onCompletion is
+            // attached), which onCompletion alone would miss, leaking the STOP overlay forever.
             val automationGuard: CapabilityGuard? = if (assistant.uiAutomationEnabled) {
                 CapabilityGuard(
                     capability = Capability.root(
@@ -841,13 +855,20 @@ class ChatService(
                         ),
                     ),
                     clock = trustClock,
-                ).also { guard ->
-                    session.activeAutomationGuard = guard
-                    automationRegistry.setAutomationActive(active = true, onStop = { automationKillSwitch.trip() })
-                }
+                ).also { guard -> session.activeAutomationGuard = guard }
             } else {
                 null
             }
+            // Fail closed (design I9/§7): activate the refcounted STOP overlay; if no kill-switch is
+            // reachable (a11y service not connected, or addView failed), do NOT expose ui_observe —
+            // revoke the just-minted guard and abort generation with a surfaced error.
+            if (automationGuard != null && !automationActivation.activate(conversationId)) {
+                if (session.activeAutomationGuard === automationGuard) session.activeAutomationGuard = null
+                automationGuard.revoke()
+                throw IllegalStateException(context.getString(R.string.automation_kill_switch_unavailable))
+            }
+
+            try {
 
             // 流式 UI 合并状态：每个 chunk 携带累计全量 messages（节点按 INDEX 合并、节点内消息按 id 匹配，
             // 见 Conversation.updateCurrentMessages）。把"何时把合并状态写给 UI"的窗口节流 + 终止刷新决策收拢进
@@ -1003,14 +1024,9 @@ class ChatService(
                     },
                 )
             }.onCompletion {
-                // UI automation (#187): release the per-conversation lease on EVERY terminal path
-                // (normal finish, error, OR cancellation — onCompletion fires for all). Drop the
-                // guard reference and hide the floating STOP overlay so it never outlives the
-                // generation. The lease itself is also self-expiring (TTL) as a backstop.
-                if (automationGuard != null) {
-                    session.activeAutomationGuard = null
-                    automationRegistry.setAutomationActive(active = false, onStop = {})
-                }
+                // UI automation (#187): the per-conversation lease + STOP overlay are released in the
+                // outer finally (covers the eager-arg throw before this onCompletion is even
+                // attached), not here. The lease itself is also self-expiring (TTL) as a backstop.
 
                 // Live Update 通知的移除由 GenerationForegroundService 在 1->0 边
                 // stopForeground(STOP_FOREGROUND_REMOVE) 唯一负责，这里不再 per-conversation 取消，
@@ -1042,6 +1058,22 @@ class ChatService(
                     notificationSender.sendGenerationDone(conversationId, senderName, preview)
                 }
             }.collect { /* 终端消费：所有 chunk 副作用已在 coalesce 内完成 */ }
+
+            } finally {
+                // UI automation (#187): release the per-conversation lease + STOP overlay on EVERY
+                // terminal path — normal finish, error, cancellation, OR a throw while assembling
+                // generateText's eager arguments (which runs before the flow's onCompletion exists).
+                // Identity-compare before clearing so a stale completion of an old generation cannot
+                // null a NEWER generation's guard (setJob cancels the old job; its finally may run
+                // after the new one mints a fresh guard). deactivate refcounts the shared overlay:
+                // it hides only when THIS was the last active automation session.
+                if (automationGuard != null) {
+                    if (session.activeAutomationGuard === automationGuard) {
+                        session.activeAutomationGuard = null
+                    }
+                    automationActivation.deactivate(conversationId)
+                }
+            }
         }.onFailure {
             // Live Update 通知的移除由 GenerationForegroundService 在 1->0 边负责（见 onCompletion 注释）。
             if (it !is CancellationException) Log.e(TAG, "handleMessageComplete: generation failed", it)
@@ -1527,11 +1559,11 @@ class ChatService(
     // 停止当前会话生成任务（不清理会话缓存）
     suspend fun stopGeneration(conversationId: Uuid) {
         val job = sessions[conversationId]?.getJob() ?: return
-        // The in-app Stop is the second kill-switch (#187 §7): revoke the automation grant before
-        // cancelling so a tool step that is mid-authorize fails closed, and any parked backend
-        // capture is torn down.
+        // The in-app Stop is the second kill-switch (#187 §7): revoke THIS conversation's automation
+        // grant before cancelling so a tool step that is mid-authorize fails closed. Cancelling the
+        // job tears down only this conversation's in-flight capture (the capture is a child of this
+        // generation coroutine) — a concurrent automation session is untouched.
         sessions[conversationId]?.revokeAutomation()
-        automationRegistry.cancelInFlight()
         job.cancel()
         runCatching { job.join() }
         finishInterruptedPendingTools(conversationId)
