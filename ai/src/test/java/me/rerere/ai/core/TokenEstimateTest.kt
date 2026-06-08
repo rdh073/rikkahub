@@ -165,4 +165,25 @@ class TokenEstimateTest {
     fun `M1 empty list is zero`() {
         assertEquals(0, contextTokens(emptyList()))
     }
+
+    @Test
+    fun `M1 clearing stale usage drops the anchor to a conservative estimate`() {
+        // Models the post-compaction invariant (design #193): a kept assistant message whose usage
+        // recorded a now-summarized prefix is a stale-high anchor. With usage present, contextTokens
+        // returns that huge total; clearing usage makes it estimate the (small) remaining content
+        // instead -- which is why compressConversation strips usage from kept messages so the trigger
+        // and warning don't immediately re-fire on a conversation we just shrank.
+        val staleAnchor = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(text("short kept reply")),
+            usage = TokenUsage(promptTokens = 500_000, completionTokens = 1_000, totalTokens = 501_000),
+        )
+        val withStale = listOf(staleAnchor)
+        val cleared = listOf(staleAnchor.copy(usage = null))
+
+        assertEquals(501_000, contextTokens(withStale))
+        val estimated = contextTokens(cleared)
+        assertTrue("cleared anchor must estimate, not report the stale total", estimated < 1_000)
+        assertEquals(estimateTokensForMessages(cleared), estimated)
+    }
 }
