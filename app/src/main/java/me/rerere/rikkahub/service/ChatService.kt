@@ -55,11 +55,19 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.mcp.McpManager
+import me.rerere.automation.cap.Capability
+import me.rerere.automation.cap.CapabilityGuard
+import me.rerere.automation.cap.Lease
+import me.rerere.automation.cap.TrustClock
+import me.rerere.automation.cap.Verb
 import me.rerere.rikkahub.data.ai.subagent.SubagentRunner
 import me.rerere.rikkahub.data.ai.subagent.buildSpawnTool
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
 import me.rerere.rikkahub.data.ai.tools.createSkillTools
+import me.rerere.rikkahub.data.ai.tools.getUiAutomationTools
+import me.rerere.rikkahub.service.automation.AutomationKillSwitch
+import me.rerere.rikkahub.service.automation.AutomationRuntimeRegistry
 import me.rerere.rikkahub.data.files.SkillManager
 import me.rerere.rikkahub.data.ai.transformers.Base64ImageToLocalFileTransformer
 import me.rerere.rikkahub.data.ai.transformers.DocumentAsPromptTransformer
@@ -113,6 +121,11 @@ internal fun backgroundTextGenerationParams(
 // WakeLock 续期节流间隔：远小于服务侧 15 分钟超时，确保连续生成时锁在超时前总能被刷新；又远大于
 // 单 token 间隔，避免逐 token IPC。
 internal const val WAKE_LOCK_RENEW_INTERVAL_MS = 60L * 1000L
+
+// UI-automation lease bounds (#187 v1, design I5). A per-conversation grant is time-boxed and
+// step-capped so a session expires on its own (primary recovery) even if no STOP is pressed.
+private const val UI_AUTOMATION_LEASE_TTL_MS = 30L * 60L * 1000L // 30 min per task
+private const val UI_AUTOMATION_MAX_STEPS = 256 // ADMITs over the lease (P22)
 
 // 自动压缩保留的最近消息数：与手动压缩对话框（CompressContextDialog）的默认值一致。
 private const val AUTO_COMPACT_KEEP_RECENT_MESSAGES = 32
@@ -333,6 +346,10 @@ class ChatService(
     val mcpManager: McpManager,
     private val filesManager: FilesManager,
     private val skillManager: SkillManager,
+    // On-device UI automation (#187 v1, read-only). Registry hands out the live, system-instantiated
+    // AccessibilityRuntime as a pure backend; the kill-switch dispatches STOP to the active guard(s).
+    private val automationRegistry: AutomationRuntimeRegistry,
+    private val automationKillSwitch: AutomationKillSwitch,
 ) {
     // 统一会话管理
     private val sessions = ConcurrentHashMap<Uuid, ConversationSession>()
@@ -344,6 +361,10 @@ class ChatService(
 
     // 通知发送器：封装"生成完成"与"Live Update"通知的构建，不持有会话状态（内容由调用方传入）。
     private val notificationSender = ChatNotificationSender(context)
+
+    // UI-automation lease clock (#187). A real wall-clock; the kernel injects it instead of reading
+    // System.now directly so lease/TTL behaviour is reproducible in the :automation PBT suite.
+    private val trustClock = TrustClock { System.currentTimeMillis() }
 
     // 错误状态
     private val _errors = MutableStateFlow<List<ChatError>>(emptyList())
@@ -388,6 +409,19 @@ class ChatService(
     init {
         // 添加生命周期观察者
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
+
+        // Kill-switch (#187 design §7/I9): the floating STOP overlay (reachable from any app) trips
+        // this — revoke EVERY active automation grant (future authorize ⇒ DENY), cancel the
+        // generation job (tears down the in-flight observe), and cancel any parked backend capture.
+        automationKillSwitch.register {
+            sessions.values.forEach { session ->
+                if (session.activeAutomationGuard != null) {
+                    session.revokeAutomation()
+                    session.getJob()?.cancel()
+                }
+            }
+            automationRegistry.cancelInFlight()
+        }
     }
 
     fun cleanup() = runCatching {
@@ -789,6 +823,32 @@ class ChatService(
             // start generating
             val session = getOrCreateSession(conversationId)
 
+            // UI automation (#187 v1): mint ONE per-conversation capability guard for this generation
+            // when the assistant has automation enabled (gate finding 11 / S1 — bound to THIS
+            // conversation, not a standing per-assistant grant). Default-empty surface = deny-all
+            // until a per-app whitelist is granted (a later UI); the read-only OBSERVE verb is the
+            // only authority. Registered on the session + the floating STOP overlay shown, so a
+            // kill-switch can revoke it; released in onCompletion below.
+            val automationGuard: CapabilityGuard? = if (assistant.uiAutomationEnabled) {
+                CapabilityGuard(
+                    capability = Capability.root(
+                        sessionId = conversationId.toString(),
+                        surface = emptySet(),
+                        verbs = setOf(Verb.OBSERVE),
+                        lease = Lease(
+                            expiresAt = trustClock.now() + UI_AUTOMATION_LEASE_TTL_MS,
+                            maxSteps = UI_AUTOMATION_MAX_STEPS,
+                        ),
+                    ),
+                    clock = trustClock,
+                ).also { guard ->
+                    session.activeAutomationGuard = guard
+                    automationRegistry.setAutomationActive(active = true, onStop = { automationKillSwitch.trip() })
+                }
+            } else {
+                null
+            }
+
             // 流式 UI 合并状态：每个 chunk 携带累计全量 messages（节点按 INDEX 合并、节点内消息按 id 匹配，
             // 见 Conversation.updateCurrentMessages）。把"何时把合并状态写给 UI"的窗口节流 + 终止刷新决策收拢进
             // StreamingUiCoalescer（纯状态机，与 JVM 单测共用）。publish 副作用经 publishStreamingMessages 以单次
@@ -830,6 +890,20 @@ class ChatService(
                         addAll(createSearchTools(settings))
                     }
                     addAll(localTools.getTools(assistant.localTools))
+                    // Read-only ui_observe (#187 v1). Empty surface unless automation is enabled AND
+                    // a guard was minted; the factory authorizes via the closed-over guard BEFORE the
+                    // backend (S2). No-op (empty) when disabled or when the a11y service is not
+                    // connected (the core() is null ⇒ no guard path is reachable anyway).
+                    automationRegistry.core()?.let { automationCore ->
+                        addAll(
+                            getUiAutomationTools(
+                                assistant = assistant,
+                                guard = automationGuard,
+                                core = automationCore,
+                                foregroundPkg = { automationRegistry.foregroundPackage() },
+                            )
+                        )
+                    }
                     if (assistant.enabledSkills.isNotEmpty()) {
                         addAll(
                             createSkillTools(
@@ -929,6 +1003,15 @@ class ChatService(
                     },
                 )
             }.onCompletion {
+                // UI automation (#187): release the per-conversation lease on EVERY terminal path
+                // (normal finish, error, OR cancellation — onCompletion fires for all). Drop the
+                // guard reference and hide the floating STOP overlay so it never outlives the
+                // generation. The lease itself is also self-expiring (TTL) as a backstop.
+                if (automationGuard != null) {
+                    session.activeAutomationGuard = null
+                    automationRegistry.setAutomationActive(active = false, onStop = {})
+                }
+
                 // Live Update 通知的移除由 GenerationForegroundService 在 1->0 边
                 // stopForeground(STOP_FOREGROUND_REMOVE) 唯一负责，这里不再 per-conversation 取消，
                 // 否则多会话并发时单个会话结束会误删其它会话仍在使用的共享常驻通知。
@@ -1444,6 +1527,11 @@ class ChatService(
     // 停止当前会话生成任务（不清理会话缓存）
     suspend fun stopGeneration(conversationId: Uuid) {
         val job = sessions[conversationId]?.getJob() ?: return
+        // The in-app Stop is the second kill-switch (#187 §7): revoke the automation grant before
+        // cancelling so a tool step that is mid-authorize fails closed, and any parked backend
+        // capture is torn down.
+        sessions[conversationId]?.revokeAutomation()
+        automationRegistry.cancelInFlight()
         job.cancel()
         runCatching { job.join() }
         finishInterruptedPendingTools(conversationId)
