@@ -239,10 +239,23 @@ class AutomationCore(
                 // owns the timeout); the core treats both identically as CONFIRM_DECLINED with NO
                 // dispatch. A submit-class tap is always a TAP, so this never collides with the P9
                 // set_text no-op (step 3.5), which already returned above for an unchanged-text set.
-                if (sink?.isDangerous == true &&
-                    !confirm.confirm(grounded.foregroundPkg, verb, target?.text)
-                ) {
-                    return@block ActOutcome.Denied(ActDenyReason.CONFIRM_DECLINED)
+                if (sink?.isDangerous == true) {
+                    // Fail-closed on EVERY non-confirm outcome: a `false` (the user's DENY or the
+                    // channel's fail-closed timeout) AND any thrown exception (e.g. the overlay could
+                    // not attach) both deny — a confirm that did not return `true` is not a confirm, so
+                    // it must never fall through to dispatch. CancellationException is rethrown so a
+                    // kill-switch revoke during the prompt still tears the act down (the suspend is
+                    // cancellable); only a non-cancellation throwable is normalized to a deny.
+                    val confirmed = try {
+                        confirm.confirm(grounded.foregroundPkg, verb, target?.text)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        false
+                    }
+                    if (!confirmed) {
+                        return@block ActOutcome.Denied(ActDenyReason.CONFIRM_DECLINED)
+                    }
                 }
                 // The backend returns false WITHOUT dispatching when the grounding moved in the
                 // assert→dispatch gap (a node action whose carried stateSeq no longer matches the live

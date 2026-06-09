@@ -150,9 +150,56 @@ class SubmitClassifierPropertyTest {
         assertTrue(SubmitClassifier.isSubmitClass(text = "PayPalSend", semanticKey = null))
         assertTrue(SubmitClassifier.isSubmitClass(text = "btn_submit_form", semanticKey = null))
         assertTrue(SubmitClassifier.isSubmitClass(text = null, semanticKey = "checkoutNow"))
-        assertTrue(SubmitClassifier.isSubmitClass(text = "立即购买 (purchase)", semanticKey = null))
     }
 
-    private fun target(text: String?, semanticKey: String?): UiTarget =
-        UiTarget(tid = 0, role = "Button", text = text, semanticKey = semanticKey)
+    // ---- LOCALIZED labels (no English fallback) classify as submit-class. An English-only classifier
+    // FAILS every one of these — and a non-English unconfirmed pay is the catastrophic case (#198 §11).
+    // Each value is a real pay/commit label with NO Latin commit word, so it only passes if the
+    // localized keyword is actually recognized (the prior test's `立即购买 (purchase)` cheated via the
+    // English parenthetical). ----
+    @Test
+    fun `localized commit labels classify as submit-class`() {
+        val localized = listOf(
+            "确认支付",   // zh-Hans: confirm payment
+            "立即购买",   // zh-Hans: buy now
+            "下单",       // zh-Hans: place order
+            "確認支付",   // zh-Hant: confirm payment
+            "決済する",   // ja: settle / pay
+            "購入手続き", // ja: purchase procedure
+            "결제하기",   // ko: pay
+            "구매",       // ko: purchase
+            "оплатить",   // ru: pay
+            "купить",     // ru: buy
+            "Jetzt kaufen", // de: buy now
+        )
+        for (label in localized) {
+            assertTrue(
+                "localized commit label \"$label\" must be submit-class",
+                SubmitClassifier.isSubmitClass(text = label, semanticKey = null),
+            )
+            assertTrue(SubmitClassifier.isSubmitClass(target(text = label, semanticKey = null)))
+        }
+    }
+
+    // ---- an ICON-ONLY commit button (no visible text, no contentDescription) is still submit-class
+    // via its raw view id — resource ids are developer-named (English) even in a localized app, so
+    // `…:id/pay_button` trips `pay`. Without the viewId input this is a textless false-negative that
+    // taps an unconfirmed pay. A classifier that ignores viewId FAILS this. ----
+    @Test
+    fun `an icon-only button with a commit view id classifies as submit-class`() {
+        assertTrue(
+            "an icon-only pay button must classify via its view id",
+            SubmitClassifier.isSubmitClass(text = null, semanticKey = null, viewId = "com.shop.app:id/pay_button"),
+        )
+        assertTrue(
+            SubmitClassifier.isSubmitClass(target(text = null, semanticKey = null, viewId = "com.shop.app:id/btn_checkout")),
+        )
+        // A benign view id (no commit keyword) stays non-submit even with null text/key.
+        assertFalse(
+            SubmitClassifier.isSubmitClass(text = null, semanticKey = null, viewId = "com.shop.app:id/back_arrow"),
+        )
+    }
+
+    private fun target(text: String?, semanticKey: String?, viewId: String? = null): UiTarget =
+        UiTarget(tid = 0, role = "Button", text = text, semanticKey = semanticKey, viewId = viewId)
 }

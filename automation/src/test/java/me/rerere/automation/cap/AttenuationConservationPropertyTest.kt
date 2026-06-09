@@ -127,6 +127,43 @@ class AttenuationConservationPropertyTest {
         }
     }
 
+    // ---- P19 (ENFORCEMENT / negative): attenuate REJECTS re-widening a sink budget. The chain
+    // properties above show valid attenuations stay subset; this pins the MECHANISM that makes that
+    // hold — a child that DROPPED a sink can never re-introduce it (nor any outside-universe sink) via
+    // a further attenuate; the call throws. A naive attenuate that allowed re-widening would FAIL this
+    // and break P19's no-laundering guarantee at the source (a descendant could re-admit a refused
+    // sink). The forward chain property cannot catch this — it only ever builds VALID (subset)
+    // attenuations; this one constructs the illegal widening and asserts it is refused. ----
+    @Test
+    fun `P19 attenuate rejects re-introducing a dropped or outside sink`() {
+        runBlocking {
+            checkAll(400, arbRootCapability()) { root ->
+                val droppable = root.sinkBudget.firstOrNull()
+                if (droppable != null) {
+                    val childSinks = root.sinkBudget - droppable
+                    val child = root.attenuate(sinkBudget = childSinks)
+                    // Re-introducing the sink the child dropped must be refused (the parent had it; the
+                    // child gave it up; a re-attenuation cannot get it back — that is laundering).
+                    assertThrowsIAE { child.attenuate(sinkBudget = childSinks + droppable) }
+                    // Any sink outside the child's budget is likewise refused.
+                    val outside = Sink.entries.toSet() - child.sinkBudget
+                    if (outside.isNotEmpty()) {
+                        assertThrowsIAE { child.attenuate(sinkBudget = child.sinkBudget + outside.first()) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun assertThrowsIAE(block: () -> Unit) {
+        try {
+            block()
+            throw AssertionError("expected attenuate to reject a widening sink budget (IllegalArgumentException)")
+        } catch (e: IllegalArgumentException) {
+            // expected: attenuate's require(sinkBudget ⊆ this.sinkBudget) rejected the widening.
+        }
+    }
+
     // ---- non-vacuity guard: a concrete cap whose admittedSinks is NON-EMPTY, so admittedSinks is not
     // trivially-always-∅ (which would make P19/MR4 pass vacuously). A root that grants TAP + the full
     // sink budget + a real surface ADMITs the budgeted sinks. ----

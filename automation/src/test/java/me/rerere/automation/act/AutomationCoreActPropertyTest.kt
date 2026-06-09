@@ -1232,6 +1232,27 @@ class AutomationCoreActPropertyTest {
         }
     }
 
+    // ---- confirm THROWS (e.g. the overlay could not attach): a non-cancellation exception from the
+    // channel must FAIL CLOSED — normalized to Denied(CONFIRM_DECLINED), NO dispatch — never escape as
+    // an error nor (worse) fall through to a dispatch. On the unfixed core (confirm() called inline,
+    // exception propagates) this throws out of act() instead of denying. ----
+    @Test
+    fun `a submit-class tap whose confirm throws is denied and never dispatches`() {
+        runBlocking {
+            val backend = submitButtonBackend()
+            val core = AutomationCore(backend)
+            val grounded = core.observe()
+            val throwing = ConfirmChannel { _, _, _ -> throw RuntimeException("overlay could not attach") }
+            val outcome = core.act(submitTapGuard(), grounded, Act.Targeted(Selector.ByTid(0), NodeActionKind.CLICK), throwing)
+            assertEquals(
+                "a confirm that threw must fail closed to CONFIRM_DECLINED, not escape or dispatch",
+                ActOutcome.Denied(ActDenyReason.CONFIRM_DECLINED),
+                outcome,
+            )
+            assertTrue("a failed-confirm dangerous act must NOT touch the backend", backend.performed.isEmpty())
+        }
+    }
+
     // ---- NO PROMPT for a non-dangerous act: scroll / global / set_text / a BENIGN ("OK") tap with the
     // confirm granted all succeed WITHOUT ever consulting the confirm (confirmCount==0). This is the
     // headline "general taps never prompt" property — a non-dangerous act must never reach the gate. On a
