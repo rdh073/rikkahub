@@ -56,6 +56,16 @@ object MemoryToolUI : ToolUIRenderer {
     private fun action(context: ToolUIContext): String? =
         context.arguments.getStringContent("action")
 
+    /**
+     * 内联摘要要展示的记忆内容, 不展示时为 null。
+     *
+     * action 守卫是渲染条件的一部分 (只有 create/edit 才显示内容), 因此 [hasSummary]
+     * 与 [Summary] 都必须经由此处, 避免二者各判一次而出现 hasSummary=false 却仍渲染内容的偏差。
+     */
+    internal fun summaryContent(context: ToolUIContext): String? =
+        context.content.getStringContent("content")
+            ?.takeIf { action(context) in listOf(ACTION_CREATE, ACTION_EDIT) }
+
     override fun icon(context: ToolUIContext): ImageVector = when (action(context)) {
         ACTION_DELETE -> HugeIcons.Eraser
         else -> HugeIcons.QuillWrite01
@@ -70,12 +80,11 @@ object MemoryToolUI : ToolUIRenderer {
     }
 
     override fun hasSummary(context: ToolUIContext): Boolean =
-        action(context) in listOf(ACTION_CREATE, ACTION_EDIT) &&
-            context.content.getStringContent("content") != null
+        summaryContent(context) != null
 
     @Composable
     override fun Summary(context: ToolUIContext) {
-        context.content.getStringContent("content")?.let { memoryContent ->
+        summaryContent(context)?.let { memoryContent ->
             Text(
                 text = memoryContent,
                 style = MaterialTheme.typography.labelSmall,
