@@ -273,9 +273,14 @@ class KnowledgeContextAssemblerPropertyTest {
                 val selMsg = KnowledgeContextAssembler.assemble(messageBlocks, msgBudget)
                 val msgTokens = selMsg.sumOf { it.estimatedTokens }
 
+                // The real contract is the TIGHTER `<= slice - base` (the available knowledge budget),
+                // floored at 0 when the base alone exceeds the slice. Asserting only `<= slice` would
+                // pass even if the auto-remainder forgot to subtract the rendered memory (the exact
+                // regression Phase 2 must not introduce). (cross-model gate: codex.)
+                val availableKnowledge = (slice - base).coerceAtLeast(0)
                 assertTrue(
-                    "combined mem=$memTokens + msg=$msgTokens must be <= slice=$slice (base=$base)",
-                    memTokens + msgTokens <= slice,
+                    "combined mem=$memTokens + msg=$msgTokens must be <= slice-base=$availableKnowledge (slice=$slice base=$base)",
+                    memTokens + msgTokens <= availableKnowledge,
                 )
             }
         }

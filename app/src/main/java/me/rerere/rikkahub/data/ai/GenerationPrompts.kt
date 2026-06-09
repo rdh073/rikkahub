@@ -52,7 +52,9 @@ internal fun buildMemoryPrompt(
             estimatedTokens = 0,
         )
         // Count the RENDERED <memory> block (not the bare JSON), matching how Phase 1 counts the
-        // wrapped ragBlock/attachment — so the budget reflects what is actually injected.
+        // wrapped ragBlock/attachment over their own render() — the per-block separator the system
+        // buildString adds is framing overhead uniformly uncounted across ALL sources (counting it for
+        // MEMORY alone would be inconsistent with RAG/attachment; it is ~1 token, negligible vs budget).
         block.copy(
             estimatedTokens = estimateTokens(
                 listOf(UIMessagePart.Text(KnowledgeContextRenderer.render(block)))
