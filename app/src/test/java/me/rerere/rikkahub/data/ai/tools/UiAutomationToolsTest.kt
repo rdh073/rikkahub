@@ -22,10 +22,13 @@ import me.rerere.automation.backend.RawTree
 import me.rerere.automation.backend.RawWindow
 import me.rerere.automation.cap.Capability
 import me.rerere.automation.cap.CapabilityGuard
+import me.rerere.automation.cap.Decision
+import me.rerere.automation.cap.DenyReason
 import me.rerere.automation.cap.Lease
 import me.rerere.automation.cap.Sink
 import me.rerere.automation.cap.TrustClock
 import me.rerere.automation.cap.Verb
+import me.rerere.common.android.redactAndTruncate
 import me.rerere.rikkahub.data.model.Assistant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -661,5 +664,81 @@ class UiAutomationToolsTest {
 
         assertTrue("malformed args must never perform", backend.performed.isEmpty())
         assertTrue((parts.single() as UIMessagePart.Text).text.contains("denied", ignoreCase = true))
+    }
+
+    // --- 7g. MALFORMED args are AUDITED (P25): a malformed act is an admission decision and must
+    // leave exactly one redacted DENY ledger entry, exactly as ui_observe does. The unfixed act tools
+    // short-circuited with ACT_DENIED_MESSAGE BEFORE guard.authorize, so a prompt-injection-shaped
+    // garbage act left NO trace in the audit trail — these pin that gap closed.
+
+    @Test
+    fun `a malformed ui_scroll writes exactly one redacted DENY audit entry`() {
+        val backend = FakeBackend(scrollableTree())
+        val guard = actGuard()
+        val tools = actTools(guard, backend)
+        // Ground first; the observe's own ADMIT is the only entry so far. Measuring the DELTA isolates
+        // the act's audit from the grounding observe's.
+        runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+        val entriesAfterObserve = guard.audit.entries().size
+
+        // A non-object arg is malformed: the act must be refused AND audited (one new DENY).
+        runBlocking { tools.byName(UI_SCROLL_TOOL_NAME).execute(JsonNull) }
+
+        val newEntries = guard.audit.entries().drop(entriesAfterObserve)
+        assertEquals("a malformed act must append exactly one ledger entry", 1, newEntries.size)
+        val entry = newEntries.single()
+        assertEquals("the malformed act decision must be DENY", Decision.DENY, entry.decision)
+        assertEquals("the fail-closed reason must be MALFORMED", DenyReason.MALFORMED, entry.reason)
+        assertEquals("the ledger must record the attempted verb", Verb.SCROLL, entry.verb)
+        // P25: the raw JSON is NEVER stored — only length-only redacted metadata (proven in the
+        // kernel's redaction tests; here we just confirm the act path stores the redacted form, not raw).
+        assertEquals(redactAndTruncate(JsonNull.toString()), entry.redactedArgs)
+        assertTrue("malformed act must still never perform", backend.performed.isEmpty())
+    }
+
+    @Test
+    fun `a malformed ui_scroll selector writes one DENY audit entry`() {
+        val backend = FakeBackend(scrollableTree())
+        val guard = actGuard()
+        val tools = actTools(guard, backend)
+        runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+        val entriesAfterObserve = guard.audit.entries().size
+
+        // A well-formed object but an unparseable selector (empty selector object) is still malformed.
+        runBlocking {
+            tools.byName(UI_SCROLL_TOOL_NAME).execute(
+                buildJsonObject {
+                    put("selector", buildJsonObject { })
+                    put("direction", "forward")
+                },
+            )
+        }
+
+        val newEntries = guard.audit.entries().drop(entriesAfterObserve)
+        assertEquals("an unparseable selector must append one ledger entry", 1, newEntries.size)
+        assertEquals(DenyReason.MALFORMED, newEntries.single().reason)
+        assertTrue(backend.performed.isEmpty())
+    }
+
+    @Test
+    fun `a malformed ui_global writes exactly one redacted DENY audit entry with the GLOBAL verb`() {
+        val backend = FakeBackend(scrollableTree())
+        val guard = actGuard()
+        val tools = actTools(guard, backend)
+        runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+        val entriesAfterObserve = guard.audit.entries().size
+
+        // An unknown direction is malformed for ui_global.
+        runBlocking {
+            tools.byName(UI_GLOBAL_TOOL_NAME).execute(buildJsonObject { put("direction", "sideways") })
+        }
+
+        val newEntries = guard.audit.entries().drop(entriesAfterObserve)
+        assertEquals("a malformed global act must append exactly one ledger entry", 1, newEntries.size)
+        val entry = newEntries.single()
+        assertEquals(Decision.DENY, entry.decision)
+        assertEquals(DenyReason.MALFORMED, entry.reason)
+        assertEquals("the ledger must record GLOBAL for a ui_global attempt", Verb.GLOBAL, entry.verb)
+        assertTrue(backend.performed.isEmpty())
     }
 }

@@ -23,6 +23,7 @@ import me.rerere.automation.backend.NodeActionKind
 import me.rerere.automation.cap.AuthRequest
 import me.rerere.automation.cap.CapabilityGuard
 import me.rerere.automation.cap.Decision
+import me.rerere.automation.cap.Sink
 import me.rerere.automation.cap.Verb
 import me.rerere.automation.observe.Selector
 import me.rerere.automation.observe.UiSnapshot
@@ -63,8 +64,12 @@ import me.rerere.rikkahub.data.model.Assistant
  *  - **Authority is closed over, never model-supplied (I2):** the guard is captured here; the model's
  *    JSON args carry no caller context (a JSON-passed lease would be forgeable — gate finding 6). The
  *    act verb/sink is derived from the [Act] variant, never from args.
- *  - **Fail-closed on malformed args (P24):** a non-object argument (or an unparseable selector /
- *    direction) is refused without touching the backend.
+ *  - **Fail-closed on malformed args (P24/P25):** a non-object argument (or an unparseable selector /
+ *    direction) is refused without touching the backend, but — exactly like `ui_observe` — it is
+ *    refused VIA an audited `guard.authorize(AuthRequest(malformed = true, …))` that fails closed and
+ *    writes the one redacted ledger entry P25 requires, so a prompt-injection-shaped garbage act still
+ *    leaves a trace in the security audit trail. (This is the ONLY authorize the act tools make: the
+ *    well-formed path's single decision lives in `core.act`, so there is no double-audit.)
  *  - **needsApproval=false:** the in-chat approval gate is structurally unreachable while another app
  *    is foreground (design constraint 1); OCap is the brake instead.
  *  - **Text-only result (gate A1):** every snapshot is rendered to a single self-sufficient
@@ -95,6 +100,26 @@ fun getUiAutomationTools(
     // re-snapshot, never from model-supplied args (I2). Tools in a single generation run sequentially
     // (the tool loop awaits each execute), so this needs no extra synchronization.
     var grounded: UiSnapshot? = null
+
+    // P25 for the act path: a malformed act attempt is still an admission DECISION and must leave
+    // exactly one redacted ledger entry — mirrors ui_observe's malformed branch. The act tools' ONLY
+    // direct authorize: the well-formed path's single decision is inside core.act, so routing the
+    // malformed short-circuit through guard.authorize here adds no double-audit (core.act is never
+    // reached on a malformed arg). The guard DENYs on `malformed` before it even reads targetPkg/verb,
+    // so the returned text is always the vague ACT_DENIED_MESSAGE. `grounded` is non-null at every call
+    // site (it follows the `grounded ?: return` guard), so its package is the truthful act target.
+    fun auditMalformedAct(verb: Verb, sink: Sink?, rawArgs: String): List<UIMessagePart> {
+        guard.authorize(
+            AuthRequest(
+                verb = verb,
+                targetPkg = grounded?.foregroundPkg,
+                sink = sink,
+                malformed = true,
+                rawArgs = rawArgs,
+            ),
+        )
+        return listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+    }
 
     return listOf(
         Tool(
@@ -197,13 +222,17 @@ fun getUiAutomationTools(
                 val snapshot = grounded ?: return@execute listOf(UIMessagePart.Text(ACT_REOBSERVE_MESSAGE))
                 // Fail closed on anything we cannot parse into an Act (P24): never build an Act, never
                 // touch the backend. Authority is the closed-over guard, never anything in `args` (I2).
-                if (args !is JsonObject) return@execute listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+                // The refusal is AUDITED (P25) — auditMalformedAct authorizes a malformed SCROLL request
+                // so the fail-closed DENY writes a ledger entry, exactly as ui_observe does.
+                if (args !is JsonObject) {
+                    return@execute auditMalformedAct(Verb.SCROLL, sink = null, rawArgs = args.toString())
+                }
                 val selector = parseSelector(args["selector"])
-                    ?: return@execute listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+                    ?: return@execute auditMalformedAct(Verb.SCROLL, sink = null, rawArgs = args.toString())
                 val kind = when ((args["direction"] as? JsonPrimitive)?.contentOrNull) {
                     "forward" -> NodeActionKind.SCROLL_FORWARD
                     "backward" -> NodeActionKind.SCROLL_BACKWARD
-                    else -> return@execute listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+                    else -> return@execute auditMalformedAct(Verb.SCROLL, sink = null, rawArgs = args.toString())
                 }
                 // core.act authorizes internally (S2) and runs guardInFlight (P20) — the tool layer
                 // must NOT call authorize/guardInFlight here (would double-audit / break P25).
@@ -246,12 +275,16 @@ fun getUiAutomationTools(
             needsApproval = false,
             execute = execute@{ args ->
                 val snapshot = grounded ?: return@execute listOf(UIMessagePart.Text(ACT_REOBSERVE_MESSAGE))
-                if (args !is JsonObject) return@execute listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+                // Fail closed + AUDITED (P24/P25): a malformed ui_global is a GLOBAL act over the
+                // GLOBAL_NAV sink, so the ledger entry records that verb/sink as ui_observe does for OBSERVE.
+                if (args !is JsonObject) {
+                    return@execute auditMalformedAct(Verb.GLOBAL, Sink.GLOBAL_NAV, rawArgs = args.toString())
+                }
                 val nav = when ((args["direction"] as? JsonPrimitive)?.contentOrNull) {
                     "back" -> GlobalNav.BACK
                     "home" -> GlobalNav.HOME
                     "recents" -> GlobalNav.RECENTS
-                    else -> return@execute listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+                    else -> return@execute auditMalformedAct(Verb.GLOBAL, Sink.GLOBAL_NAV, rawArgs = args.toString())
                 }
                 when (val outcome = core.act(guard, snapshot, Act.Global(nav))) {
                     is ActOutcome.Acted -> {

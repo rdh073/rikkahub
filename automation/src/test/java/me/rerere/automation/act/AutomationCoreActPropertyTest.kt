@@ -181,6 +181,50 @@ class AutomationCoreActPropertyTest {
         }
     }
 
+    // ---- host-pause (I-act-6 / P12 extended): act while host-foreground ⇒ no dispatch ----
+    // The grounding's screenState is FOREGROUND_IS_HOST, so the act must refuse BEFORE authorize and
+    // never touch the backend — for BOTH Act.Global (skips resolve) and Act.Targeted. Crucially the
+    // guard's surface INCLUDES the host here, so the refusal can ONLY come from the host-pause check,
+    // proving I-act-6 does not silently piggyback on the surface-empty DENY (the named-invariant model).
+    @Test
+    fun `act while host-foreground never dispatches (global)`() {
+        runBlocking {
+            val host = me.rerere.automation.observe.SnapshotProjector.HOST_PACKAGE
+            val backend = backend(pkg = host)
+            val core = AutomationCore(backend)
+            val grounded = core.observe()
+            assertEquals(
+                "fixture must be a host-foreground grounding",
+                me.rerere.automation.observe.ScreenState.FOREGROUND_IS_HOST,
+                grounded.screenState,
+            )
+            // Surface admits the host, so a naive act WOULD pass authorize and dispatch.
+            val g = guard(pkg = host)
+            val outcome = core.act(g, grounded, Act.Global(GlobalNav.BACK))
+            assertEquals(ActOutcome.StaleState, outcome)
+            assertTrue("host-foreground must NOT dispatch a global nav", backend.performed.isEmpty())
+        }
+    }
+
+    // Targeted companion: a host grounding projects NO targets (the projector strips host windows),
+    // so for a targeted act host-pause and the resolve-NotFound check AGREE on StaleState — this is a
+    // same-outcome consistency check, not the independent regression (the `(global)` case above, which
+    // skips resolve, is the one that FAILS on the unfixed code). Pinned so a future change that lets a
+    // targeted act reach dispatch on a host grounding is caught.
+    @Test
+    fun `act while host-foreground never dispatches (targeted)`() {
+        runBlocking {
+            val host = me.rerere.automation.observe.SnapshotProjector.HOST_PACKAGE
+            val backend = backend(pkg = host)
+            val core = AutomationCore(backend)
+            val grounded = core.observe()
+            val g = guard(pkg = host)
+            val outcome = core.act(g, grounded, Act.Targeted(Selector.ByTid(0), NodeActionKind.SCROLL_FORWARD))
+            assertEquals(ActOutcome.StaleState, outcome)
+            assertTrue("host-foreground must NOT dispatch a scroll", backend.performed.isEmpty())
+        }
+    }
+
     // ---- I-act-9: an ambiguous selector is a DENY (fail closed), never a guess ----
     @Test
     fun `ambiguous selector is denied not guessed`() {

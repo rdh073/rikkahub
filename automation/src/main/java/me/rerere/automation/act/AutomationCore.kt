@@ -71,8 +71,12 @@ class AutomationCore(
      * The act path (#198 slice 8, design §1 — the act state machine on the proven OCap kernel).
      * Sequence, every step grounded in a kernel seam:
      *
-     *   resolve(selector) → assert(seq + windowContentHash) → authorize → perform → settle → re-snapshot
+     *   host-pause → resolve(selector) → assert(seq + windowContentHash) → authorize → perform → settle → re-snapshot
      *
+     *  0. **host-pause** (I-act-6 / P12 extended): if [grounded] is [ScreenState.FOREGROUND_IS_HOST]
+     *     the act refuses with [ActOutcome.StaleState] BEFORE resolve/authorize — no act dispatches
+     *     while the host app is foreground, independently of the capability surface. The model must
+     *     re-ground (GoHost = pause + re-ground), so it is StaleState, never Denied.
      *  1. **resolve** the [Act] against [grounded] (pure, over the snapshot the model already holds):
      *     a selector matching nothing ⇒ [ActOutcome.StaleState] (re-observe); matching >1 ⇒
      *     [ActOutcome.Denied] AMBIGUOUS (fail closed, never guess — I-act-9). Global acts skip resolve.
@@ -93,6 +97,13 @@ class AutomationCore(
      * full system-UI-non-actionable enforcement on tap is slice 10; neither is reachable from here.
      */
     suspend fun act(guard: CapabilityGuard, grounded: UiSnapshot, request: Act): ActOutcome {
+        // 0. GoHost (I-act-6 / P12 extended): no act dispatches while the host app is foreground.
+        // Enforced here, BEFORE resolve/authorize, so it covers Act.Global (which skips resolve) and
+        // does NOT silently depend on the surface DENY — host-pause is an admission invariant in its
+        // own right (design §2 I-act-6, §4 property "host-pause"; the GoHost arrow = pause + re-ground).
+        // The model must re-ground, so this is a StaleState, not a Denied (re-observe, never replay).
+        if (grounded.screenState == ScreenState.FOREGROUND_IS_HOST) return ActOutcome.StaleState
+
         // 1. resolve (pure, over the grounded snapshot the tid came from).
         val tid: Int? = when (request) {
             is Act.Global -> null
