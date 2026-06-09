@@ -459,6 +459,12 @@ internal fun renderCompactSnapshot(snapshot: UiSnapshot): String = buildString {
             append(" · ").append(target.flags.joinToString(",") { it.name })
         }
         target.text?.takeIf { it.isNotBlank() }?.let { append(" · \"").append(it).append('"') }
+        // formKey is the input-field stable-key axis (#198 slice 9): emit it so the model can address
+        // an editable field via {formKey:...} (the projector sets it ONLY for editable nodes). Without
+        // this line the model can never LEARN a field's formKey from observe output, making the
+        // advertised by-formKey selector unreachable (a half-wired axis). Rendered before key= so the
+        // two stable keys read consistently.
+        target.formKey?.takeIf { it.isNotBlank() }?.let { append(" · form=").append(it) }
         target.semanticKey?.takeIf { it.isNotBlank() }?.let { append(" · key=").append(it) }
     }
 }

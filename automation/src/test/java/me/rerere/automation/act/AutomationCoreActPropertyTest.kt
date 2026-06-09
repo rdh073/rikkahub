@@ -465,6 +465,52 @@ class AutomationCoreActPropertyTest {
         }
     }
 
+    // ---- P9 (clean-postcondition): an EMPTY field whose contentDescription HINT equals the requested
+    // text MUST dispatch, never no-op. UiTarget.text is a DISPLAY projection (node.text ?:
+    // contentDescription), so a blank field (node.text == null) with contentDescription == "Email"
+    // projects text = "Email"; comparing the P9 no-op against `text` would match set_text("Email") and
+    // skip the dispatch, leaving the field EMPTY while the model believes the write landed (data loss,
+    // design §3 "clean postconditions only" violated). The no-op must compare the editable VALUE
+    // (UiTarget.editableText, null for an empty field), so this dispatches exactly one SetText. On the
+    // unfixed code (compare against `text`) this FAILS — performed is empty and the field stays blank.
+    @Test
+    fun `P9 set_text into an empty field whose hint equals the text dispatches not no-op`() {
+        runBlocking {
+            // node.text = null (empty field) but contentDescription = "Email" (a label/hint). The
+            // projector still makes it an editable target (editable + hasText via contentDescription).
+            val backend = FakeBackend(
+                RawTree(
+                    stateSeq = 1L, foregroundPkg = APP,
+                    windows = listOf(
+                        RawWindow(
+                            pkg = APP,
+                            root = RawNode(
+                                text = null, className = "EditText",
+                                resourceId = "com.example.app:id/email",
+                                contentDescription = "Email",
+                                visible = true, hasArea = true, editable = true,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            val core = AutomationCore(backend)
+            val grounded = core.observe()
+            val field = grounded.targets.first()
+            assertEquals("the display projection falls back to the hint", "Email", field.text)
+            assertEquals("the editable value of a blank field is null (not the hint)", null, field.editableText)
+
+            val outcome = core.act(setTextGuard(), grounded, Act.SetText(Selector.ByTid(0), "Email"))
+            assertTrue("writing the hint text into the blank field must dispatch", outcome is ActOutcome.Acted)
+            assertEquals(
+                "the blank field must receive exactly one SetText (not a silent no-op)",
+                PerformAction.SetText(stateSeq = grounded.stateSeq, tid = 0, text = "Email"),
+                backend.performed.single(),
+            )
+            assertEquals("a real write settles exactly once", 1, backend.settleCount)
+        }
+    }
+
     // ---- P9 (dispatch): a DIFFERENT text dispatches exactly one PerformAction.SetText and settles ----
     @Test
     fun `P9 a set_text different from the projected text dispatches once and re-grounds`() {

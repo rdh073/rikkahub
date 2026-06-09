@@ -859,6 +859,25 @@ class UiAutomationToolsTest {
         )
     }
 
+    // The by-formKey set_text above only works if the model can LEARN a field's formKey from the
+    // observe table — otherwise the {formKey:...} selector is an advertised-but-unreachable axis. This
+    // pins the reachability half: the ui_observe render of an editable field must surface its formKey
+    // (the projector sets it only for editable nodes). On the unfixed renderer (formKey never emitted)
+    // this FAILS — the model could never produce the by-formKey selector the test above hand-feeds.
+    @Test
+    fun `ui_observe renders an editable field's formKey so the model can address it`() {
+        val backend = FakeBackend(editableTree(stateSeq = 1L, text = "old"))
+        val tools = actTools(actGuard(), backend)
+
+        val parts = runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+        val text = (parts.single() as UIMessagePart.Text).text
+
+        assertTrue(
+            "the observe table must surface the editable field's formKey so {formKey:...} is reachable",
+            text.contains("form=com.example.target:id/field"),
+        )
+    }
+
     @Test
     fun `revoked guard denies ui_set_text before the backend and never leaks the deny reason`() {
         val backend = FakeBackend(editableTree())

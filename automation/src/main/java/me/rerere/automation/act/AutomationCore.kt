@@ -165,12 +165,16 @@ class AutomationCore(
         // 3.5. P9 restricted idempotency (design §3 I-act-4 — set_text only, NEVER submit/pay). The
         // act has been ADMITted (so it consumed exactly one step / left one audit entry, mirroring
         // how core.act always authorizes before deciding to dispatch), but the postcondition the model
-        // can verify already holds: the resolved field already PROJECTS the requested text. The model
-        // only ever sees `target.text` (the projection — node.text masked for passwords, but a password
-        // field was already DENIED above), so comparing against it is the conservative, model-observable
-        // choice: equal ⇒ skip the dispatch/settle/re-snapshot and return the unchanged grounding. The
-        // compare is exact (case-sensitive, no trim); any difference (or a null projection) dispatches.
-        if (request is Act.SetText && target?.text == request.text) {
+        // wants already holds: the resolved field's CURRENT VALUE already equals the requested text.
+        // Compare against `target.editableText` (the ground-truth editable value), NOT `target.text`
+        // (the DISPLAY projection): `text` is `node.text ?: node.contentDescription`, so an EMPTY field
+        // (node.text == null) whose contentDescription is a hint/label (e.g. "Email") projects
+        // `text = "Email"` — matching `set_text("Email")` against THAT would skip the dispatch and
+        // leave the field empty while the model believes the write landed (the design's "clean
+        // postconditions only" rule, violated). `editableText` is null for an empty/non-editable/
+        // password field, so the compare is exact and a null value (unknown postcondition) fails toward
+        // dispatch. The compare is case-sensitive, no trim; any difference dispatches.
+        if (request is Act.SetText && target?.editableText == request.text) {
             return ActOutcome.Acted(grounded)
         }
 
