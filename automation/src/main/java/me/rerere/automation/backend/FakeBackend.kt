@@ -45,7 +45,12 @@ class FakeBackend(
     override suspend fun snapshotRawTree(): RawTree {
         gate?.await()
         snapshotCount++
-        return rawTree
+        // Stamp the TOCTOU token atomically with the tree (the real backend computes it inside its
+        // capture lock). It mirrors windowContentHash so the act-assert's live re-read compares
+        // like-for-like: a later setContentHash for this seq (a dropped-event case) then diverges from
+        // this captured value and the assert catches it (the assert-both property).
+        val t = rawTree
+        return t.copy(contentHash = windowContentHash(t.stateSeq))
     }
 
     override fun windowContentHash(stateSeq: Long): String =
@@ -55,6 +60,14 @@ class FakeBackend(
 
     override suspend fun perform(action: PerformAction): Boolean {
         gate?.await()
+        // Mirror the real backend's dispatch-time freshness re-check (AccessibilityRuntime.perform):
+        // a node action carries the stateSeq the core asserted; if the live seq advanced AFTER that
+        // assert but BEFORE this dispatch (a WINDOW_STATE/CONTENT event in the gap — the gate lets a
+        // test inject exactly that race), the grounding moved under us, so do NOT dispatch — return
+        // false (best-effort no-op ack; the core's re-snapshot is ground truth, D4 / I-act-1 / MR3).
+        if (action is PerformAction.Node && action.stateSeq != rawTree.stateSeq) {
+            return false
+        }
         performed.add(action)
         // A real act changes the screen ⇒ the backend's sequence advances. Modelling that here keeps
         // tids turn-scoped (the post-act re-snapshot sees a fresh seq, so the old grounding is stale

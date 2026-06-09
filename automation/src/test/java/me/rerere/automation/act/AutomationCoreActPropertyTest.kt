@@ -6,6 +6,7 @@ import io.kotest.property.arbitrary.string
 import io.kotest.property.checkAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -324,6 +325,105 @@ class AutomationCoreActPropertyTest {
             // never reaching the in-flight block.
             assertEquals(ActOutcome.Denied(ActDenyReason.GUARD), outcome)
             assertTrue(backend.performed.isEmpty())
+        }
+    }
+
+    // ---- I-act-1 / MR3 (dispatch-time TOCTOU): a WINDOW_STATE/CONTENT event that lands AFTER the
+    // core's assert but BEFORE the node dispatch must NOT scroll the (now newer) tree. The core's
+    // pre-dispatch assert is necessary but not load-bearing on its own — the backend re-verifies the
+    // carried PerformAction.Node.stateSeq at dispatch (atomically with its walk). Reproduced here by
+    // parking perform on the gate, advancing the seq while parked, then releasing: the carried seq no
+    // longer matches the backend's live seq, so the dispatch must no-op. On the unfixed code (carried
+    // stateSeq ignored at dispatch) this FAILS — the scroll lands on a tree the core never asserted.
+    @Test
+    fun `MR3 a stateSeq advance between assert and dispatch never lands the scroll`() {
+        runBlocking {
+            val backend = backend()
+            val core = AutomationCore(backend)
+            val grounded = core.observe() // grounded @ seq 1
+            val g = guard()
+            backend.armGate() // the next perform() parks until released
+            val job: Job = launch(Dispatchers.Default) {
+                core.act(g, grounded, Act.Targeted(Selector.ByTid(0), NodeActionKind.SCROLL_FORWARD))
+            }
+            repeat(50) { yield() } // let it pass resolve/assert/authorize and park in perform
+            backend.injectTransition() // a content event arrives in the assert→dispatch gap (seq 1→2)
+            backend.releaseGate()
+            job.join()
+            assertTrue(
+                "a node dispatch whose carried stateSeq is stale must NOT land (I-act-1/MR3)",
+                backend.performed.isEmpty(),
+            )
+        }
+    }
+
+    // ---- post-act surface bind (gate finding): the re-snapshot must NOT disclose an app the
+    // capability never admitted. A global nav can surface a DIFFERENT app (HOME → launcher); the act
+    // authorized against the GROUNDED foreground, so a re-snapshot that left that surface is
+    // StaleState (the model must re-observe, and ui_observe re-authorizes the new surface), never an
+    // Acted carrying the other app's content. Reproduced by switching the foreground mid-act. On the
+    // unfixed code (re-snapshot returned unconditionally) this FAILS — the launcher leaks as Acted.
+    @Test
+    fun `a global nav that switches to an unadmitted app is StaleState not Acted`() {
+        runBlocking {
+            val backend = backend()
+            val core = AutomationCore(backend)
+            val grounded = core.observe() // grounded @ APP
+            val g = guard() // surface = {APP} only
+            backend.armGate()
+            val deferredOutcome = async(Dispatchers.Default) {
+                core.act(g, grounded, Act.Global(GlobalNav.HOME))
+            }
+            repeat(50) { yield() } // park in perform (Global skips the node seq re-check)
+            backend.setForeground("com.android.launcher") // HOME surfaced a different, unadmitted app
+            backend.releaseGate()
+            val outcome = deferredOutcome.await()
+            assertEquals(
+                "a re-snapshot off the authorized surface must be StaleState, never Acted(other app)",
+                ActOutcome.StaleState,
+                outcome,
+            )
+        }
+    }
+
+    // ---- I-act-3 (system UI observable but non-actionable): a scroll resolving a node inside a
+    // system/permission window must be DENIED before dispatch. The provenance travels on
+    // UiTarget.systemWindow (set by the projector from RawWindow.systemWindow) and the core maps it
+    // to AuthRequest.systemUiTarget, so the guard's system-UI DENY branch is reachable. On the
+    // unfixed code (systemUiTarget never set) this FAILS — the system-window scroll authorizes and
+    // dispatches, making the guard's system-UI branch dead code (#187's "grant UI non-actionable" gate).
+    @Test
+    fun `a scroll targeting a system-window node is denied before dispatch`() {
+        runBlocking {
+            // A system/permission window (e.g. a runtime-permission grant dialog) with a scrollable node.
+            val systemBackend = FakeBackend(
+                RawTree(
+                    stateSeq = 1L,
+                    foregroundPkg = APP,
+                    windows = listOf(
+                        RawWindow(
+                            pkg = "com.android.packageinstaller",
+                            systemWindow = true,
+                            root = RawNode(
+                                text = "Allow access?", className = "ScrollView",
+                                visible = true, hasArea = true, scrollable = true,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            val core = AutomationCore(systemBackend)
+            val grounded = core.observe()
+            assertTrue("fixture should project a system-window target", grounded.targets.isNotEmpty())
+            assertTrue(
+                "the projected target must carry its system-window provenance",
+                grounded.targets.first().systemWindow,
+            )
+            // The surface admits APP and the SCROLL verb is granted, so the ONLY thing that can refuse
+            // this is the system-UI DENY branch — proving I-act-3 does not piggyback on another check.
+            val outcome = core.act(guard(), grounded, Act.Targeted(Selector.ByTid(0), NodeActionKind.SCROLL_FORWARD))
+            assertEquals(ActOutcome.Denied(ActDenyReason.GUARD), outcome)
+            assertTrue("a system-UI scroll must NOT touch the backend", systemBackend.performed.isEmpty())
         }
     }
 }

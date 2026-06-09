@@ -73,6 +73,14 @@ data class UiTarget(
     val semanticKey: String? = null,
     /** Form-field key for inputs (used by the v2 self-heal path; carried but unused for reads). */
     val formKey: String? = null,
+    /**
+     * True when this target belongs to a system/permission window (systemui/packageinstaller). System
+     * UI is observable but NEVER an act target (design I-act-3 / I8/P18): the act path maps this to
+     * [me.rerere.automation.cap.AuthRequest.systemUiTarget] so the guard DENYs a write on it — without
+     * this provenance the guard's system-UI branch would be dead code (a grant dialog's "Allow" button
+     * is in the snapshot, so the invariant must travel WITH the target, not be re-derived from coords).
+     */
+    val systemWindow: Boolean = false,
 )
 
 @Serializable

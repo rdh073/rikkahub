@@ -64,11 +64,18 @@ interface AutomationBackend {
  * @param stateSeq the backend's monotonic sequence at capture time.
  * @param foregroundPkg the package owning the foreground window.
  * @param windows one [RawWindow] per visible window (app + system dialogs).
+ * @param contentHash the TOCTOU token computed from the SAME capture instant as [windows] (the
+ *   active window's structural fold). [me.rerere.automation.act.AutomationCore.observe] stamps it
+ *   onto the snapshot instead of a SECOND live [AutomationBackend.windowContentHash] read, so the
+ *   grounding's nodes and its token describe one instant (gate finding: the token must not be built
+ *   non-atomically). A bare/non-grounding capture leaves it `""`; the active-window definition must
+ *   match [AutomationBackend.windowContentHash] so the act-assert's live re-read compares like-for-like.
  */
 data class RawTree(
     val stateSeq: Long,
     val foregroundPkg: String,
     val windows: List<RawWindow>,
+    val contentHash: String = "",
 )
 
 /** One window in the forest. [secure] means FLAG_SECURE — its contents must not be projected. */

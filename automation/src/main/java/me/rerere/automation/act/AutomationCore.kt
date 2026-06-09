@@ -49,11 +49,14 @@ class AutomationCore(
      */
     suspend fun observe(): UiSnapshot {
         val raw = backend.snapshotRawTree()
-        // Capture the TOCTOU token atomically with the tree: this is the windowContentHash the act
-        // path re-checks. The projector leaves it "" (a bare projection is not grounded); the core
-        // is the one place a snapshot is bound to a live backend, so it stamps the hash here.
+        // Capture the TOCTOU token atomically with the tree: the backend computes [RawTree.contentHash]
+        // from the SAME capture instant as the nodes (under its capture lock), so the grounding's nodes
+        // and its token describe one instant. Stamping a SECOND live windowContentHash() read here would
+        // let a content change between the two reads make the token describe a different tree than the
+        // nodes (gate finding). The projector leaves it "" (a bare projection is not grounded); the core
+        // is the one place a snapshot is bound to a live backend, so it stamps the captured hash here.
         val snapshot = projector.project(raw)
-            .copy(windowContentHash = backend.windowContentHash(raw.stateSeq))
+            .copy(windowContentHash = raw.contentHash)
 
         // P11: enforce non-decreasing observed sequence. A backend that hands back a lower seq than
         // we've already seen is malfunctioning; fail loud rather than let the model act on a tree
@@ -127,13 +130,18 @@ class AutomationCore(
             is Act.Targeted -> Verb.SCROLL to null
             is Act.Global -> Verb.GLOBAL to Sink.GLOBAL_NAV
         }
-        val sensitive = tid != null &&
-            grounded.targets.first { it.tid == tid }.flags.contains(UiFlag.PASSWORD)
+        // Resolve once: the SAME target backs both the PASSWORD (sensitiveNode) and the system-window
+        // (systemUiTarget) provenance the guard DENYs on (I-act-3 / I8/P18). A global act has no node
+        // target, so neither flag applies. Without systemUiTarget the guard's system-UI branch is dead
+        // code: a scroll resolving a node inside a system/permission window would authorize as if it
+        // were app content (the provenance must travel WITH the projected target — UiTarget.systemWindow).
+        val target = tid?.let { id -> grounded.targets.first { it.tid == id } }
         val authRequest = AuthRequest(
             verb = verb,
             targetPkg = grounded.foregroundPkg,
             sink = sink,
-            sensitiveNode = sensitive,
+            sensitiveNode = target?.flags?.contains(UiFlag.PASSWORD) == true,
+            systemUiTarget = target?.systemWindow == true,
         )
         if (guard.authorize(authRequest) == Decision.DENY) {
             return ActOutcome.Denied(ActDenyReason.GUARD)
@@ -152,7 +160,20 @@ class AutomationCore(
                 backend.perform(performAction)
                 backend.awaitSettle()
                 // D4: act success is the fresh re-grounding, not perform()'s boolean.
-                ActOutcome.Acted(observe())
+                val resnapshot = observe()
+                // Surface re-assert (mirrors UiAutomationTools' ui_observe bind): the post-act
+                // re-snapshot must NOT disclose an app the capability never admitted. The act
+                // authorized against `grounded.foregroundPkg`; a global nav (HOME/BACK/RECENTS) can
+                // surface a DIFFERENT app (the launcher / whatever HOME reveals), which the surface
+                // guard would DENY on a fresh observe — so returning its content here would leak past
+                // the capability. Conservative policy: if the re-snapshot left the authorized target,
+                // return StaleState so the model re-observes (and ui_observe re-authorizes the new
+                // surface), never Acted(other-app). A reversible nav that changed nothing still binds.
+                if (resnapshot.foregroundPkg != grounded.foregroundPkg) {
+                    ActOutcome.StaleState
+                } else {
+                    ActOutcome.Acted(resnapshot)
+                }
             },
         )
     }

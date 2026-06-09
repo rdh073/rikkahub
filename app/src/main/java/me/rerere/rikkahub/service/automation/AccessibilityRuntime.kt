@@ -187,7 +187,20 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
         // the caller's Job, so cancelling the owning generation cancels exactly this capture (I9).
         withContext(serviceDispatcher) {
             val seq = stateSeq.get()
-            val foreground = foregroundPackage ?: HOST_PACKAGE
+            // Capture the active window's package AND the TOCTOU content hash from ONE read of
+            // rootInActiveWindow, inside this same locked frame as the window walk — so the grounding's
+            // nodes and its token describe one instant (gate finding: the token must not be built by a
+            // SECOND live read). The hash definition mirrors windowContentHash (active window only) so
+            // the act-assert's live re-read compares like-for-like.
+            val (foreground, contentHash) = rootInActiveWindow?.let { root ->
+                try {
+                    val acc = StringBuilder()
+                    foldStructure(root, acc)
+                    (root.packageName?.toString() ?: HOST_PACKAGE) to acc.toString().hashCode().toString(16)
+                } finally {
+                    root.recycle()
+                }
+            } ?: (HOST_PACKAGE to "empty:$seq")
             // getWindows() hands out live AccessibilityWindowInfo handles; recycle each after copying
             // its subtree into the value RawWindow (resource discipline — release on every path). On
             // API 33+ recycle() is a no-op, but minSdk is 26 where leaking windows is real.
@@ -199,7 +212,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                     window.recycle()
                 }
             }
-            RawTree(stateSeq = seq, foregroundPkg = foreground, windows = rawWindows)
+            RawTree(stateSeq = seq, foregroundPkg = foreground, windows = rawWindows, contentHash = contentHash)
         }
     }
 
@@ -274,7 +287,21 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                     },
                 )
 
-                is PerformAction.Node -> performOnProjectedNode(action.tid, action.kind)
+                is PerformAction.Node -> {
+                    // Re-verify the carried stateSeq at dispatch, atomically with the walk (under the
+                    // same captureMutex + serviceDispatcher frame). The core's pre-dispatch assert
+                    // (currentStateSeq + windowContentHash) is necessary but not load-bearing on its
+                    // own: a WINDOW_STATE/CONTENT event between that assert and this re-walk would make
+                    // performOnProjectedNode scroll the tid-th node of a NEWER tree than the one
+                    // asserted (I-act-1 / MR3). The carried action.stateSeq is the freshness token; a
+                    // mismatch means the grounding moved under us, so do NOT dispatch — return false
+                    // (the documented best-effort no-op ack; the core's re-snapshot is ground truth, D4).
+                    if (stateSeq.get() != action.stateSeq) {
+                        false
+                    } else {
+                        performOnProjectedNode(action.tid, action.kind)
+                    }
+                }
             }
         }
     }
@@ -290,8 +317,9 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
      * Resource discipline: every [AccessibilityNodeInfo] and [AccessibilityWindowInfo] is recycled on
      * EVERY path. The action is performed INSIDE the walk (the frame that owns the node), so no live
      * handle escapes the walk — that removes the double-recycle the "return a live node" shape invited
-     * when the match is the window root. [tid]'s [stateSeq] was already asserted by the core; not
-     * re-checked here. Out-of-range tid ⇒ false (the core treats dispatch as a best-effort ack).
+     * when the match is the window root. The carried `stateSeq` is re-verified by [perform] immediately
+     * before this walk (atomically under the same lock), so the tree this walks is the one the core
+     * asserted. Out-of-range tid ⇒ false (the core treats dispatch as a best-effort ack).
      */
     private fun performOnProjectedNode(tid: Int, kind: NodeActionKind): Boolean {
         val actionId = when (kind) {
