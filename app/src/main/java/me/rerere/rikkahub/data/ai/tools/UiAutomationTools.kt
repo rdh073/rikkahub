@@ -349,7 +349,12 @@ fun getUiAutomationTools(
                 }
                 val selector = parseSelector(args["selector"])
                     ?: return@execute auditMalformedAct(Verb.SET_TEXT, Sink.TYPE_INTO, rawArgs = args.toString())
-                val text = (args["text"] as? JsonPrimitive)?.contentOrNull
+                // The text MUST be a JSON string. contentOrNull coerces ANY primitive
+                // ({"text":123} -> "123", true -> "true"), which would DISPATCH a non-string as a
+                // write instead of failing closed — the garbage-write case P24 rejects for this
+                // security-critical input sink. "" stays valid: clearing a field is a legitimate
+                // set_text the act path's P9 no-op already handles.
+                val text = (args["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
                     ?: return@execute auditMalformedAct(Verb.SET_TEXT, Sink.TYPE_INTO, rawArgs = args.toString())
                 // core.act authorizes internally (S2) and runs guardInFlight (P20) — the tool layer
                 // must NOT call authorize/guardInFlight here (would double-audit / break P25). The
@@ -377,15 +382,20 @@ fun getUiAutomationTools(
  */
 private fun parseSelector(element: JsonElement?): Selector? {
     val obj = element as? JsonObject ?: return null
+    // tid is type-safe (intOrNull rejects a non-number). The string fields must gate on isString
+    // BEFORE reading content: contentOrNull coerces any primitive ({"formKey":123} -> "123"), which
+    // would route a non-string into a stable-key/text selector instead of failing closed. A non-string
+    // (or empty) field falls through to the next branch, ending in `return null` (the caller then audits
+    // a malformed DENY) — exactly as a missing field does.
     (obj["tid"] as? JsonPrimitive)?.intOrNull?.let { return Selector.ByTid(it) }
-    (obj["formKey"] as? JsonPrimitive)?.contentOrNull
+    (obj["formKey"] as? JsonPrimitive)?.takeIf { it.isString }?.content
         ?.takeIf { it.isNotEmpty() }
         ?.let { return Selector.ByFormKey(it) }
-    (obj["semanticKey"] as? JsonPrimitive)?.contentOrNull
+    (obj["semanticKey"] as? JsonPrimitive)?.takeIf { it.isString }?.content
         ?.takeIf { it.isNotEmpty() }
         ?.let { return Selector.BySemanticKey(it) }
-    (obj["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
-        val role = (obj["role"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
+    (obj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { text ->
+        val role = (obj["role"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotEmpty() }
         return Selector.ByText(text, role)
     }
     return null

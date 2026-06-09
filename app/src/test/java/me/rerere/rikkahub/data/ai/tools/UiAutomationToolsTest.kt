@@ -955,4 +955,91 @@ class UiAutomationToolsTest {
         assertEquals(DenyReason.MALFORMED, entry.reason)
         assertEquals(Verb.SET_TEXT, entry.verb)
     }
+
+    // A NON-STRING text is the garbage-write case (#198 input sink fail-closed). The unfixed tool read
+    // the payload with `(args["text"] as? JsonPrimitive)?.contentOrNull`, which COERCES any primitive
+    // ({"text":123} -> "123", true -> "true") and DISPATCHED it as a write instead of routing to the
+    // malformed branch. On the unfixed code this FAILS (a SetText for "123" is performed, no DENY is
+    // audited); the isString gate makes it fail closed + audit, exactly like a missing text.
+    @Test
+    fun `ui_set_text with a non-string text fails closed and audits one DENY with SET_TEXT`() {
+        val backend = FakeBackend(editableTree(stateSeq = 5L, text = "hello"))
+        val guard = actGuard()
+        val tools = actTools(guard, backend)
+        runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+        val entriesAfterObserve = guard.audit.entries().size
+
+        // A resolvable selector (tid 0) but a NUMBER text: contentOrNull would coerce it to "123" and
+        // write that; the isString guard must reject it as malformed (never coerce a non-string write).
+        runBlocking {
+            tools.byName("ui_set_text").execute(
+                buildJsonObject {
+                    put("selector", buildJsonObject { put("tid", 0) })
+                    put("text", 123)
+                },
+            )
+        }
+
+        assertTrue("a non-string text must never perform (no coerced write)", backend.performed.isEmpty())
+        val newEntries = guard.audit.entries().drop(entriesAfterObserve)
+        assertEquals("a non-string-text set_text must append exactly one ledger entry", 1, newEntries.size)
+        val entry = newEntries.single()
+        assertEquals(Decision.DENY, entry.decision)
+        assertEquals(DenyReason.MALFORMED, entry.reason)
+        assertEquals("the ledger must record SET_TEXT for a coerced-text attempt", Verb.SET_TEXT, entry.verb)
+    }
+
+    // The selector's string fields (formKey/semanticKey/text) had the same coercion bug in
+    // parseSelector: `(obj["formKey"] as? JsonPrimitive)?.contentOrNull` turned {"formKey":123} into a
+    // ByFormKey("123") instead of failing closed. The fix gates each on isString. On the unfixed code
+    // this FAILS (the coerced "123" formKey resolves to nothing -> AMBIGUOUS, but it is treated as a
+    // valid selector rather than a malformed arg); the gate routes it to the malformed DENY.
+    @Test
+    fun `ui_set_text with a non-string selector field fails closed and audits one DENY with SET_TEXT`() {
+        val backend = FakeBackend(editableTree(stateSeq = 5L, text = "hello"))
+        val guard = actGuard()
+        val tools = actTools(guard, backend)
+        runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+        val entriesAfterObserve = guard.audit.entries().size
+
+        // A NUMBER formKey: parseSelector must NOT coerce it into a ByFormKey("123") selector — a
+        // non-string selector field is malformed and returns null, so the tool audits a malformed DENY.
+        runBlocking {
+            tools.byName("ui_set_text").execute(
+                buildJsonObject {
+                    put("selector", buildJsonObject { put("formKey", 123) })
+                    put("text", "world")
+                },
+            )
+        }
+
+        assertTrue("a non-string selector field must never perform", backend.performed.isEmpty())
+        val newEntries = guard.audit.entries().drop(entriesAfterObserve)
+        assertEquals("a non-string selector field must append exactly one ledger entry", 1, newEntries.size)
+        val entry = newEntries.single()
+        assertEquals(Decision.DENY, entry.decision)
+        assertEquals(DenyReason.MALFORMED, entry.reason)
+        assertEquals(Verb.SET_TEXT, entry.verb)
+    }
+
+    // An EMPTY-STRING text must stay VALID — clearing a field is a legitimate set_text the act path's
+    // P9 no-op handles. This pins that the isString fix did not over-tighten "" into a malformed arg
+    // (the guard is isString, not isNotEmpty). With the field currently non-empty ("hello"), setting it
+    // to "" is a real change, so it dispatches one SetText("").
+    @Test
+    fun `ui_set_text with an empty-string text is valid and clears the field`() {
+        val backend = FakeBackend(editableTree(stateSeq = 5L, text = "hello"))
+        val tools = actTools(actGuard(), backend)
+        runBlocking { tools.byName(UI_OBSERVE_TOOL_NAME).execute(buildJsonObject { }) }
+
+        runBlocking {
+            tools.byName("ui_set_text").execute(setTextArgs(buildJsonObject { put("tid", 0) }, ""))
+        }
+
+        assertEquals(
+            "an empty-string text is a legitimate clear-the-field set_text, not a malformed arg",
+            PerformAction.SetText(stateSeq = 5L, tid = 0, text = ""),
+            backend.performed.single(),
+        )
+    }
 }
