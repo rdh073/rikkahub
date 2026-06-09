@@ -24,6 +24,15 @@ data class UiSnapshot(
     val foregroundPkg: String,
     val screenState: ScreenState,
     val targets: List<UiTarget>,
+    /**
+     * The backend content hash at capture time — the TOCTOU token for the v2 act path (design §5 /
+     * #198 §1 step 2). Populated by [me.rerere.automation.act.AutomationCore.observe]; the projector
+     * leaves it `""` (a bare projection is not grounded against a live backend). An act re-checks
+     * `windowContentHash(stateSeq)` against this value so a dropped `AccessibilityEvent` that leaves
+     * `stateSeq` stale-but-equal is still caught. NOT model-facing — :app's snapshot renderer never
+     * surfaces it; it is internal plumbing carried on the snapshot so the act can verify the grounding.
+     */
+    val windowContentHash: String = "",
 )
 
 /**

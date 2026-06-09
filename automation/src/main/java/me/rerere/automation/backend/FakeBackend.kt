@@ -26,9 +26,21 @@ class FakeBackend(
     var snapshotCount: Int = 0
         private set
 
-    /** When non-null, [snapshotRawTree] awaits this gate before returning (in-flight-cancel tests). */
+    /**
+     * When non-null, [snapshotRawTree] AND [perform] await this gate before proceeding (in-flight
+     * cancel tests). An act parks at its [perform] step, so a test can revoke mid-act and assert the
+     * coroutine is cancelled rather than completing (I-act-10 / P20 extended).
+     */
     @Volatile
     var gate: CompletableDeferred<Unit>? = null
+
+    /** Every [perform] call, in order — lets a property assert "perform happened / never happened". */
+    val performed = ArrayList<PerformAction>()
+
+    /** Counts [awaitSettle] calls — a property can assert settle runs exactly once per act. */
+    @Volatile
+    var settleCount: Int = 0
+        private set
 
     override suspend fun snapshotRawTree(): RawTree {
         gate?.await()
@@ -38,6 +50,22 @@ class FakeBackend(
 
     override fun windowContentHash(stateSeq: Long): String =
         contentHashes[stateSeq] ?: stateSeq.toString()
+
+    override fun currentStateSeq(): Long = rawTree.stateSeq
+
+    override suspend fun perform(action: PerformAction): Boolean {
+        gate?.await()
+        performed.add(action)
+        // A real act changes the screen ⇒ the backend's sequence advances. Modelling that here keeps
+        // tids turn-scoped (the post-act re-snapshot sees a fresh seq, so the old grounding is stale
+        // for the NEXT act) without a test having to inject the transition by hand.
+        rawTree = rawTree.copy(stateSeq = rawTree.stateSeq + 1)
+        return true
+    }
+
+    override suspend fun awaitSettle() {
+        settleCount++
+    }
 
     // --- test-only mutators (deterministic substrate control) ---
 
