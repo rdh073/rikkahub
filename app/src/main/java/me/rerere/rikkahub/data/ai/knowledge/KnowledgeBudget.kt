@@ -33,7 +33,10 @@ object KnowledgeBudget {
      */
     fun of(model: Model, systemPromptTokens: Int): Int {
         val window = ModelRegistry.getContextWindowForModel(model)
-        val slice = floor(window * KNOWLEDGE_FRACTION).toInt()
-        return (slice - systemPromptTokens).coerceAtLeast(0)
+        // Long math + clamp to a valid Int budget: keeps the subtraction overflow-safe for any
+        // window / systemPromptTokens pair (cross-model gate). systemPromptTokens is a non-negative
+        // estimate in practice; the clamp also tolerates a bad caller without producing a bogus budget.
+        val slice = floor(window * KNOWLEDGE_FRACTION).toLong()
+        return (slice - systemPromptTokens).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
     }
 }

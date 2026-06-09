@@ -72,6 +72,10 @@ object KnowledgeContextTransformer : InputMessageTransformer, KoinComponent {
             messages.firstOrNull { it.role == MessageRole.SYSTEM }?.parts ?: emptyList()
         )
         val budget = KnowledgeBudget.of(ctx.model, systemPromptTokens)
+        // Nothing can be selected on a zero budget (the system prompt already fills the knowledge
+        // slice): short-circuit before the attachment disk reads and the RAG retrieval IO/network so a
+        // saturated turn does no wasted work (cross-model gate nit).
+        if (budget <= 0) return messages
 
         // Attachment extraction is blocking IO (#189 suspend seam, absorbed here); the RAG branch
         // already hops to IO internally. Do the disk reads on IO too.

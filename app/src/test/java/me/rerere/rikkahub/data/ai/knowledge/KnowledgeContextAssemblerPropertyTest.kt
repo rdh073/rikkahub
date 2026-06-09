@@ -80,6 +80,29 @@ class KnowledgeContextAssemblerPropertyTest {
     }
 
     @Test
+    fun `P1 boundary - near-MAX estimatedTokens never overflow past the budget`() {
+        // Regression for the Int-overflow gate finding (codex): with Int accumulation, two
+        // near-MAX_VALUE blocks both passing `running + est <= budget` would wrap negative and slip
+        // through, breaking P1. The Long accumulator must admit at most the one that fits.
+        val big = KnowledgeContextBlock(
+            source = KnowledgeSource.ATTACHMENT,
+            scope = KnowledgeScope.MESSAGE,
+            title = null,
+            content = "x",
+            priority = 0,
+            estimatedTokens = Int.MAX_VALUE - 10,
+        )
+        val out = KnowledgeContextAssembler.assemble(
+            listOf(big, big.copy(priority = -1)),
+            Int.MAX_VALUE,
+        )
+        // Sum as Long — an Int sum of two near-MAX blocks would itself overflow.
+        val sum = out.sumOf { it.estimatedTokens.toLong() }
+        assertTrue("sum=$sum must be <= budget=${Int.MAX_VALUE}", sum <= Int.MAX_VALUE.toLong())
+        assertEquals("only one near-MAX block fits the budget", 1, out.size)
+    }
+
+    @Test
     fun `P2 - every output block has a known source and scope and came from the input`() {
         runBlocking {
             checkAll(200, arbCase) { (blocks, budget) ->

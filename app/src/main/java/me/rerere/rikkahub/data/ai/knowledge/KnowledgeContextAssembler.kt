@@ -51,11 +51,16 @@ object KnowledgeContextAssembler {
         )
 
         val selected = ArrayList<KnowledgeContextBlock>(ordered.size)
-        var running = 0
+        // Long accumulator: a block's estimatedTokens can be large and an Int `running + est` could
+        // overflow, wrap negative, and slip past the `<= budget` check — breaking P1. budgetTokens is
+        // promoted to Long in the compare; a (pathological) negative estimate is skipped, never treated
+        // as free budget. (cross-model gate: codex Int-overflow finding on #141 Phase 1.)
+        var running = 0L
         for (block in ordered) {
-            if (running + block.estimatedTokens <= budgetTokens) {
+            val cost = block.estimatedTokens.toLong()
+            if (cost >= 0 && running + cost <= budgetTokens) {
                 selected.add(block)
-                running += block.estimatedTokens
+                running += cost
             }
         }
         return selected
