@@ -157,22 +157,33 @@ class AutomationCore(
             cancel = { job?.cancel(CancellationException("automation revoked")) },
             onAlreadyRevoked = { ActOutcome.Denied(ActDenyReason.REVOKED) },
             block = {
-                backend.perform(performAction)
-                backend.awaitSettle()
-                // D4: act success is the fresh re-grounding, not perform()'s boolean.
-                val resnapshot = observe()
-                // Surface re-assert (mirrors UiAutomationTools' ui_observe bind): the post-act
-                // re-snapshot must NOT disclose an app the capability never admitted. The act
-                // authorized against `grounded.foregroundPkg`; a global nav (HOME/BACK/RECENTS) can
-                // surface a DIFFERENT app (the launcher / whatever HOME reveals), which the surface
-                // guard would DENY on a fresh observe — so returning its content here would leak past
-                // the capability. Conservative policy: if the re-snapshot left the authorized target,
-                // return StaleState so the model re-observes (and ui_observe re-authorizes the new
-                // surface), never Acted(other-app). A reversible nav that changed nothing still binds.
-                if (resnapshot.foregroundPkg != grounded.foregroundPkg) {
+                // The backend returns false WITHOUT dispatching when the grounding moved in the
+                // assert→dispatch gap (a node action whose carried stateSeq no longer matches the live
+                // tree — I-act-1/MR3 — re-checked atomically with the walk). That false is the safety
+                // signal the dispatch-time re-check exists to produce; HONOR it as StaleState (the
+                // model must re-observe, never replay), do not settle/re-snapshot and report success.
+                // D4 licenses not TRUSTING a true return (success is the re-snapshot, below); it does
+                // NOT license IGNORING a false that means "I refused to dispatch — the grounding moved".
+                if (!backend.perform(performAction)) {
                     ActOutcome.StaleState
                 } else {
-                    ActOutcome.Acted(resnapshot)
+                    backend.awaitSettle()
+                    // D4: act success is the fresh re-grounding, not perform()'s boolean.
+                    val resnapshot = observe()
+                    // Surface re-assert (mirrors UiAutomationTools' ui_observe bind): the post-act
+                    // re-snapshot must NOT disclose an app the capability never admitted. The act
+                    // authorized against `grounded.foregroundPkg`; a global nav (HOME/BACK/RECENTS) can
+                    // surface a DIFFERENT app (the launcher / whatever HOME reveals), which the surface
+                    // guard would DENY on a fresh observe — so returning its content here would leak
+                    // past the capability. Conservative policy: if the re-snapshot left the authorized
+                    // target, return StaleState so the model re-observes (and ui_observe re-authorizes
+                    // the new surface), never Acted(other-app). A reversible nav that changed nothing
+                    // still binds.
+                    if (resnapshot.foregroundPkg != grounded.foregroundPkg) {
+                        ActOutcome.StaleState
+                    } else {
+                        ActOutcome.Acted(resnapshot)
+                    }
                 }
             },
         )

@@ -34,6 +34,16 @@ class FakeBackend(
     @Volatile
     var gate: CompletableDeferred<Unit>? = null
 
+    /**
+     * Completes the instant [perform] is ENTERED — BEFORE it parks on [gate]. Lets an in-flight test
+     * wait deterministically until the act is parked in [perform], then revoke / advance the seq /
+     * switch the foreground, instead of racing on a fixed `yield()` count (the latter is scheduler-
+     * dependent and flaked the P20 act test in CI — the coroutine on Dispatchers.Default had not yet
+     * reached the park when the fixed yields elapsed).
+     */
+    @Volatile
+    var performEntered: CompletableDeferred<Unit>? = null
+
     /** Every [perform] call, in order — lets a property assert "perform happened / never happened". */
     val performed = ArrayList<PerformAction>()
 
@@ -59,6 +69,7 @@ class FakeBackend(
     override fun currentStateSeq(): Long = rawTree.stateSeq
 
     override suspend fun perform(action: PerformAction): Boolean {
+        performEntered?.complete(Unit) // signal "parked in perform" before the gate (deterministic in-flight tests)
         gate?.await()
         // Mirror the real backend's dispatch-time freshness re-check (AccessibilityRuntime.perform):
         // a node action carries the stateSeq the core asserted; if the live seq advanced AFTER that

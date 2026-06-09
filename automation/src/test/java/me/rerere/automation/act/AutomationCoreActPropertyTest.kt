@@ -4,12 +4,12 @@ import io.kotest.property.Arb
 import io.kotest.property.arbitrary.int
 import io.kotest.property.arbitrary.string
 import io.kotest.property.checkAll
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
 import me.rerere.automation.backend.FakeBackend
 import me.rerere.automation.backend.GlobalNav
 import me.rerere.automation.backend.NodeActionKind
@@ -300,10 +300,11 @@ class AutomationCoreActPropertyTest {
             val grounded = core.observe()
             val g = guard()
             backend.armGate() // the next perform() parks until the owning coroutine is cancelled
+            val entered = CompletableDeferred<Unit>().also { backend.performEntered = it }
             val job: Job = launch(Dispatchers.Default) {
                 core.act(g, grounded, Act.Global(GlobalNav.BACK))
             }
-            repeat(50) { yield() } // let it pass resolve/assert/authorize and park in perform
+            entered.await() // deterministic: the act has passed resolve/assert/authorize and is parked in perform
             g.revoke() // kill-switch: must cancel the parked dispatch, not let it land
             job.join()
             assertTrue("revoke must cancel the in-flight act", job.isCancelled)
@@ -343,16 +344,24 @@ class AutomationCoreActPropertyTest {
             val grounded = core.observe() // grounded @ seq 1
             val g = guard()
             backend.armGate() // the next perform() parks until released
-            val job: Job = launch(Dispatchers.Default) {
+            val entered = CompletableDeferred<Unit>().also { backend.performEntered = it }
+            val deferred = async(Dispatchers.Default) {
                 core.act(g, grounded, Act.Targeted(Selector.ByTid(0), NodeActionKind.SCROLL_FORWARD))
             }
-            repeat(50) { yield() } // let it pass resolve/assert/authorize and park in perform
+            entered.await() // deterministic: parked in perform, having passed resolve/assert/authorize
             backend.injectTransition() // a content event arrives in the assert→dispatch gap (seq 1→2)
             backend.releaseGate()
-            job.join()
+            val outcome = deferred.await()
             assertTrue(
                 "a node dispatch whose carried stateSeq is stale must NOT land (I-act-1/MR3)",
                 backend.performed.isEmpty(),
+            )
+            // F4: the backend's no-dispatch false must surface as StaleState, NOT a falsely-reported
+            // Acted — core.act honors perform()'s refusal instead of settling + re-snapshotting anyway.
+            assertEquals(
+                "a refused (stale) dispatch must be StaleState, never Acted (F4)",
+                ActOutcome.StaleState,
+                outcome,
             )
         }
     }
@@ -371,10 +380,11 @@ class AutomationCoreActPropertyTest {
             val grounded = core.observe() // grounded @ APP
             val g = guard() // surface = {APP} only
             backend.armGate()
+            val entered = CompletableDeferred<Unit>().also { backend.performEntered = it }
             val deferredOutcome = async(Dispatchers.Default) {
                 core.act(g, grounded, Act.Global(GlobalNav.HOME))
             }
-            repeat(50) { yield() } // park in perform (Global skips the node seq re-check)
+            entered.await() // deterministic: parked in perform (Global skips the node seq re-check)
             backend.setForeground("com.android.launcher") // HOME surfaced a different, unadmitted app
             backend.releaseGate()
             val outcome = deferredOutcome.await()
