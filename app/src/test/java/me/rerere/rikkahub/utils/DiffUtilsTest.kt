@@ -1,7 +1,9 @@
 package me.rerere.rikkahub.utils
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DiffUtilsTest {
@@ -86,6 +88,38 @@ class DiffUtilsTest {
         assertEquals(
             listOf("+baz", "+baz"),
             diff.lines().filter { it.startsWith("+") && !it.startsWith("+++") },
+        )
+    }
+
+    // ---- boundary cases the file-edit tool actually hits: a brand-new file, a fully-cleared file,
+    // and a pure deletion (no additions). Codex flagged these as uncovered. ----
+
+    @Test
+    fun `generates diff for empty old (new file)`() {
+        val diff = generateUnifiedDiff(oldText = "", newText = "alpha\nbeta", path = "file.txt")
+        assertNotNull("an empty->non-empty diff must not be null", diff)
+        val added = diff!!.lines().filter { it.startsWith("+") && !it.startsWith("+++") }
+        assertTrue("the new content must appear as additions", added.contains("+alpha") && added.contains("+beta"))
+    }
+
+    @Test
+    fun `generates diff for empty new (cleared file)`() {
+        val diff = generateUnifiedDiff(oldText = "alpha\nbeta\ngamma", newText = "", path = "file.txt")
+        assertNotNull("a non-empty->empty diff must not be null", diff)
+        val removed = diff!!.lines().filter { it.startsWith("-") && !it.startsWith("---") }
+        assertTrue(
+            "all old lines must appear as deletions",
+            removed.contains("-alpha") && removed.contains("-beta") && removed.contains("-gamma"),
+        )
+    }
+
+    @Test
+    fun `generates deletion-only diff with no additions`() {
+        val diff = generateUnifiedDiff(oldText = "keep1\ndrop\nkeep2", newText = "keep1\nkeep2", path = "file.txt")!!
+        assertEquals(listOf("-drop"), diff.lines().filter { it.startsWith("-") && !it.startsWith("---") })
+        assertTrue(
+            "a pure deletion must add nothing",
+            diff.lines().none { it.startsWith("+") && !it.startsWith("+++") },
         )
     }
 }
