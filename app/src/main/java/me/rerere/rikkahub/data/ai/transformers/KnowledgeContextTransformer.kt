@@ -113,13 +113,21 @@ object KnowledgeContextTransformer : InputMessageTransformer, KoinComponent {
     ): List<KnowledgeContextBlock> =
         parts.filterIsInstance<UIMessagePart.Document>().map { document ->
             val content = DocumentPromptRenderer.render(document.fileName, readContent(document))
-            KnowledgeContextBlock(
+            val block = KnowledgeContextBlock(
                 source = KnowledgeSource.ATTACHMENT,
                 scope = KnowledgeScope.MESSAGE,
                 title = document.fileName,
                 content = content,
                 priority = ATTACHMENT_PRIORITY,
-                estimatedTokens = estimateTokens(listOf(UIMessagePart.Text(content))),
+                estimatedTokens = 0,
+            )
+            // Estimate over the RENDERED block (matching ragBlock), so the <attachment> wrapper the
+            // renderer adds is counted against the budget — otherwise attachments under-count their
+            // injected cost and the assembler can marginally overshoot the budget (cross-model gate).
+            block.copy(
+                estimatedTokens = estimateTokens(
+                    listOf(UIMessagePart.Text(KnowledgeContextRenderer.render(block)))
+                )
             )
         }
 
