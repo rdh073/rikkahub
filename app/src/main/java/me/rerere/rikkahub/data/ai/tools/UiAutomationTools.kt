@@ -32,9 +32,11 @@ import me.rerere.rikkahub.data.model.Assistant
 /**
  * The per-generation UI-automation [Tool] factory — the `:app` surface of #187/#198, built on the
  * already-merged `:automation` capability + observation + act kernel (#205, #211). Exposes
- * `ui_observe` (read-only, #187 v1) plus the lowest-risk nav act verbs `ui_scroll` and `ui_global`
- * (#198 slice 8) over the SAME [AutomationCore]. No write SINK beyond `GLOBAL_NAV` is reachable here:
- * `ui_set_text`/`ui_tap` and the dangerous-sink confirm channel are later slices (9–11).
+ * `ui_observe` (read-only, #187 v1), the lowest-risk nav act verbs `ui_scroll` and `ui_global`
+ * (#198 slice 8), and the input sink `ui_set_text` (`Verb.SET_TEXT` + `Sink.TYPE_INTO`, #198 slice 9)
+ * over the SAME [AutomationCore]. `ui_tap` and the dangerous-sink (submit-class) confirm channel are
+ * later slices (10–11). `ui_set_text` inherits the act path's restricted P9 no-op: an unchanged-text
+ * set is idempotent (no dispatch), but typing into a password/system-UI field is always DENIED.
  *
  * Shape mirrors [me.rerere.rikkahub.data.ai.subagent.buildSpawnTool]: a top-level factory closing
  * over per-conversation context, built ONLY at `ChatService`'s per-generation tool buildList. It is
@@ -296,18 +298,89 @@ fun getUiAutomationTools(
                 }
             },
         ),
+        Tool(
+            name = UI_SET_TEXT_TOOL_NAME,
+            description = "Type text into an editable field of the foreground app (other apps), " +
+                "replacing its current contents. You MUST call ui_observe first this turn — a target " +
+                "id is only valid for the snapshot it appears in. Select the field by its tid (from " +
+                "the latest ui_observe table), by its form key, by its semantic key, or by its " +
+                "visible text. Returns a fresh ui_observe-style snapshot after the edit; re-read it " +
+                "before the next step.",
+            parameters = {
+                InputSchema.Obj(
+                    properties = buildJsonObject {
+                        put(
+                            "selector",
+                            buildJsonObject {
+                                put("type", JsonPrimitive("object"))
+                                put(
+                                    "description",
+                                    JsonPrimitive(
+                                        "One of: {\"tid\": <int from the latest ui_observe>}, " +
+                                            "{\"formKey\": <input field key>}, " +
+                                            "{\"semanticKey\": <key>}, or " +
+                                            "{\"text\": <visible label>, \"role\"?: <class>}.",
+                                    ),
+                                )
+                            },
+                        )
+                        put(
+                            "text",
+                            buildJsonObject {
+                                put("type", JsonPrimitive("string"))
+                                put("description", JsonPrimitive("The text to set as the field's new contents."))
+                            },
+                        )
+                    },
+                    required = listOf("selector", "text"),
+                )
+            },
+            needsApproval = false,
+            execute = execute@{ args ->
+                // tids are turn-scoped: refuse to act until ui_observe has grounded this turn.
+                val snapshot = grounded ?: return@execute listOf(UIMessagePart.Text(ACT_REOBSERVE_MESSAGE))
+                // Fail closed + AUDITED (P24/P25): a set_text is a SET_TEXT verb over the TYPE_INTO
+                // input sink, so a malformed attempt records that verb/sink in the ledger exactly as
+                // ui_observe does for OBSERVE. A non-object arg, an unparseable selector, OR a missing
+                // text payload are all malformed — a set_text with no text is meaningless, so it must
+                // fail closed rather than dispatch an empty/garbage write.
+                if (args !is JsonObject) {
+                    return@execute auditMalformedAct(Verb.SET_TEXT, Sink.TYPE_INTO, rawArgs = args.toString())
+                }
+                val selector = parseSelector(args["selector"])
+                    ?: return@execute auditMalformedAct(Verb.SET_TEXT, Sink.TYPE_INTO, rawArgs = args.toString())
+                val text = (args["text"] as? JsonPrimitive)?.contentOrNull
+                    ?: return@execute auditMalformedAct(Verb.SET_TEXT, Sink.TYPE_INTO, rawArgs = args.toString())
+                // core.act authorizes internally (S2) and runs guardInFlight (P20) — the tool layer
+                // must NOT call authorize/guardInFlight here (would double-audit / break P25). The
+                // restricted P9 no-op (an unchanged-text set_text returns Acted without dispatching)
+                // lives inside core.act; from here it is indistinguishable from a normal Acted.
+                when (val outcome = core.act(guard, snapshot, Act.SetText(selector, text))) {
+                    is ActOutcome.Acted -> {
+                        grounded = outcome.snapshot // re-ground for the next act
+                        listOf(UIMessagePart.Text(renderCompactSnapshot(outcome.snapshot)))
+                    }
+                    is ActOutcome.Denied -> listOf(UIMessagePart.Text(ACT_DENIED_MESSAGE))
+                    ActOutcome.StaleState -> listOf(UIMessagePart.Text(ACT_STALE_MESSAGE))
+                }
+            },
+        ),
     )
 }
 
 /**
  * Parse the model's `selector` arg into a [Selector], or null if it is missing/malformed (fail
  * closed — the caller then denies without building an [Act]). Coordinate-free by construction: only
- * tid / text(+role) / semanticKey are accepted, never a position. `tid` wins if present, then
- * `semanticKey`, then `text`.
+ * tid / formKey / semanticKey / text(+role) are accepted, never a position. Precedence follows the
+ * field-addressing order: `tid` wins if present, then `formKey` (the input-field axis, #198 slice 9),
+ * then `semanticKey`, then `text`.
  */
 private fun parseSelector(element: JsonElement?): Selector? {
     val obj = element as? JsonObject ?: return null
     (obj["tid"] as? JsonPrimitive)?.intOrNull?.let { return Selector.ByTid(it) }
+    (obj["formKey"] as? JsonPrimitive)?.contentOrNull
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { return Selector.ByFormKey(it) }
     (obj["semanticKey"] as? JsonPrimitive)?.contentOrNull
         ?.takeIf { it.isNotEmpty() }
         ?.let { return Selector.BySemanticKey(it) }
@@ -321,6 +394,7 @@ private fun parseSelector(element: JsonElement?): Selector? {
 const val UI_OBSERVE_TOOL_NAME = "ui_observe"
 const val UI_SCROLL_TOOL_NAME = "ui_scroll"
 const val UI_GLOBAL_TOOL_NAME = "ui_global"
+const val UI_SET_TEXT_TOOL_NAME = "ui_set_text"
 
 /**
  * The act tools refuse until [getUiAutomationTools]'s turn-scoped `grounded` snapshot exists: a tid

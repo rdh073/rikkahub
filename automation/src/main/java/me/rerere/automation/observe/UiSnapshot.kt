@@ -108,4 +108,15 @@ sealed class Selector {
 
     @Serializable
     data class BySemanticKey(val semanticKey: String) : Selector()
+
+    /**
+     * Address an input field by its [UiTarget.formKey] (#198 slice 9). The projector sets `formKey`
+     * ONLY for editable nodes (from the node's stable resourceId), so this is the input-field axis of
+     * the selection grammar. Like [BySemanticKey] it is a STABLE-key selector: the act path re-resolves
+     * it against the CURRENT grounded snapshot's tid (self-heal, I-act-9 / P14/MR2) — it is never a
+     * positional bypass, because the seq+hash freshness assert still runs after the resolve (so a
+     * benign reflow heals to the new tid, but a stale grounding is still rejected before any dispatch).
+     */
+    @Serializable
+    data class ByFormKey(val formKey: String) : Selector()
 }
