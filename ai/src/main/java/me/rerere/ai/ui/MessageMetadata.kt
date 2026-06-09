@@ -3,6 +3,8 @@ package me.rerere.ai.ui
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
@@ -38,6 +40,24 @@ data class OpenAIReasoningMetadata(
     @SerialName("encrypted_content")
     val encryptedContent: String? = null,
 ) : PartMetadata
+
+/**
+ * 按字段独立、容错地读取 OpenAI reasoning 元数据
+ *
+ * [metadataAs] 用生成的反序列化器整体解码: 任一**已知**字段类型不匹配(例如旧数据中
+ * encrypted_content 是 object 而非 string)会让整个对象解码失败并返回 null,
+ * 连同合法的 reasoning_id 一起丢失。回传时缺少 reasoning_id 会导致该 reasoning item 被丢弃。
+ * 旧代码逐 key 独立取值, 坏的 encrypted_content 不会影响 reasoning_id —— 此函数保持同样的语义,
+ * 让单个损坏字段无法波及兄弟字段。
+ */
+fun UIMessagePart.openAIReasoningMetadata(): OpenAIReasoningMetadata? {
+    val obj = metadata ?: return null
+    fun stringField(key: String): String? = (obj[key] as? JsonPrimitive)?.contentOrNull
+    return OpenAIReasoningMetadata(
+        reasoningId = stringField("reasoning_id"),
+        encryptedContent = stringField("encrypted_content"),
+    )
+}
 
 /**
  * Google Gemini 部件(functionCall/inlineData)的 thoughtSignature, 回传时需要携带

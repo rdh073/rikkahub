@@ -37,7 +37,7 @@ import me.rerere.ai.ui.OpenAIReasoningMetadata
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.UIMessagePart
-import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.openAIReasoningMetadata
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.AiLog
 import me.rerere.ai.util.KeyRoulette
@@ -351,7 +351,7 @@ class ResponseAPI(
                     group.parts.forEach { part ->
                         when (part) {
                             is UIMessagePart.Reasoning -> {
-                                val reasoningMetadata = part.metadataAs<OpenAIReasoningMetadata>()
+                                val reasoningMetadata = part.openAIReasoningMetadata()
                                 // Transient live-timer placeholder: emitted on
                                 // response.created/in_progress with blank text and no provider
                                 // reasoning_id. It must never round-trip into provider history —

@@ -90,6 +90,36 @@ class MessageMetadataTest {
         assertNull(part.metadataAs<ClaudeReasoningMetadata>())
     }
 
+    @Test
+    fun `malformed encrypted_content does not lose a valid reasoning_id`() {
+        // 回归: 旧持久化数据中 encrypted_content 可能是 object 而非 string。
+        // 整体解码 (metadataAs) 因这个已知字段类型不匹配而返回 null, 连合法的 reasoning_id 一起丢失,
+        // 回传时该 reasoning item 会被丢弃。逐字段读取必须保留 reasoning_id。
+        val part = reasoningWith(buildJsonObject {
+            put("reasoning_id", "rs_1")
+            put("encrypted_content", buildJsonObject { put("nested", "value") })
+        })
+
+        // 整体解码丢失全部字段 (记录回归触发条件)
+        assertNull(part.metadataAs<OpenAIReasoningMetadata>())
+
+        // 逐字段读取保住合法的 reasoning_id, 仅放弃损坏的 encrypted_content
+        val meta = part.openAIReasoningMetadata()
+        assertEquals("rs_1", meta?.reasoningId)
+        assertNull(meta?.encryptedContent)
+    }
+
+    @Test
+    fun `openAIReasoningMetadata reads both string fields`() {
+        val part = reasoningWith(buildJsonObject {
+            put("reasoning_id", "rs_1")
+            put("encrypted_content", "enc")
+        })
+        val meta = part.openAIReasoningMetadata()
+        assertEquals("rs_1", meta?.reasoningId)
+        assertEquals("enc", meta?.encryptedContent)
+    }
+
     // ===== 写入格式与旧 key 保持一致(新写的数据可被旧式取值读取) =====
 
     @Test
