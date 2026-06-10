@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.data.ai.tools.WorkspaceToolDefaultApprovals
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
@@ -264,18 +265,26 @@ internal fun isShellRunnable(shellEnabled: Boolean, shellStatus: String): Boolea
  * re-encoded JSON. Pure so the lost-update invariant the [WorkspaceRepository.setToolApproval]
  * transaction protects is unit-testable in the :app JVM source set (see WorkspaceToolApprovalMergeTest).
  *
- * A corrupt existing blob (un-decodable) is discarded here: the user is explicitly setting one
- * tool's policy, so we start from {} and repair the column rather than merge onto a fail-closed
- * all-true map (which would silently flip every other tool to approval-required). The map merge
- * preserves every other already-set key — the property a stale, non-transactional read would break.
+ * I-FAILCLOSED (#197 slice 6a review): a corrupt existing blob (un-decodable) is the SAME
+ * security-relevant state the tool consumer ([resolveWorkspaceToolApproval]) treats as fail-CLOSED —
+ * `toolApprovalOverrides()` returns null there, forcing approval for every tool. The write path must
+ * agree: starting from {} would relax every UNSET tool to its (possibly no-approval) default, silently
+ * downgrading the consumer's fail-closed state the moment the user toggles a single switch. So a
+ * corrupt blob is repaired to a FAIL-CLOSED baseline — every known tool set to approval-required — and
+ * the user's selected override is then applied on top. A well-formed blob (including an explicit {})
+ * is merged as-is, preserving every already-set key (the property a stale, non-transactional read
+ * would break).
  */
 internal fun mergeToolApprovalOverride(
     existingJson: String,
     toolName: String,
     needsApproval: Boolean,
 ): String {
-    val existing = runCatching {
+    val decoded = runCatching {
         JsonInstant.decodeFromString<Map<String, Boolean>>(existingJson)
-    }.getOrNull().orEmpty()
-    return JsonInstant.encodeToString(existing + (toolName to needsApproval))
+    }.getOrNull()
+    // decoded == null distinguishes a corrupt blob from an explicitly-empty {} map: corrupt repairs to
+    // the fail-closed baseline (never {}), so unset tools stay approval-required after the merge.
+    val base = decoded ?: WorkspaceToolDefaultApprovals.mapValues { true }
+    return JsonInstant.encodeToString(base + (toolName to needsApproval))
 }

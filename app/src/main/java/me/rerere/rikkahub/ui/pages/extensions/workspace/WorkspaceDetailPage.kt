@@ -183,7 +183,10 @@ private fun WorkspaceToolApprovalCard(
     workspace: WorkspaceEntity?,
     onToolApprovalChange: (String, Boolean) -> Unit,
 ) {
-    val overrides = workspace?.toolApprovalOverrides().orEmpty()
+    // null = corrupt/unparseable policy blob; pass it through (do NOT .orEmpty()) so the switches
+    // render the fail-CLOSED state resolveWorkspaceToolApproval enforces for the tool consumer,
+    // instead of misrepresenting a corrupt row as the relaxed defaults (#197 slice 6a review).
+    val overrides = workspace?.toolApprovalOverrides()
 
     Card(
         modifier = Modifier.fillMaxWidth(),

@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.data.repository
 
+import me.rerere.rikkahub.data.ai.tools.WorkspaceToolDefaultApprovals
+import me.rerere.rikkahub.data.ai.tools.resolveWorkspaceToolApproval
 import me.rerere.rikkahub.utils.JsonInstant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -73,14 +75,33 @@ class WorkspaceToolApprovalMergeTest {
         assertEquals(true, map["workspace_write_file"])
     }
 
-    // (4) a corrupt/garbage existing blob starts from {} and still produces a valid one-entry JSON
-    // (matches the documented fail-open-on-corrupt repair semantics: the user is explicitly setting
-    // one tool's policy, so we repair the column rather than fail).
+    // (4) FAIL-CLOSED repair (#197 slice 6a review): a corrupt/garbage existing blob is the same
+    // security-relevant state the consumer treats as fail-CLOSED (toolApprovalOverrides() == null ->
+    // approval required for every tool). The write path must agree: repairing to {} would relax every
+    // UNSET tool to its possibly-no-approval default, silently downgrading the consumer the moment the
+    // user toggles one switch. Instead the merge repairs to a fail-closed baseline (every known tool
+    // approval-required) and then applies the user's selected override.
     @Test
-    fun `corrupt existing blob repairs to a single-entry map`() {
-        val result = mergeToolApprovalOverride("not-json-at-all", "workspace_read_file", needsApproval = true)
+    fun `corrupt existing blob repairs to a fail-closed baseline plus the override`() {
+        // User relaxes ONE read tool over a corrupt blob.
+        val result = mergeToolApprovalOverride("not-json-at-all", "workspace_read_file", needsApproval = false)
         val map = decode(result)
-        assertEquals(mapOf("workspace_read_file" to true), map)
-        assertTrue(map.containsKey("workspace_read_file"))
+
+        // The explicitly-toggled tool reflects the user's choice.
+        assertEquals(false, map["workspace_read_file"])
+
+        // Every OTHER known tool stays approval-required — NOT relaxed to its default. This is the
+        // regression for the fail-OPEN downgrade: previously the corrupt blob collapsed to {}, so
+        // workspace_list_files (default no-approval) would have silently dropped to no-approval here.
+        WorkspaceToolDefaultApprovals.keys
+            .filter { it != "workspace_read_file" }
+            .forEach { tool ->
+                assertTrue(
+                    "corrupt-repair must keep $tool fail-closed (approval-required)",
+                    resolveWorkspaceToolApproval(tool, map),
+                )
+            }
+        // The downgrade target from the original bug, asserted explicitly.
+        assertEquals(true, map["workspace_list_files"])
     }
 }

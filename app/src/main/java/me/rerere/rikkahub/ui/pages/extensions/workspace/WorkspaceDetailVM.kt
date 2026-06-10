@@ -2,12 +2,14 @@ package me.rerere.rikkahub.ui.pages.extensions.workspace
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.utils.launchVm
 import me.rerere.workspace.WorkspaceFileEntry
 import me.rerere.workspace.WorkspaceStorageArea
 
@@ -21,6 +23,12 @@ class WorkspaceDetailVM(
 ) : ViewModel() {
     private val _state = MutableStateFlow(WorkspaceDetailState())
     val state = _state.asStateFlow()
+
+    // Single in-flight directory listing. selectArea/open/goUp each retarget the browse location and
+    // re-refresh; without cancelling the prior job two listings could complete out of order and the
+    // later-committing one would overwrite the current area/path with stale entries. Holding and
+    // cancelling the previous job makes the latest navigation the sole writer.
+    private var refreshJob: Job? = null
 
     init {
         loadWorkspace()
@@ -59,17 +67,12 @@ class WorkspaceDetailVM(
     }
 
     fun refresh() {
-        viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null) }
-            runCatching {
-                repository.listFiles(
-                    id = id,
-                    area = state.value.area,
-                    path = state.value.path,
-                )
-            }.onSuccess { entries ->
-                _state.update { it.copy(entries = entries, loading = false) }
-            }.onFailure { error ->
+        // launchVm rethrows CancellationException (so a superseding navigation that cancels this job
+        // is never swallowed into UI error state) and routes only recoverable throwables to onError —
+        // the repo's canonical VM guard (CoroutineUtils.launchVm, pinned by VmSafeLaunchTest).
+        refreshJob?.cancel()
+        refreshJob = launchVm(
+            onError = { error ->
                 _state.update {
                     it.copy(
                         entries = emptyList(),
@@ -77,7 +80,15 @@ class WorkspaceDetailVM(
                         error = error.message,
                     )
                 }
-            }
+            },
+        ) {
+            _state.update { it.copy(loading = true, error = null) }
+            val entries = repository.listFiles(
+                id = id,
+                area = state.value.area,
+                path = state.value.path,
+            )
+            _state.update { it.copy(entries = entries, loading = false) }
         }
     }
 
