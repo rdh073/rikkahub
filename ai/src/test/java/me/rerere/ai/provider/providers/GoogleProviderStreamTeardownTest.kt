@@ -20,15 +20,17 @@ import org.junit.Test
  * after its terminal close, racing the error.
  *
  * The invariant: a frame that terminates the stream must NOT also emit content. The decision is
- * now a single pure outcome (Terminate | Emit | Skip), so the fall-through cannot exist by
- * construction. These assertions are pure and network-free (no EventSource/callbackFlow, no
+ * now a single pure outcome (Terminate | Emit | Skip) and the candidates-to-send are carried ONLY
+ * on the Emit variant, so onEvent's `trySend(...)` is reachable ONLY through the Emit branch — the
+ * close-then-fall-through-and-emit path cannot exist by construction (a Terminate outcome carries
+ * no candidates). These assertions are pure and network-free (no EventSource/callbackFlow, no
  * android.util.Log on this path), matching the documented :ai unit-test limitation in
  * GoogleProviderResponseTest.
  */
 class GoogleProviderStreamTeardownTest {
 
     @Test
-    fun `frame with blockReason AND candidates terminates and does not emit`() {
+    fun `frame with blockReason AND candidates terminates and carries no sendable candidates`() {
         // The exact racy shape: a SAFETY block alongside a partial candidate content part.
         val frame = buildJsonObject {
             putJsonObject("promptFeedback") {
@@ -51,6 +53,9 @@ class GoogleProviderStreamTeardownTest {
             "blockReason must terminate even when candidates are present",
             outcome is GoogleStreamFrame.Terminate
         )
+        // The Terminate variant has no `candidates` field at all, so onEvent — which now reads the
+        // candidates to send only off GoogleStreamFrame.Emit — has nothing to trySend on this frame.
+        // This is the structural guard the old object-Emit + inline-candidates path lacked.
         assertFalse(
             "a terminating frame must not also emit content (the missing-return bug)",
             outcome is GoogleStreamFrame.Emit
@@ -86,7 +91,11 @@ class GoogleProviderStreamTeardownTest {
             }
         }
 
-        assertTrue(googleStreamFrameOutcome(frame) is GoogleStreamFrame.Emit)
+        val outcome = googleStreamFrameOutcome(frame)
+        assertTrue(outcome is GoogleStreamFrame.Emit)
+        // The candidates onEvent will send are carried on the Emit outcome itself — the only path
+        // that yields anything to trySend.
+        assertEquals(1, (outcome as GoogleStreamFrame.Emit).candidates.size)
     }
 
     @Test

@@ -278,17 +278,18 @@ class GoogleProvider(
 
                 try {
                     val jsonData = json.parseToJsonElement(data).jsonObject
-                    when (val outcome = googleStreamFrameOutcome(jsonData)) {
+                    val emit = when (val outcome = googleStreamFrameOutcome(jsonData)) {
                         is GoogleStreamFrame.Terminate -> {
                             close(RuntimeException("Prompt feedback: ${outcome.reason}"))
                             return
                         }
 
                         GoogleStreamFrame.Skip -> return
-                        GoogleStreamFrame.Emit -> Unit
+                        is GoogleStreamFrame.Emit -> outcome
                     }
-                    // Emit outcome guarantees a non-empty candidates array (see googleStreamFrameOutcome).
-                    val candidates = jsonData["candidates"]?.jsonArray ?: return
+                    // The candidates are carried on the Emit outcome itself, so trySend is reachable
+                    // ONLY through the Emit branch — a terminating frame has no candidates to send.
+                    val candidates = emit.candidates
                     val usage = parseUsageMeta(jsonData["usageMetadata"] as? JsonObject)
                     val messageChunk = MessageChunk(
                         id = Uuid.random().toString(),
@@ -860,8 +861,12 @@ internal sealed interface GoogleStreamFrame {
     /** A prompt-feedback block terminated the stream; [reason] is `promptFeedback.blockReason`. */
     data class Terminate(val reason: String) : GoogleStreamFrame
 
-    /** The frame carries usable candidate content and should be emitted. */
-    object Emit : GoogleStreamFrame
+    /**
+     * The frame carries usable candidate content and should be emitted. The non-empty [candidates]
+     * array is carried HERE so the emit path is reachable only through this branch — a terminating
+     * frame, which has no [candidates], cannot reach `trySend` by construction (issue #240).
+     */
+    data class Emit(val candidates: JsonArray) : GoogleStreamFrame
 
     /** The frame carries no content (no/empty candidates, no block) and should be ignored. */
     object Skip : GoogleStreamFrame
@@ -883,5 +888,5 @@ internal fun googleStreamFrameOutcome(frame: JsonObject): GoogleStreamFrame {
     val candidates = frame["candidates"]?.jsonArray
     if (candidates.isNullOrEmpty()) return GoogleStreamFrame.Skip
 
-    return GoogleStreamFrame.Emit
+    return GoogleStreamFrame.Emit(candidates)
 }
