@@ -53,6 +53,34 @@ data class GeneratedImage(
 fun imgGenErrorMessage(t: Throwable): String? =
     if (shouldRethrowVmError(t)) null else t.message ?: "Unknown error occurred"
 
+/**
+ * Per-index tracking of outstanding streaming preview files. A single-var design loses every preview
+ * but the most recently written one when numOfImages > 1 (each image index produces its own preview
+ * filename), leaking the earlier slots' temp files. Keyed by index, [drain] returns every still-open
+ * slot so the collector's terminal cleanup deletes them on any exit path (cancel / failure / done).
+ *
+ * Pure (no Android, no IO) so the leak-no-slot invariant is JVM-testable in isolation. [File] is only
+ * a value handle here; deletion happens in the caller.
+ */
+internal class PreviewSlots {
+    private val slots = mutableMapOf<Int, File>()
+
+    /** Remove and return the file currently tracked for [index], if any (caller deletes it). */
+    fun take(index: Int): File? = slots.remove(index)
+
+    /** Track [file] as the live preview for [index], replacing any prior handle. */
+    fun put(index: Int, file: File) {
+        slots[index] = file
+    }
+
+    /** Remove and return every outstanding preview file (caller deletes them). */
+    fun drain(): List<File> {
+        val out = slots.values.toList()
+        slots.clear()
+        return out
+    }
+}
+
 private fun GenMediaEntity.toGeneratedImage(filesManager: FilesManager): GeneratedImage {
     val imagesDir = filesManager.getImagesDir()
     val fullPath = File(imagesDir, this.path.removePrefix("images/")).absolutePath
@@ -247,10 +275,13 @@ class ImgGenVM(
     }
 
     /**
-     * Collect the streaming image flow: a partial item updates a single throwaway preview slot
-     * (written under appTempFolder, replaced each frame) while a final item is persisted to storage
-     * and appended to the result list. The preview file is always deleted once a final frame arrives
-     * or before the next partial overwrites it, so streaming never leaks temp files.
+     * Collect the streaming image flow: a partial item updates a per-index throwaway preview slot
+     * (written under appTempFolder) while a final item is persisted to storage and appended to the
+     * result list. Each preview slot is keyed by the frame's index so concurrent partials for
+     * distinct images (numOfImages > 1) do not overwrite each other's tracking — the previous
+     * single-var design leaked every preview but the most-recent one. The terminal `finally` deletes
+     * every outstanding preview on EVERY exit path (final frames consumed, user cancel, or SSE
+     * failure), so streaming never leaks temp files even when the flow ends after a partial.
      */
     private suspend fun collectImageGeneration(
         images: Flow<ImageGenerationItem>,
@@ -260,48 +291,52 @@ class ImgGenVM(
         sourcePaths: String? = null,
     ) {
         val finalImages = mutableListOf<GeneratedImage>()
-        var previewFile: File? = null
+        val previewSlots = PreviewSlots()
         var finalIndex = 0
 
-        images.collect { item ->
-            if (item.partial) {
-                previewFile?.delete()
-                val imageFile = saveImagePreview(
-                    item = item,
-                    modelName = modelName,
-                    index = item.partialImageIndex ?: finalIndex,
-                )
-                previewFile = imageFile
-                _currentGeneratedImages.value = finalImages + GeneratedImage(
-                    id = 0,
-                    prompt = prompt,
-                    filePath = imageFile.absolutePath,
-                    timestamp = System.currentTimeMillis(),
-                    model = modelName
-                )
-            } else {
-                previewFile?.delete()
-                previewFile = null
-                val imageFile = saveImageToStorage(
-                    item = item,
-                    prompt = prompt,
-                    modelName = modelName,
-                    index = finalIndex,
-                    type = type,
-                    sourcePaths = sourcePaths,
-                )
-                finalImages.add(
-                    GeneratedImage(
-                        id = 0, // Will be updated after database insertion
+        try {
+            images.collect { item ->
+                val slot = item.partialImageIndex ?: finalIndex
+                if (item.partial) {
+                    previewSlots.take(slot)?.delete()
+                    val imageFile = saveImagePreview(
+                        item = item,
+                        modelName = modelName,
+                        index = slot,
+                    )
+                    previewSlots.put(slot, imageFile)
+                    _currentGeneratedImages.value = finalImages + GeneratedImage(
+                        id = 0,
                         prompt = prompt,
                         filePath = imageFile.absolutePath,
                         timestamp = System.currentTimeMillis(),
                         model = modelName
                     )
-                )
-                finalIndex++
-                _currentGeneratedImages.value = finalImages.toList()
+                } else {
+                    previewSlots.take(slot)?.delete()
+                    val imageFile = saveImageToStorage(
+                        item = item,
+                        prompt = prompt,
+                        modelName = modelName,
+                        index = finalIndex,
+                        type = type,
+                        sourcePaths = sourcePaths,
+                    )
+                    finalImages.add(
+                        GeneratedImage(
+                            id = 0, // Will be updated after database insertion
+                            prompt = prompt,
+                            filePath = imageFile.absolutePath,
+                            timestamp = System.currentTimeMillis(),
+                            model = modelName
+                        )
+                    )
+                    finalIndex++
+                    _currentGeneratedImages.value = finalImages.toList()
+                }
             }
+        } finally {
+            previewSlots.drain().forEach { it.delete() }
         }
     }
 

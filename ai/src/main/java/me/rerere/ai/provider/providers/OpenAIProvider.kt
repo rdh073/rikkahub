@@ -364,7 +364,7 @@ class OpenAIProvider(
             }
         }
 
-        val eventSource = EventSources.createFactory(client)
+        val eventSource = EventSources.createFactory(streamClient)
             .newEventSource(request, listener)
 
         awaitClose {
