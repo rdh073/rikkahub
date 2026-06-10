@@ -139,4 +139,25 @@ class OpenAIProviderImageStreamTest {
         assertTrue(item!!.partial)
         assertEquals(0, item.partialImageIndex)
     }
+
+    /**
+     * Regression for the DALL-E 400 (issue #231, slice 2 review): stream/partial_images is gated on
+     * the gpt-image-* family. Only gpt-image-* may take the streaming path; dall-e-* and arbitrary
+     * IMAGE-typed model IDs must fall back to the one-shot request, which OpenAI accepts.
+     */
+    @Test
+    fun `gpt-image family supports streaming`() {
+        assertTrue(supportsImageStreaming("gpt-image-1"))
+        assertTrue(supportsImageStreaming("gpt-image-2"))
+        assertTrue(supportsImageStreaming("GPT-Image-1"))
+        assertTrue(supportsImageStreaming("gpt-image-1-2025-10-06"))
+    }
+
+    @Test
+    fun `dall-e and arbitrary models do not support streaming`() {
+        assertTrue(!supportsImageStreaming("dall-e-2"))
+        assertTrue(!supportsImageStreaming("dall-e-3"))
+        assertTrue(!supportsImageStreaming("my-custom-image-model"))
+        assertTrue(!supportsImageStreaming("flux-pro"))
+    }
 }

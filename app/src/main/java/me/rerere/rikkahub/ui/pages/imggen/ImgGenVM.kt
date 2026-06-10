@@ -54,10 +54,24 @@ fun imgGenErrorMessage(t: Throwable): String? =
     if (shouldRethrowVmError(t)) null else t.message ?: "Unknown error occurred"
 
 /**
- * Per-index tracking of outstanding streaming preview files. A single-var design loses every preview
- * but the most recently written one when numOfImages > 1 (each image index produces its own preview
- * filename), leaking the earlier slots' temp files. Keyed by index, [drain] returns every still-open
- * slot so the collector's terminal cleanup deletes them on any exit path (cancel / failure / done).
+ * The preview-slot key for an incoming partial frame: the OUTPUT-image index, i.e. the number of
+ * images finalized so far on this stream. NOT the frame's `partial_image_index`.
+ *
+ * `partial_image_index` is the OpenAI wire field for a single image's progressive-refinement pass
+ * (0..partial_images-1) and resets to 0 for each of the n output images. Keying preview slots on it
+ * would make image 1's first partial overwrite image 0's slot-0 tracking, leaking image 0's preview.
+ * The endpoint streams images sequentially (image k's partials, then its `completed`, before k+1),
+ * so the still-uncompleted output image is exactly [finalizedCount]. Pure so the slot-key contract
+ * is JVM-testable without Android/IO.
+ */
+internal fun previewSlotKey(finalizedCount: Int): Int = finalizedCount
+
+/**
+ * Per-output-image tracking of outstanding streaming preview files. A single-var design loses every
+ * preview but the most recently written one when numOfImages > 1 (each output image produces its own
+ * preview filename), leaking the earlier slots' temp files. Keyed by output-image index (see
+ * [previewSlotKey]), [drain] returns every still-open slot so the collector's terminal cleanup
+ * deletes them on any exit path (cancel / failure / done).
  *
  * Pure (no Android, no IO) so the leak-no-slot invariant is JVM-testable in isolation. [File] is only
  * a value handle here; deletion happens in the caller.
@@ -275,13 +289,20 @@ class ImgGenVM(
     }
 
     /**
-     * Collect the streaming image flow: a partial item updates a per-index throwaway preview slot
-     * (written under appTempFolder) while a final item is persisted to storage and appended to the
-     * result list. Each preview slot is keyed by the frame's index so concurrent partials for
-     * distinct images (numOfImages > 1) do not overwrite each other's tracking — the previous
-     * single-var design leaked every preview but the most-recent one. The terminal `finally` deletes
-     * every outstanding preview on EVERY exit path (final frames consumed, user cancel, or SSE
-     * failure), so streaming never leaks temp files even when the flow ends after a partial.
+     * Collect the streaming image flow: a partial item updates a per-output-image throwaway preview
+     * slot (written under appTempFolder) while a final item is persisted to storage and appended to
+     * the result list.
+     *
+     * Slots are keyed by the OUTPUT-image index (`finalIndex`), NOT the frame's `partial_image_index`.
+     * Per the OpenAI image-streaming wire contract, `partial_image_index` is the 0-based PROGRESSIVE
+     * REFINEMENT pass of a single image (0..partial_images-1) and resets to 0 for each of the n output
+     * images — so with numOfImages > 1 distinct images would collide on slot 0 and the earlier image's
+     * preview would leak. The endpoint streams images sequentially (all partials for image k, then its
+     * `completed` frame, before image k+1 begins), so the still-uncompleted image is always `finalIndex`.
+     *
+     * The terminal `finally` deletes every outstanding preview on EVERY exit path (final frames
+     * consumed, user cancel, or SSE failure), so streaming never leaks temp files even when the flow
+     * ends after a partial.
      */
     private suspend fun collectImageGeneration(
         images: Flow<ImageGenerationItem>,
@@ -296,7 +317,7 @@ class ImgGenVM(
 
         try {
             images.collect { item ->
-                val slot = item.partialImageIndex ?: finalIndex
+                val slot = previewSlotKey(finalIndex)
                 if (item.partial) {
                     previewSlots.take(slot)?.delete()
                     val imageFile = saveImagePreview(
@@ -337,6 +358,12 @@ class ImgGenVM(
             }
         } finally {
             previewSlots.drain().forEach { it.delete() }
+            // The drained previews above are now deleted files. _currentGeneratedImages may still
+            // point at one of them (partial-then-cancel / partial-then-SSE-failure ends the flow
+            // after a preview was published but before its final frame), and the screen renders
+            // this list unconditionally. Re-pin it to the persisted finals so the UI never shows
+            // an AsyncImage backed by a just-deleted temp file.
+            _currentGeneratedImages.value = finalImages.toList()
         }
     }
 

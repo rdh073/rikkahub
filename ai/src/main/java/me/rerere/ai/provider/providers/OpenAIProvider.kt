@@ -5,7 +5,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -32,6 +34,7 @@ import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.util.KeyRoulette
+import me.rerere.ai.util.bufferStreamChunks
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
@@ -51,6 +54,8 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.io.File
 import java.io.IOException
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 class OpenAIProvider(
     private val client: OkHttpClient,
@@ -221,14 +226,20 @@ class OpenAIProvider(
         }
 
         val key = keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString())
+        // Only the gpt-image-* family supports stream/partial_images; dall-e-* (and any other model
+        // the user marked IMAGE) reject those params with a 400. Gate streaming on the family so
+        // non-gpt-image models keep working via the one-shot path, wrapped as a single-batch flow.
+        val stream = supportsImageStreaming(params.model.modelId)
 
         val requestBody = json.encodeToString(
             buildJsonObject {
                 put("model", params.model.modelId)
                 put("prompt", params.prompt)
                 put("n", params.numOfImages)
-                put("stream", true)
-                put("partial_images", params.partialImages.coerceIn(0, 3))
+                if (stream) {
+                    put("stream", true)
+                    put("partial_images", params.partialImages.coerceIn(0, 3))
+                }
                 put(
                     "size", when (params.aspectRatio) {
                         ImageAspectRatio.SQUARE -> "1024x1024"
@@ -238,7 +249,7 @@ class OpenAIProvider(
                 )
             }
                 .mergeCustomBody(params.customBody)
-                .forceImageStream()
+                .let { if (stream) it.forceImageStream() else it }
         )
 
         val request = Request.Builder()
@@ -250,11 +261,15 @@ class OpenAIProvider(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        return streamImageRequest(
-            request = request,
-            partialEventType = "image_generation.partial_image",
-            completedEventType = "image_generation.completed",
-        )
+        return if (stream) {
+            streamImageRequest(
+                request = request,
+                partialEventType = "image_generation.partial_image",
+                completedEventType = "image_generation.completed",
+            )
+        } else {
+            nonStreamingImageRequest(request)
+        }
     }
 
     override suspend fun editImage(
@@ -269,12 +284,14 @@ class OpenAIProvider(
         }
 
         val key = keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString())
+        // See generateImage: gate stream/partial_images on the gpt-image-* family so dall-e-2 edits
+        // (and other non-gpt-image IMAGE models) keep working via the one-shot path.
+        val stream = supportsImageStreaming(params.model.modelId)
         val bodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("model", params.model.modelId)
             .addFormDataPart("prompt", params.prompt)
             .addFormDataPart("n", params.numOfImages.toString())
-            .addFormDataPart("partial_images", params.partialImages.coerceIn(0, 3).toString())
             .addFormDataPart(
                 "size", when (params.aspectRatio) {
                     ImageAspectRatio.SQUARE -> "1024x1024"
@@ -282,6 +299,9 @@ class OpenAIProvider(
                     ImageAspectRatio.PORTRAIT -> "1024x1536"
                 }
             )
+        if (stream) {
+            bodyBuilder.addFormDataPart("partial_images", params.partialImages.coerceIn(0, 3).toString())
+        }
 
         val imageFieldName = if (params.images.size == 1) "image" else "image[]"
         params.images.forEach { path ->
@@ -306,7 +326,9 @@ class OpenAIProvider(
             }
             bodyBuilder.addFormDataPart(customBody.key, value)
         }
-        bodyBuilder.addFormDataPart("stream", "true")
+        if (stream) {
+            bodyBuilder.addFormDataPart("stream", "true")
+        }
 
         val request = Request.Builder()
             .url("${providerSetting.baseUrl}/images/edits")
@@ -316,11 +338,15 @@ class OpenAIProvider(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        return streamImageRequest(
-            request = request,
-            partialEventType = "image_edit.partial_image",
-            completedEventType = "image_edit.completed",
-        )
+        return if (stream) {
+            streamImageRequest(
+                request = request,
+                partialEventType = "image_edit.partial_image",
+                completedEventType = "image_edit.completed",
+            )
+        } else {
+            nonStreamingImageRequest(request)
+        }
     }
 
     private fun streamImageRequest(
@@ -370,6 +396,66 @@ class OpenAIProvider(
         awaitClose {
             eventSource.cancel()
         }
+    }.bufferStreamChunks()
+
+    /**
+     * One-shot (non-streaming) image request for models that do not support stream/partial_images
+     * (dall-e-2/dall-e-3 and any other IMAGE-typed model). The JSON `data[]` is parsed into final
+     * [ImageGenerationItem]s and emitted as a single-batch flow, preserving the `Flow` seam the
+     * streaming path uses. Mirrors the master non-streaming behavior (b64_json or url responses).
+     */
+    private fun nonStreamingImageRequest(request: Request): Flow<ImageGenerationItem> = flow {
+        val items = withContext(Dispatchers.IO) {
+            val response = client.newCall(request).await()
+            if (!response.isSuccessful) {
+                error("Failed to generate image: ${response.code} ${response.body.string()}")
+            }
+            val bodyStr = response.body.string()
+            val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
+            val data = bodyJson["data"]?.jsonArray ?: error("No data in response")
+            parseImageGenerationItems(data)
+        }
+        items.forEach { emit(it) }
+    }
+
+    private suspend fun parseImageGenerationItems(data: JsonArray): List<ImageGenerationItem> {
+        return data.map { imageJson ->
+            val imageObj = imageJson.jsonObject
+            val b64Json = imageObj["b64_json"]?.jsonPrimitive?.contentOrNull
+
+            if (b64Json != null) {
+                ImageGenerationItem(
+                    data = b64Json,
+                    mimeType = "image/png",
+                )
+            } else {
+                val url = imageObj["url"]?.jsonPrimitive?.contentOrNull
+                    ?: error("No b64_json or url in response")
+                downloadImageAsBase64(url)
+            }
+        }
+    }
+
+    @OptIn(ExperimentalEncodingApi::class)
+    private suspend fun downloadImageAsBase64(url: String): ImageGenerationItem {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+
+        val response = client.newCall(request).await()
+        if (!response.isSuccessful) {
+            error("Failed to download generated image: ${response.code} ${response.body.string()}")
+        }
+
+        val body = response.body
+        val mimeType = body.contentType()?.toString() ?: "image/png"
+        val base64 = Base64.encode(body.bytes())
+
+        return ImageGenerationItem(
+            data = base64,
+            mimeType = mimeType,
+        )
     }
 
     private fun File.imageMediaType(): String = when (extension.lowercase()) {
@@ -387,6 +473,16 @@ class OpenAIProvider(
         private val SUPPORTED_EDIT_IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp")
     }
 }
+
+/**
+ * Whether [modelId] is in the OpenAI gpt-image-* family, the only models that accept
+ * `stream`/`partial_images` on /images/generations and /images/edits. dall-e-2/dall-e-3 (and any
+ * other IMAGE-typed model the user enters) reject those params with a 400, so they must take the
+ * one-shot path. Matched case-insensitively on a `gpt-image` prefix — covers gpt-image-1, gpt-image-2,
+ * and dated/aliased variants — while excluding dall-e-* and arbitrary IDs. Pure, so JVM-testable.
+ */
+internal fun supportsImageStreaming(modelId: String): Boolean =
+    modelId.lowercase().startsWith("gpt-image")
 
 /**
  * Decode a single streaming-image SSE frame into an [ImageGenerationItem], or null when the frame
