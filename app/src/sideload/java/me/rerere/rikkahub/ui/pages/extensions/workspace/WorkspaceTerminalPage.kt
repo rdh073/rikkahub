@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.repository.isShellRunnable
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
@@ -72,8 +73,16 @@ fun WorkspaceTerminalPage(id: String) {
             )
         },
     ) { innerPadding ->
+        // I-ENABLE (#197 HP-2 / design note §4.3): the interactive terminal is a shell sink just like
+        // WorkspaceRepository.executeCommand, so it must honor the SAME gate — open a session only
+        // when the workspace's shell is enabled AND its rootfs is READY, never on shellEnabled alone
+        // (a BROKEN/INSTALLING workspace with stale linux/ files must not get an interactive shell).
+        val shellRunnable = state.workspace?.let {
+            isShellRunnable(it.shellEnabled, it.shellStatus)
+        } ?: false
         WorkspaceTerminalContent(
             root = state.workspace?.root,
+            shellRunnable = shellRunnable,
             contentPadding = innerPadding,
         )
     }
@@ -82,6 +91,7 @@ fun WorkspaceTerminalPage(id: String) {
 @Composable
 private fun WorkspaceTerminalContent(
     root: String?,
+    shellRunnable: Boolean,
     contentPadding: PaddingValues,
 ) {
     val context = LocalContext.current
@@ -119,7 +129,10 @@ private fun WorkspaceTerminalContent(
         return
     }
 
-    if (!workspaceRootfsReady(context, root)) {
+    // Gate on the DB invariant (shell enabled + rootfs READY) BEFORE the filesystem check: the
+    // terminal must refuse for a disabled/BROKEN/INSTALLING workspace exactly as the executeCommand
+    // sink does, even if stale linux/ files happen to satisfy workspaceRootfsReady.
+    if (!shellRunnable || !workspaceRootfsReady(context, root)) {
         Box(
             modifier = Modifier
                 .fillMaxSize()

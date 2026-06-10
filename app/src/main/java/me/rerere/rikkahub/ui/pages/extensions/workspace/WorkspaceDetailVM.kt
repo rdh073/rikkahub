@@ -36,6 +36,10 @@ class WorkspaceDetailVM(
     private val _installError = MutableStateFlow<String?>(null)
     val installError = _installError.asStateFlow()
 
+    // The in-flight rootfs install, if any. Held so installRootfs() can refuse re-entry while one is
+    // running (a second install races the shared tmp archive/staging dir).
+    private var installJob: Job? = null
+
     // Single in-flight directory listing. selectArea/open/goUp each retarget the browse location and
     // re-refresh; without cancelling the prior job two listings could complete out of order and the
     // later-committing one would overwrite the current area/path with stale entries. Holding and
@@ -131,12 +135,17 @@ class WorkspaceDetailVM(
 
     fun installRootfs(url: String) {
         val workspace = state.value.workspace ?: return
+        // Re-entry guard: a second install for the same workspace would race the first over the shared
+        // tmp/rootfs.tar.gz + staging dir (corrupting the download) and double-flip the row to
+        // INSTALLING. VM methods run on the main thread, so this check-then-assign is atomic — the
+        // UI-disabled button is only advisory; this Job guard is the real one.
+        if (installJob?.isActive == true) return
         // launchVm (CoroutineUtils, pinned by VmSafeLaunchTest) rethrows CancellationException so a
         // cancelled install is NEVER captured into _installError, and routes only recoverable
         // throwables to onError — replacing upstream's runCatching{}.onFailure which swallowed
         // cancellation. The repository.installRootfs failure path already rethrows after flipping the
         // row to BROKEN, so the error surfaces here.
-        launchVm(
+        installJob = launchVm(
             onError = { error -> _installError.value = error.message ?: "Rootfs install failed" },
         ) {
             _installError.value = null

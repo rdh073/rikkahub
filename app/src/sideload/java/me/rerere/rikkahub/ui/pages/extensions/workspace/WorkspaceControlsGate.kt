@@ -34,6 +34,7 @@ import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.repository.isShellRunnable
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.workspace.RootfsInstallProgress
@@ -122,8 +123,11 @@ internal fun SideloadWorkspaceControls(workspace: WorkspaceEntity?) {
             }
 
             OutlinedButton(
+                // I-ENABLE: enable the terminal entry only when the shell is actually runnable
+                // (enabled AND rootfs READY) — the same gate the executeCommand sink enforces — not on
+                // shellEnabled alone, so a BROKEN/INSTALLING workspace cannot open an interactive shell.
                 onClick = { navController.navigate(Screen.WorkspaceTerminal(workspace.id)) },
-                enabled = workspace.shellEnabled,
+                enabled = isShellRunnable(workspace.shellEnabled, workspace.shellStatus),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(HugeIcons.ComputerTerminal01, contentDescription = null)

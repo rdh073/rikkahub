@@ -15,6 +15,7 @@ import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
 import me.rerere.workspace.RootfsPatchOptions
 import me.rerere.workspace.RootfsPatcher
+import me.rerere.workspace.WorkspaceManager
 import java.io.File
 
 internal fun createWorkspaceTerminalSession(
@@ -22,6 +23,10 @@ internal fun createWorkspaceTerminalSession(
     root: String,
     client: TerminalSessionClient,
 ): TerminalSession {
+    // The terminal resolves directories directly (it reimplements the interactive PRoot launch), so
+    // it MUST apply the same root-name validation WorkspaceManager enforces — a stored root is just
+    // text and a corrupt/imported row could otherwise path-traverse out of the workspaces dir.
+    require(WorkspaceManager.isValidRoot(root)) { "Invalid workspace root: $root" }
     val appContext = context.applicationContext
     val workspaceDir = File(File(appContext.filesDir, "workspaces"), root)
     val filesDir = File(workspaceDir, "files").apply { mkdirs() }
@@ -84,6 +89,7 @@ internal fun createWorkspaceTerminalSession(
 }
 
 internal fun workspaceRootfsReady(context: Context, root: String): Boolean {
+    if (!WorkspaceManager.isValidRoot(root)) return false
     val linuxDir = File(File(File(context.applicationContext.filesDir, "workspaces"), root), "linux")
     return linuxDir.isDirectory && File(linuxDir, "bin/sh").isFile
 }
