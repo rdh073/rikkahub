@@ -44,6 +44,7 @@ data class Assistant(
     val localTools: List<LocalToolOption> = listOf(LocalToolOption.TimeInfo),
     val background: String? = null,
     val backgroundOpacity: Float = 1.0f,
+    val useGradientBackground: Boolean = false, // When ON, the chat page uses a dynamic mesh-gradient background instead of an image
     val modeInjectionIds: Set<Uuid> = emptySet(),      // 关联的模式注入 ID
     val lorebookIds: Set<Uuid> = emptySet(),            // 关联的 Lorebook ID
     val enabledSkills: Set<String> = emptySet(),        // 启用的 skill 名称列表
