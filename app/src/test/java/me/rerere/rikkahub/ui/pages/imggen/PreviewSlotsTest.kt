@@ -78,80 +78,70 @@ class PreviewSlotsTest {
 }
 
 /**
- * Regression guard for the multi-image preview-slot collision (issue #231, slice 2 review round 2).
+ * Pins the production preview-slot keying the collector actually uses (issue #231, slice 2).
  *
- * `partial_image_index` is a single image's progressive-refinement counter (0..partial_images-1) and
- * resets to 0 for EACH of the n output images — it is NOT the output-image slot. The OpenAI docs do
- * NOT specify whether, with n > 1, the per-image partial sequences arrive sequentially or interleaved
- * (https://developers.openai.com/api/reference/resources/images/generation-streaming-events leaves
- * the n>1 ordering undefined). Under any interleaving where two distinct output images each have a
- * live partial, keying slots on `partial_image_index` collapses both onto slot 0: image 1's partial
- * overwrites image 0's slot-0 handle WITHOUT deleting image 0's temp file, leaking it.
+ * [collectImageGeneration] keys each partial preview by [previewSlotKey] of `finalIndex` — the count
+ * of FINALIZED images so far — NOT by the frame's `partial_image_index` (a single image's
+ * progressive-refinement counter that resets to 0 per output image, so keying on it would collide
+ * distinct images on slot 0 and leak the earlier image's temp file).
  *
- * [previewSlotKey] keys on the OUTPUT-image index (count of finalized images so far) — distinct per
- * output image — so each image's live preview occupies its own slot and is drained on the terminal
- * cleanup regardless of frame interleaving. The two tests replay the same interleaved frame sequence:
- * the buggy `partial_image_index` strategy leaks image 0's file; the output-index strategy retains
- * both.
+ * This relies on the documented/observed SEQUENTIAL delivery: the endpoint streams ALL of output
+ * image k's partials, then its `completed` frame, before image k+1 begins. Under that ordering
+ * `finalIndex` equals the ordinal of the image currently streaming, so each image's previews occupy
+ * their own slot and are drained on terminal cleanup. The wire provides NO per-partial output-image
+ * id, so an INTERLEAVED ordering (left undefined by the API spec) is not distinguishable here — the
+ * design depends on sequential delivery, and these tests pin THAT contract rather than pretending to
+ * defend against interleaving.
  */
 class PreviewSlotKeyTest {
 
-    private data class Frame(val partial: Boolean, val partialImageIndex: Int?, val outputImage: Int)
+    private data class Frame(val partial: Boolean)
 
     /**
-     * Replay the collector's preview bookkeeping with [slotOf] choosing the slot key. Returns, per
-     * slot key, the set of distinct OUTPUT images that ever occupied that key. The structural
-     * invariant the collector relies on is that a preview slot belongs to exactly one output image —
-     * two output images sharing a slot means one image's `take(slot)?.delete()` destroys the other's
-     * still-live preview mid-stream (data loss / collision). Mirrors collectImageGeneration's
-     * take/put loop, IO stripped.
+     * Replay [collectImageGeneration]'s slot bookkeeping (IO stripped) over a SEQUENTIAL frame stream
+     * using the production key `previewSlotKey(finalIndex)`. Returns, per slot, the set of image
+     * ordinals (the finalIndex in effect = the streaming image) that used it — the collector's
+     * invariant is that a slot belongs to exactly one output image.
      */
-    private fun slotOwners(
-        frames: List<Frame>,
-        slotOf: (frame: Frame, finalizedCount: Int) -> Int,
-    ): Map<Int, Set<Int>> {
+    private fun slotOwners(frames: List<Frame>): Map<Int, Set<Int>> {
         val owners = mutableMapOf<Int, MutableSet<Int>>()
-        var finalizedCount = 0
+        var finalIndex = 0
         frames.forEach { frame ->
-            val slot = slotOf(frame, finalizedCount)
             if (frame.partial) {
-                owners.getOrPut(slot) { mutableSetOf() }.add(frame.outputImage)
+                owners.getOrPut(previewSlotKey(finalIndex)) { mutableSetOf() }.add(finalIndex)
             } else {
-                finalizedCount++
+                finalIndex++
             }
         }
         return owners
     }
 
-    // Interleaved: image 0 partial, image 1 partial, image 0 partial again — both still in flight.
-    // (n>1 partial ordering is undefined per the wire docs; the collector must be collision-safe.)
-    private val interleavedTwoImagePartials = listOf(
-        Frame(partial = true, partialImageIndex = 0, outputImage = 0),
-        Frame(partial = true, partialImageIndex = 0, outputImage = 1),
-        Frame(partial = true, partialImageIndex = 1, outputImage = 0),
+    // Two output images delivered sequentially: image 0's two partials + its completed frame, then
+    // image 1's two partials + its completed frame.
+    private val sequentialTwoImages = listOf(
+        Frame(partial = true),   // image 0 partial (finalIndex 0)
+        Frame(partial = true),   // image 0 partial (finalIndex 0)
+        Frame(partial = false),  // image 0 completed -> finalIndex 1
+        Frame(partial = true),   // image 1 partial (finalIndex 1)
+        Frame(partial = true),   // image 1 partial (finalIndex 1)
+        Frame(partial = false),  // image 1 completed -> finalIndex 2
     )
 
     @Test
-    fun `output-index slot key gives each output image its own slot`() {
-        val owners = slotOwners(interleavedTwoImagePartials) { frame, _ ->
-            // The collector keys partials by the output image, not partial_image_index. In real flow
-            // finalizedCount tracks this; the test pins the contract directly via outputImage.
-            previewSlotKey(frame.outputImage)
-        }
+    fun `sequential delivery gives each output image its own slot`() {
+        val owners = slotOwners(sequentialTwoImages)
         // No slot is shared by more than one output image: each image refines its own preview safely.
-        assertTrue(owners.values.all { it.size == 1 })
+        assertTrue("a preview slot must belong to exactly one output image", owners.values.all { it.size == 1 })
         assertEquals(setOf(0), owners[previewSlotKey(0)])
         assertEquals(setOf(1), owners[previewSlotKey(1)])
     }
 
     @Test
-    fun `partial_image_index slot key collides distinct output images onto one slot (the bug)`() {
-        val owners = slotOwners(interleavedTwoImagePartials) { frame, finalized ->
-            frame.partialImageIndex ?: finalized
-        }
-        // image 0 and image 1 both land on partial_image_index 0 -> slot 0. image 1's partial runs
-        // `take(0)?.delete()` and destroys image 0's still-live preview file mid-stream. This shared
-        // ownership is exactly the regression the output-index key fixes.
-        assertEquals(setOf(0, 1), owners[0])
+    fun `previewSlotKey is the finalized-image ordinal`() {
+        // The collector keys by the count of finalized images, so the key IS that count (identity).
+        // This is the property that makes a partial belong to the image currently streaming.
+        assertEquals(0, previewSlotKey(0))
+        assertEquals(1, previewSlotKey(1))
+        assertEquals(7, previewSlotKey(7))
     }
 }

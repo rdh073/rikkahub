@@ -120,6 +120,38 @@ class OpenAIProviderImageStreamTest {
         assertEquals("image/jpeg", item.mimeType)
     }
 
+    // Pins the per-image wire CONTRACT over a full stream, not just isolated frames: a sequence of
+    // partial previews followed by the finalizing `completed` frame must decode, in order, to N
+    // partials (flagged partial, carrying their progressive index) then one final (not partial, no
+    // index). This is the sequence the collector's partial-preview-then-persist loop consumes. The
+    // EventSource/callbackFlow transport itself stays instrumented-only; this covers the decode.
+    @Test
+    fun `a partial-then-completed sequence decodes to ordered partials then a final`() {
+        val frames = listOf(
+            buildJsonObject {
+                put("type", genPartial); put("b64_json", "P0"); put("output_format", "png"); put("partial_image_index", 0)
+            },
+            buildJsonObject {
+                put("type", genPartial); put("b64_json", "P1"); put("output_format", "png"); put("partial_image_index", 1)
+            },
+            buildJsonObject {
+                put("type", "image_generation.in_progress"); put("b64_json", "SKIP") // unrelated frame, dropped
+            },
+            buildJsonObject {
+                put("type", genCompleted); put("b64_json", "FINAL"); put("output_format", "png")
+            },
+        )
+
+        val decoded = frames.mapNotNull { parse(it) }
+
+        // The unrelated in_progress frame is dropped; the two partials + final survive in order.
+        assertEquals(listOf("P0", "P1", "FINAL"), decoded.map { it.data })
+        assertEquals(listOf(true, true, false), decoded.map { it.partial })
+        assertEquals(listOf(0, 1, null), decoded.map { it.partialImageIndex })
+        // Exactly one finalizing frame ends the image; the collector relies on this to persist + advance.
+        assertEquals(1, decoded.count { !it.partial })
+    }
+
     @Test
     fun `edit partial frame uses the edit event types`() {
         val event = buildJsonObject {

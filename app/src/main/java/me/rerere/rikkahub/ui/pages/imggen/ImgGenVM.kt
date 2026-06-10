@@ -9,7 +9,9 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import androidx.paging.map
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -356,6 +358,13 @@ class ImgGenVM(
                     _currentGeneratedImages.value = finalImages.toList()
                 }
             }
+            // The stream completed normally (a user cancel throws CancellationException out of
+            // collect and never reaches here). If it ended without a single FINAL frame, the
+            // generation effectively failed — surface it as an error instead of silently showing an
+            // empty result as success. A partial-only stream that closes is exactly this case.
+            check(finalImages.isNotEmpty()) {
+                "Image generation finished without returning a final image"
+            }
         } finally {
             previewSlots.drain().forEach { it.delete() }
             // The drained previews above are now deleted files. _currentGeneratedImages may still
@@ -367,7 +376,7 @@ class ImgGenVM(
         }
     }
 
-    private fun saveImagePreview(
+    private suspend fun saveImagePreview(
         item: ImageGenerationItem,
         modelName: String,
         index: Int,
@@ -377,7 +386,11 @@ class ImgGenVM(
             getApplication<Application>().appTempFolder,
             "imggen_${timestamp}_${modelName}_$index.png"
         )
-        return filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
+        // Base64.decode + File.writeBytes of a multi-megabyte image must not run on the collector's
+        // main-dispatcher coroutine — several partials would freeze the UI. Off-load to IO.
+        return withContext(Dispatchers.IO) {
+            filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
+        }
     }
 
     private suspend fun saveImageToStorage(
@@ -394,7 +407,10 @@ class ImgGenVM(
         val filename = "${timestamp}_${modelName}_$index.png"
         val imageFile = File(imagesDir, filename)
 
-        val createdFile = filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
+        // Decode + write the final image off the main dispatcher (same reason as saveImagePreview).
+        val createdFile = withContext(Dispatchers.IO) {
+            filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
+        }
 
         // Save to database with relative path
         val relativePath = "images/${imageFile.name}"

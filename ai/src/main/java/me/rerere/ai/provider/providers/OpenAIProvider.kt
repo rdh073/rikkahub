@@ -34,7 +34,6 @@ import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.util.KeyRoulette
-import me.rerere.ai.util.bufferStreamChunks
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
@@ -396,7 +395,14 @@ class OpenAIProvider(
         awaitClose {
             eventSource.cancel()
         }
-    }.bufferStreamChunks()
+    }
+    // NOTE: deliberately NOT .bufferStreamChunks() here. That helper raises the channel to
+    // Channel.UNLIMITED for text streams, where hundreds of TINY delta frames can outrun the Room
+    // writer. Image frames are the opposite: FEW (partial_images partials + one final per output
+    // image, a couple dozen at most, inherently bounded by the API) but each carries a full
+    // multi-megabyte base64 payload. An unlimited buffer would let every large payload pile up if the
+    // collector lags; the callbackFlow's default bounded (64) channel is ample for the handful of
+    // image frames and caps memory.
 
     /**
      * One-shot (non-streaming) image request for models that do not support stream/partial_images
