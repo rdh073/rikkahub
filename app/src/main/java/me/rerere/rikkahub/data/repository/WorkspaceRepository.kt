@@ -32,6 +32,8 @@ class WorkspaceRepository(
 
     suspend fun getById(id: String): WorkspaceEntity? = dao.getById(id)
 
+    fun getByIdFlow(id: String): Flow<WorkspaceEntity?> = dao.getByIdFlow(id)
+
     suspend fun create(name: String): WorkspaceEntity {
         val id = Uuid.random().toString()
         val now = System.currentTimeMillis()
