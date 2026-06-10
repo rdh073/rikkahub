@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -11,7 +12,17 @@ import org.junit.Test
  * workspace tool must be confirmed by the user before it runs. The destructive tools
  * (shell, delete, move) MUST default to approval-required; the read/inspect tools
  * (list, read, write, edit) default to no-approval. A per-workspace override always wins over the
- * default — in either direction.
+ * default — in either direction. When the stored policy blob is corrupt the map is null and the
+ * resolver fails CLOSED (approval required for everything) — (C).
+ *
+ * NOTE on the live surface: per the issue #197 design-gate (section C), this slice exposes only the
+ * read-only verbs (list/read). The write/edit/delete/move/shell factories are kept built-but-unwired
+ * and re-enabled behind a sideload/security flavor by the workspace hardening pass. The default
+ * approval map and the resolver are tested for all seven tool names regardless, because those names
+ * are still the canonical defaults the hardening pass re-enables against.
+ *
+ * (D) additionally pins [countNonOverlappingOccurrences], the edit-file occurrence counter, to
+ * replace/replaceFirst (non-overlapping) semantics.
  *
  * This pins the pure resolution function directly. The 7 tools' execute bodies and
  * [createWorkspaceTools]' Koin/Android wiring are SettingsStore/WorkspaceManager-coupled and not
@@ -69,5 +80,40 @@ class WorkspaceToolsTest {
         assertTrue(
             resolveWorkspaceToolApproval("workspace_delete_file", mapOf("workspace_shell" to false))
         )
+    }
+
+    // (C) FAIL-CLOSED: a null overrides map (corrupt/unparseable policy blob) forces approval for
+    // every tool, including ones whose relaxed DEFAULT is no-approval. This is the regression for the
+    // "approval-override decode fails OPEN" finding: previously a corrupt blob collapsed to an empty
+    // map and silently reverted user-tightened tools to no-approval.
+    @Test
+    fun `null overrides fail closed and require approval for every tool`() {
+        // A tool that defaults to no-approval must STILL require approval when the policy is corrupt.
+        assertTrue(resolveWorkspaceToolApproval("workspace_read_file", null))
+        assertTrue(resolveWorkspaceToolApproval("workspace_write_file", null))
+        assertTrue(resolveWorkspaceToolApproval("workspace_list_files", null))
+        // Destructive tools stay approval-required (the safe direction is unchanged).
+        assertTrue(resolveWorkspaceToolApproval("workspace_shell", null))
+        // Even an unknown tool fails closed rather than falling through to `?: false`.
+        assertTrue(resolveWorkspaceToolApproval("unknown_tool", null))
+    }
+
+    // (D) Edit occurrence counting matches replace/replaceFirst (NON-overlapping). Regression for the
+    // overlapping-window bug: old_text="aa" in "aaa" must count as 1 (one non-overlapping match),
+    // not 2 — otherwise replace_all=false wrongly rejects and replace_all=true over-reports.
+    @Test
+    fun `occurrence count is non-overlapping like replace`() {
+        // Self-overlapping needle — the exact bug case.
+        assertEquals(1, countNonOverlappingOccurrences("aaa", "aa"))
+        assertEquals(2, countNonOverlappingOccurrences("aaaa", "aa"))
+        // Reported count must equal what replace actually does.
+        assertEquals(2, "aaaa".split("aa").size - 1)
+
+        // Ordinary (non-overlapping) cases are unchanged.
+        assertEquals(0, countNonOverlappingOccurrences("abc", "x"))
+        assertEquals(1, countNonOverlappingOccurrences("abc", "b"))
+        assertEquals(3, countNonOverlappingOccurrences("a.a.a.", "a."))
+        // Empty needle never matches (the execute body separately rejects empty old_text).
+        assertEquals(0, countNonOverlappingOccurrences("abc", ""))
     }
 }

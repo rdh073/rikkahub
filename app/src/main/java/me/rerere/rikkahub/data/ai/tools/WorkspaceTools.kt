@@ -30,25 +30,37 @@ val WorkspaceToolDefaultApprovals: Map<String, Boolean> = mapOf(
     "workspace_shell" to true,
 )
 
-fun resolveWorkspaceToolApproval(name: String, overrides: Map<String, Boolean>): Boolean =
-    overrides[name] ?: WorkspaceToolDefaultApprovals[name] ?: false
+/**
+ * Resolves whether [name] needs user approval. A null [overrides] means the stored policy blob was
+ * corrupt/unparseable: fail CLOSED (require approval) rather than fall back to the relaxed defaults,
+ * so a tampered/garbled column can never silently downgrade a tool to no-approval.
+ */
+fun resolveWorkspaceToolApproval(name: String, overrides: Map<String, Boolean>?): Boolean {
+    if (overrides == null) return true
+    return overrides[name] ?: WorkspaceToolDefaultApprovals[name] ?: false
+}
 
 suspend fun createWorkspaceTools(
     workspaceId: String?,
     workspaceRepository: WorkspaceRepository,
 ): List<Tool> {
     if (workspaceId.isNullOrBlank()) return emptyList()
-    val approvalOverrides = workspaceRepository.getById(workspaceId)?.toolApprovalOverrides().orEmpty()
+    // No row for this id -> expose nothing. For a present row, toolApprovalOverrides() returns null
+    // when the policy blob is corrupt, and resolveWorkspaceToolApproval then fails closed (approval
+    // required for every tool) instead of relaxing to the defaults.
+    val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
+    val approvalOverrides = workspace.toolApprovalOverrides()
     fun needsApproval(name: String) = resolveWorkspaceToolApproval(name, approvalOverrides)
 
+    // SECURITY GATE (issue #197 design-gate, section C / ranked risk #1): the write-capable and
+    // shell verbs (workspace_write_file/edit_file/delete_file/move_file/shell) are an LLM-driven
+    // arbitrary-write / code-execution sink and are "gated on the security design, sideload-flavored
+    // until reviewed". Until that flavor/feature-gate + shell-enablement enforcement lands (workspace
+    // hardening pass), slice 5 exposes ONLY the read-only verbs. The factory functions below remain
+    // so the hardening pass can re-enable them behind the gate without re-porting.
     return listOf(
         createListFilesTool(workspaceId, ::needsApproval, workspaceRepository),
         createReadFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createWriteFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createEditFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createDeleteFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createMoveFileTool(workspaceId, ::needsApproval, workspaceRepository),
-        createShellTool(workspaceId, ::needsApproval, workspaceRepository),
     )
 }
 
@@ -130,6 +142,9 @@ private fun createReadFileTool(
     },
 )
 
+// Gated (issue #197 design-gate, section C): re-enabled by the workspace hardening pass behind the
+// sideload/security flavor. Kept built-but-unwired so the gated pass need not re-port it.
+@Suppress("unused")
 private fun createWriteFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
@@ -166,6 +181,9 @@ private fun createWriteFileTool(
     },
 )
 
+// Gated (issue #197 design-gate, section C): re-enabled by the workspace hardening pass behind the
+// sideload/security flavor. Kept built-but-unwired so the gated pass need not re-port it.
+@Suppress("unused")
 private fun createEditFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
@@ -206,7 +224,10 @@ private fun createEditFileTool(
         require(oldText.isNotEmpty()) { "old_text must not be empty" }
 
         val original = workspaceRepository.readText(workspaceId, path)
-        val occurrences = original.windowed(oldText.length).count { window -> window == oldText }
+        // Count NON-overlapping occurrences: replace/replaceFirst match non-overlapping, so an
+        // overlapping window scan (e.g. "aa" in "aaa" -> 2) would mis-reject single edits and
+        // over-report replacements. See countNonOverlappingOccurrences.
+        val occurrences = countNonOverlappingOccurrences(original, oldText)
         require(occurrences > 0) { "old_text was not found in $path" }
         if (!replaceAll) {
             require(occurrences == 1) {
@@ -232,6 +253,9 @@ private fun createEditFileTool(
     },
 )
 
+// Gated (issue #197 design-gate, section C): re-enabled by the workspace hardening pass behind the
+// sideload/security flavor. Kept built-but-unwired so the gated pass need not re-port it.
+@Suppress("unused")
 private fun createDeleteFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
@@ -272,6 +296,9 @@ private fun createDeleteFileTool(
     },
 )
 
+// Gated (issue #197 design-gate, section C): re-enabled by the workspace hardening pass behind the
+// sideload/security flavor. Kept built-but-unwired so the gated pass need not re-port it.
+@Suppress("unused")
 private fun createMoveFileTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
@@ -311,6 +338,12 @@ private fun createMoveFileTool(
     },
 )
 
+// Gated (issue #197 design-gate, section C / ranked risk #1): the LLM-driven PRoot shell sink.
+// Re-enabled ONLY by the workspace hardening pass behind the sideload/security flavor, AND that
+// re-enablement MUST also enforce the shell-enablement invariant at the WorkspaceRepository.executeCommand
+// sink (require workspace.shellEnabled && shellStatus == READY) — currently unenforced. Kept
+// built-but-unwired so the gated pass need not re-port it.
+@Suppress("unused")
 private fun createShellTool(
     workspaceId: String,
     needsApproval: (String) -> Boolean,
@@ -365,6 +398,23 @@ private fun createShellTool(
         )
     },
 )
+
+/**
+ * Counts how many times [needle] occurs in [haystack] using NON-overlapping matching, the same
+ * semantics as [String.replace] / [String.replaceFirst]. This must match the replacement engine so
+ * the edit-file exactly-once guard and the reported `replacements` count are consistent (an
+ * overlapping window scan diverges for self-overlapping needles like "aa" in "aaa").
+ */
+internal fun countNonOverlappingOccurrences(haystack: String, needle: String): Int {
+    if (needle.isEmpty()) return 0
+    var count = 0
+    var index = haystack.indexOf(needle)
+    while (index >= 0) {
+        count++
+        index = haystack.indexOf(needle, index + needle.length)
+    }
+    return count
+}
 
 private fun kotlinx.serialization.json.JsonObject.string(name: String): String? =
     this[name]?.jsonPrimitive?.contentOrNull
