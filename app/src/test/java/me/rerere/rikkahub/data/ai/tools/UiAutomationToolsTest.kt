@@ -567,11 +567,13 @@ class UiAutomationToolsTest {
     @Test
     fun `ui_global before any observe returns a re-observe text and never performs`() {
         val backend = FakeBackend(scrollableTree())
-        val global = actTools(actGuard(), backend).byName(UI_GLOBAL_TOOL_NAME)
+        val guard = actGuard()
+        val global = actTools(guard, backend).byName(UI_GLOBAL_TOOL_NAME)
 
         val parts = runBlocking { global.execute(buildJsonObject { put("direction", "back") }) }
 
         assertTrue("no perform without a grounded snapshot", backend.performed.isEmpty())
+        assertTrue("a well-formed ungrounded act is not an admission decision", guard.audit.entries().isEmpty())
         assertTrue(
             "must tell the model to observe first",
             (parts.single() as UIMessagePart.Text).text.contains("observe", ignoreCase = true),
@@ -895,13 +897,15 @@ class UiAutomationToolsTest {
     @Test
     fun `ui_set_text before any observe returns a re-observe text and never performs`() {
         val backend = FakeBackend(editableTree())
-        val setText = actTools(actGuard(), backend).byName("ui_set_text")
+        val guard = actGuard()
+        val setText = actTools(guard, backend).byName("ui_set_text")
 
         val parts = runBlocking {
             setText.execute(setTextArgs(buildJsonObject { put("tid", 0) }, "x"))
         }
 
         assertTrue("no perform without a grounded snapshot", backend.performed.isEmpty())
+        assertTrue("a well-formed ungrounded act is not an admission decision", guard.audit.entries().isEmpty())
         assertTrue(
             "must tell the model to observe first",
             (parts.single() as UIMessagePart.Text).text.contains("observe", ignoreCase = true),
@@ -1169,11 +1173,13 @@ class UiAutomationToolsTest {
     @Test
     fun `ui_tap before any observe returns a re-observe text and never performs`() {
         val backend = FakeBackend(clickableTree())
-        val tap = actTools(actGuard(), backend).byName("ui_tap")
+        val guard = actGuard()
+        val tap = actTools(guard, backend).byName("ui_tap")
 
         val parts = runBlocking { tap.execute(tapArgs(buildJsonObject { put("tid", 0) })) }
 
         assertTrue("no perform without a grounded snapshot", backend.performed.isEmpty())
+        assertTrue("a well-formed ungrounded act is not an admission decision", guard.audit.entries().isEmpty())
         assertTrue(
             "must tell the model to observe first",
             (parts.single() as UIMessagePart.Text).text.contains("observe", ignoreCase = true),
