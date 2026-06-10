@@ -83,6 +83,14 @@ fun MeshGradientBackground(
     val alphaTeal = if (dark) 0.28f else 0.35f
     val alphaLightBlue = if (dark) 0.32f else 0.40f
 
+    // The colour stops only depend on the theme, so build the lists ONCE here (per recomposition),
+    // not inside the Canvas draw lambda — that lambda re-runs every animation frame and would
+    // otherwise allocate three fresh List<Color> per frame. Only the radial Brush itself is rebuilt
+    // per frame (its center is animated and Brush is immutable), which is inherent to the effect.
+    val blueStops = listOf(blobBlue.copy(alpha = alphaBlue), Color.Transparent)
+    val tealStops = listOf(blobTeal.copy(alpha = alphaTeal), Color.Transparent)
+    val lightBlueStops = listOf(blobLightBlue.copy(alpha = alphaLightBlue), Color.Transparent)
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -99,22 +107,19 @@ fun MeshGradientBackground(
             drawBlob(
                 center = Offset(w * 0.45f + sin(p1) * w * 0.20f, h * 0.02f + cos(p1) * h * 0.05f),
                 radius = r * 0.55f,
-                color = blobBlue,
-                centerAlpha = alphaBlue,
+                colorStops = blueStops,
             )
             // Top-left teal accent.
             drawBlob(
                 center = Offset(w * 0.12f + sin(p2) * w * 0.12f, h * 0.22f + cos(p2) * h * 0.08f),
                 radius = r * 0.40f,
-                color = blobTeal,
-                centerAlpha = alphaTeal,
+                colorStops = tealStops,
             )
             // Top-right light blue.
             drawBlob(
                 center = Offset(w * 0.88f + sin(p3) * w * -0.14f, h * 0.08f + cos(p3) * h * 0.06f),
                 radius = r * 0.42f,
-                color = blobLightBlue,
-                centerAlpha = alphaLightBlue,
+                colorStops = lightBlueStops,
             )
         }
 
@@ -122,16 +127,19 @@ fun MeshGradientBackground(
     }
 }
 
-/** Draws one soft blob: colored center fading outward to transparent. */
+/**
+ * Draws one soft blob: colored center fading outward to transparent. [colorStops] (center color ->
+ * transparent) is precomputed by the caller and reused across frames; only the animated [center]
+ * forces a fresh radial Brush per frame.
+ */
 private fun DrawScope.drawBlob(
     center: Offset,
     radius: Float,
-    color: Color,
-    centerAlpha: Float = 0.75f,
+    colorStops: List<Color>,
 ) {
     drawCircle(
         brush = Brush.radialGradient(
-            colors = listOf(color.copy(alpha = centerAlpha), Color.Transparent),
+            colors = colorStops,
             center = center,
             radius = radius,
         ),
