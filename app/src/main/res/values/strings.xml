@@ -1203,5 +1203,8 @@
   <string name="workspace_files_empty">Empty directory</string>
   <string name="workspace_files_load_error">Failed to load workspace files</string>
   <string name="workspace_files_root_path">/</string>
+  <string name="assistant_page_workspace">Workspace</string>
+  <string name="assistant_page_workspace_desc">After binding, the agent can use the workspace files and sandbox capabilities</string>
+  <string name="assistant_page_workspace_none">Not bound</string>
 </resources>
 

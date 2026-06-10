@@ -1203,5 +1203,8 @@
   <string name="workspace_files_empty">空目錄</string>
   <string name="workspace_files_load_error">載入工作區檔案失敗</string>
   <string name="workspace_files_root_path">/</string>
+  <string name="assistant_page_workspace">工作區</string>
+  <string name="assistant_page_workspace_desc">綁定後 Agent 可以使用該工作區的檔案與沙盒能力</string>
+  <string name="assistant_page_workspace_none">不綁定</string>
 </resources>
 

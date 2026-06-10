@@ -1205,5 +1205,8 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="workspace_files_empty">空のディレクトリ</string>
   <string name="workspace_files_load_error">ワークスペースのファイルの読み込みに失敗しました</string>
   <string name="workspace_files_root_path">/</string>
+  <string name="assistant_page_workspace">ワークスペース</string>
+  <string name="assistant_page_workspace_desc">バインドすると、エージェントはこのワークスペースのファイルとサンドボックス機能を使用できます</string>
+  <string name="assistant_page_workspace_none">バインドしない</string>
 </resources>
 

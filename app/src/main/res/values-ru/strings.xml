@@ -1205,5 +1205,8 @@
   <string name="workspace_files_empty">Пустой каталог</string>
   <string name="workspace_files_load_error">Не удалось загрузить файлы рабочего пространства</string>
   <string name="workspace_files_root_path">/</string>
+  <string name="assistant_page_workspace">Рабочая область</string>
+  <string name="assistant_page_workspace_desc">После привязки агент сможет использовать файлы и возможности песочницы этой рабочей области</string>
+  <string name="assistant_page_workspace_none">Не привязывать</string>
 </resources>
 
