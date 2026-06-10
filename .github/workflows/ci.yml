@@ -67,14 +67,23 @@ jobs:
 
       # :web:buildWebUi shells out to pnpm to build the React frontend — orthogonal
       # to the Kotlin/Android gate and absent on the runner, so it is excluded.
+      # The :app module carries a play/sideload product flavor (issue #197 §4.1 Option A), so the
+      # unflavored variant tasks no longer exist. Compile BOTH flavors to prove both source sets +
+      # the per-flavor sideloadWorkspaceTools seam resolve.
       - name: Compile (all modules, debug)
-        run: ./gradlew compileDebugKotlin -x :web:buildWebUi --stacktrace
+        run: ./gradlew compilePlayDebugKotlin compileSideloadDebugKotlin -x :web:buildWebUi --stacktrace
 
+      # :app is flavored, so testDebugUnitTest no longer resolves to an :app variant — run the
+      # sideload variant explicitly (feature-superset; covers WorkspaceToolsTest +
+      # WorkspaceRepositoryShellEnableTest + the gated factories in app/src/sideload). The unflavored
+      # testDebugUnitTest aggregate still schedules every library module's JVM tests (:ai, :automation,
+      # :common, :document, :search, :speech, :web, :workspace) — it must stay or that coverage silently
+      # stops running. Combining both is unambiguous (no :app flavor task matches testDebugUnitTest).
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest -x :web:buildWebUi --stacktrace
+        run: ./gradlew testSideloadDebugUnitTest testDebugUnitTest -x :web:buildWebUi --stacktrace
 
       - name: Android Lint
-        run: ./gradlew lintDebug -x :web:buildWebUi --stacktrace
+        run: ./gradlew lintSideloadDebug -x :web:buildWebUi --stacktrace
 
       - name: Upload reports
         if: failure()
