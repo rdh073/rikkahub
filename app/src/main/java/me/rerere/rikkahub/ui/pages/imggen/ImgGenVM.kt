@@ -389,10 +389,11 @@ class ImgGenVM(
 
     /** Decode [item]'s base64 into [target] off the main dispatcher (Base64.decode + File.writeBytes of
      * a multi-MB image must not run on the collector's main-dispatcher coroutine). */
-    private suspend fun writeImageBase64(item: ImageGenerationItem, target: File): File =
+    private suspend fun writeImageBase64(item: ImageGenerationItem, target: File) {
         withContext(Dispatchers.IO) {
             filesManager.createImageFileFromBase64(item.data, target.absolutePath)
         }
+    }
 
     private suspend fun saveImageToStorage(
         item: ImageGenerationItem,
@@ -417,19 +418,21 @@ class ImgGenVM(
             sourcePaths = sourcePaths,
         )
 
-        // Decode+write AND persist in one IO unit, deleting the written file if anything (a
-        // cancellation during the Room insert included) throws before it is persisted — otherwise a
-        // cancel between the write and the DB insert would leave an orphan image file with no row.
-        // Once insertMedia returns the file is durably referenced, so a later resume-cancel is safe.
+        // Decode+write AND persist in one IO unit. The write AND the insert are both inside the try,
+        // so a partial/failed write OR a cancellation during the Room insert deletes the (possibly
+        // partially-written) destination — otherwise either could leave an orphan image file with no
+        // row. Once insertMedia returns the file is durably referenced, so a later resume-cancel is
+        // safe. [imageFile] is exactly the write destination, so deleting it is correct even when the
+        // write threw before returning a handle.
         return withContext(Dispatchers.IO) {
-            val createdFile = filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
             try {
+                filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
                 genMediaRepository.insertMedia(entity)
             } catch (t: Throwable) {
-                createdFile.delete()
+                imageFile.delete()
                 throw t
             }
-            createdFile
+            imageFile
         }
     }
 
