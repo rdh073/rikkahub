@@ -340,6 +340,7 @@ class ClaudeProvider(
                     "message_stop" -> {
                         Log.d(TAG, "Stream ended")
                         close()
+                        return
                     }
 
                     "error" -> {
