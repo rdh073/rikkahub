@@ -336,7 +336,10 @@ class ClaudeProvider(
                     usage = tokenUsage
                 )
 
-                when (claudeStreamFrameTerminal(type)) {
+                // trySend is reachable ONLY through the non-terminal branch's binding —
+                // a terminal frame returns before producing the chunk to send, so the emit
+                // is structurally unreachable after close(), not merely guarded by a return.
+                val chunkToSend = when (claudeStreamFrameTerminal(type)) {
                     ClaudeStreamTerminal.MessageStop -> {
                         Log.d(TAG, "Stream ended")
                         close()
@@ -349,10 +352,10 @@ class ClaudeProvider(
                         return
                     }
 
-                    null -> Unit
+                    null -> messageChunk
                 }
 
-                trySend(messageChunk)
+                trySend(chunkToSend)
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
