@@ -322,12 +322,13 @@ class ImgGenVM(
                 val slot = previewSlotKey(finalIndex)
                 if (item.partial) {
                     previewSlots.take(slot)?.delete()
-                    val imageFile = saveImagePreview(
-                        item = item,
-                        modelName = modelName,
-                        index = slot,
-                    )
+                    // Track the target path in the slot BEFORE the (suspending, cancellable) write, so
+                    // a cancellation landing while the bytes are being written still leaves the file
+                    // registered — the terminal `finally` drain then deletes it. Tracking after the
+                    // write (as before) left a cancel-during-write orphan in appTempFolder.
+                    val imageFile = previewImageFile(modelName, slot)
                     previewSlots.put(slot, imageFile)
+                    writeImageBase64(item, imageFile)
                     _currentGeneratedImages.value = finalImages + GeneratedImage(
                         id = 0,
                         prompt = prompt,
@@ -376,22 +377,22 @@ class ImgGenVM(
         }
     }
 
-    private suspend fun saveImagePreview(
-        item: ImageGenerationItem,
-        modelName: String,
-        index: Int,
-    ): File {
+    /** The (not-yet-written) temp-file path for a streaming preview. Pure: the caller registers it in
+     * the preview slot BEFORE [writeImageBase64] writes it, so a cancel-during-write is still drained. */
+    private fun previewImageFile(modelName: String, index: Int): File {
         val timestamp = System.currentTimeMillis()
-        val imageFile = File(
+        return File(
             getApplication<Application>().appTempFolder,
             "imggen_${timestamp}_${modelName}_$index.png"
         )
-        // Base64.decode + File.writeBytes of a multi-megabyte image must not run on the collector's
-        // main-dispatcher coroutine — several partials would freeze the UI. Off-load to IO.
-        return withContext(Dispatchers.IO) {
-            filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
-        }
     }
+
+    /** Decode [item]'s base64 into [target] off the main dispatcher (Base64.decode + File.writeBytes of
+     * a multi-MB image must not run on the collector's main-dispatcher coroutine). */
+    private suspend fun writeImageBase64(item: ImageGenerationItem, target: File): File =
+        withContext(Dispatchers.IO) {
+            filesManager.createImageFileFromBase64(item.data, target.absolutePath)
+        }
 
     private suspend fun saveImageToStorage(
         item: ImageGenerationItem,
@@ -406,13 +407,6 @@ class ImgGenVM(
         val timestamp = System.currentTimeMillis()
         val filename = "${timestamp}_${modelName}_$index.png"
         val imageFile = File(imagesDir, filename)
-
-        // Decode + write the final image off the main dispatcher (same reason as saveImagePreview).
-        val createdFile = withContext(Dispatchers.IO) {
-            filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
-        }
-
-        // Save to database with relative path
         val relativePath = "images/${imageFile.name}"
         val entity = GenMediaEntity(
             path = relativePath,
@@ -422,9 +416,21 @@ class ImgGenVM(
             type = type,
             sourcePaths = sourcePaths,
         )
-        genMediaRepository.insertMedia(entity)
 
-        return createdFile
+        // Decode+write AND persist in one IO unit, deleting the written file if anything (a
+        // cancellation during the Room insert included) throws before it is persisted — otherwise a
+        // cancel between the write and the DB insert would leave an orphan image file with no row.
+        // Once insertMedia returns the file is durably referenced, so a later resume-cancel is safe.
+        return withContext(Dispatchers.IO) {
+            val createdFile = filesManager.createImageFileFromBase64(item.data, imageFile.absolutePath)
+            try {
+                genMediaRepository.insertMedia(entity)
+            } catch (t: Throwable) {
+                createdFile.delete()
+                throw t
+            }
+            createdFile
+        }
     }
 
     fun deleteImage(image: GeneratedImage) {
