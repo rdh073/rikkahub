@@ -62,7 +62,10 @@ class AppToolCatalog(
         // approval stripping; approval-gated tools are dropped separately when allowApprovalTools is
         // false. Coupling them would let a base tool literally named `task` leak into a subagent pool
         // that happens to allow approval tools.
-        val recursionGuarded = if (ctx.mode == TurnMode.Subagent || !ctx.includeSpawnTool) {
+        // The guard keys on the turn MODE alone: production never filters the main pool, so a main
+        // turn that merely omits the spawn tool (includeSpawnTool=false) must NOT strip a base tool
+        // that happens to be named `task`.
+        val recursionGuarded = if (ctx.mode == TurnMode.Subagent) {
             filterToolsForSubagent(pool)
         } else {
             pool

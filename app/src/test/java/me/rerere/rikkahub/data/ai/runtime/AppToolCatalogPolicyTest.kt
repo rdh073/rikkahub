@@ -233,4 +233,36 @@ class AppToolCatalogPolicyTest {
         assertFalse("spawn-named base tool stripped on subagent pool", names.contains(SPAWN_TOOL_NAME))
         assertTrue("non-spawn base tool retained", names.contains("local_read"))
     }
+
+    /**
+     * The recursion guard keys on the turn MODE alone. Production never filters the MAIN pool —
+     * the guard lives only in the subagent path (SubagentRunner -> filterToolsForSubagent). A main
+     * turn that merely omits the spawn tool (includeSpawnTool=false) must NOT strip a base tool
+     * that happens to be named `task`; gating the strip on `!includeSpawnTool` would bake that
+     * divergence into the pool slice 10 rewires ChatService onto.
+     */
+    @Test
+    fun spawnNamedBaseToolRetainedOnMainTurnWithoutSpawnTool() = runBlocking {
+        val catalog = catalog(
+            serverTools = emptyMap(),
+            baseTools = { _, _ -> listOf(tool("local_read"), tool(SPAWN_TOOL_NAME)) },
+            // The spawn seam must not even be consulted; returning null keeps the add-path inert
+            // so the only way SPAWN_TOOL_NAME can appear is via the base pool.
+            spawnTool = { null },
+        )
+        val main = assistant(Uuid.random(), mcpServers = emptySet())
+
+        val names = catalog.tools(
+            ToolAssemblyContext(
+                mode = TurnMode.Main,
+                targetAssistant = main,
+                parentModelId = null,
+                allowApprovalTools = true,
+                includeSpawnTool = false,
+            )
+        ).map { it.name }
+
+        assertTrue("main pool is never recursion-filtered", names.contains(SPAWN_TOOL_NAME))
+        assertTrue("non-spawn base tool retained", names.contains("local_read"))
+    }
 }
