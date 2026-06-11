@@ -89,30 +89,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          # P1 — no app types, Android imports, or Compose in the neutral module.
-          if rg -n 'me\.rerere\.rikkahub|import android\.|androidx\.compose|@Composable' ai-runtime/src; then
-            echo "::error::P1 VIOLATION — app type / Android import / Compose leaked into :ai-runtime (issue #243 §E). The runtime contract must stay neutral." >&2
+          # P1 — no app types, Android refs, or Compose in the neutral module.
+          # The `android.` alternation is anchored to a token boundary ((^|[^A-Za-z0-9_.])) so it
+          # catches BOTH `import android.…` AND bare fully-qualified refs (android.os.Build.VERSION,
+          # android.util.Log.d) that carry no import statement — :ai-runtime is an Android library with
+          # a compileSdk, so those FQ refs resolve on the classpath and would leak the platform in
+          # without an import. The boundary excludes me.rerere…android-suffixed identifiers and the
+          # com.android.* build namespace (preceded by `.`), which are not platform-API leaks.
+          if rg -n 'me\.rerere\.rikkahub|(^|[^A-Za-z0-9_.])android\.|androidx\.compose|@Composable' ai-runtime/src; then
+            echo "::error::P1 VIOLATION — app type / Android ref / Compose leaked into :ai-runtime (issue #243 §E). The runtime contract must stay neutral." >&2
             exit 1
           fi
 
           # P3 — no persistence or platform references.
-          if rg -n 'Room|Dao|Entity|AppDatabase|DataStore|SettingsStore|Context|R\.' ai-runtime/src; then
-            echo "::error::P3 VIOLATION — persistence / Context / R reference leaked into :ai-runtime (issue #243 §E)." >&2
+          # Import/package-oriented to match the design's literal P3 invariant
+          # (androidx.room / androidx.datastore / io.objectbox) without false-failing on neutral
+          # identifiers. Bare `Context`/`Entity`/`Room`/`Dao` are dropped: they substring-match the
+          # design's OWN next-slice runtime types — ToolAssemblyContext (contract block B, slice 6),
+          # the neutral GenerationContext / RuntimeTransformerContext (slice 7) — and any class merely
+          # containing those substrings (ChatMessageEntity, RoomCoordinator). The literal targets are
+          # the persistence packages, which carry no identifier ambiguity. AppDatabase/SettingsStore are
+          # kept but word-bounded; R. is anchored to a token boundary (mirrors P1 above) so a bare
+          # `…R.` substring (e.g. `foR.bar`) cannot match, while real `R.string` resource refs do.
+          # `androidx.datastore` is the lowercase package the old capital `DataStore` token never caught.
+          if rg -n 'androidx\.room|androidx\.datastore|io\.objectbox|\bAppDatabase\b|\bSettingsStore\b|(^|[^A-Za-z0-9_.])R\.' ai-runtime/src; then
+            echo "::error::P3 VIOLATION — persistence package / AppDatabase / SettingsStore / R resource reference leaked into :ai-runtime (issue #243 §E)." >&2
             exit 1
           fi
 
-          # P2 — module-dependency allowlist. ai-runtime may depend ONLY on :ai and :common.
+          # P2 — module-dependency ALLOW-list. ai-runtime may depend ONLY on :ai and :common.
+          # This is an allow-list, not a ban-list: extract EVERY 'project :X' edge from the report and
+          # fail if the set differs from exactly {:ai,:common}. A ban-list of named modules would
+          # silently permit a new edge to :speech/:web/:material3/:highlight (several Compose-bearing) —
+          # the invariant is closed only by enumerating what is allowed.
           deps=$(./gradlew :ai-runtime:dependencies --configuration releaseRuntimeClasspath -x :web:buildWebUi --stacktrace)
-          # Fail loud if the expected :ai project dep is gone — layout drift would make the bans below
+          # Distinct ':X' module tokens on the classpath (dedup the gradle `(*)` repeat markers).
+          projects=$(echo "$deps" | grep -oE 'project :[A-Za-z0-9_-]+' | sed 's/^project //' | sort -u)
+          # Fail loud if the expected :ai project dep is gone — layout drift would make the check below
           # pass against nothing.
-          if ! echo "$deps" | grep -q 'project :ai'; then
+          if ! echo "$projects" | grep -qxE ':ai'; then
             echo "::error::P2 guard found no 'project :ai' on :ai-runtime releaseRuntimeClasspath — module layout changed; refusing to pass vacuously." >&2
             exit 1
           fi
-          forbidden=$(echo "$deps" | grep -E 'project :(app|search|document|automation|workspace)' || true)
-          if [ -n "$forbidden" ]; then
-            echo "::error::P2 VIOLATION — :ai-runtime depends on a forbidden module (issue #243 §E). Allowed deps are :ai and :common only:" >&2
-            echo "$forbidden" >&2
+          unexpected=$(echo "$projects" | grep -vxE ':ai|:common' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::P2 VIOLATION — :ai-runtime depends on a module outside the allow-list (issue #243 §E). Allowed deps are :ai and :common only; found:" >&2
+            echo "$unexpected" >&2
             exit 1
           fi
           echo ":ai-runtime boundary OK: neutral (P1/P3) and deps within {:ai,:common} (P2)."
