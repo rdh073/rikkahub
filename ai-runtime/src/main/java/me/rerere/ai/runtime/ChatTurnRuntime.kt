@@ -35,6 +35,7 @@ import me.rerere.ai.runtime.hooks.HookDecision
 import me.rerere.ai.runtime.hooks.HookDispatchContext
 import me.rerere.ai.runtime.hooks.HookDispatcher
 import me.rerere.ai.runtime.hooks.HookEvent
+import me.rerere.ai.runtime.hooks.markDeniedByHook
 import me.rerere.ai.runtime.knowledge.KnowledgeBudget
 import me.rerere.ai.runtime.knowledge.KnowledgeContextAssembler
 import me.rerere.ai.runtime.knowledge.KnowledgeContextBlock
@@ -301,7 +302,12 @@ class ChatTurnRuntime(
             when (val decision = result.decision) {
                 is HookDecision.Deny -> {
                     logSink.info(TAG, "applyPreToolUseHooks: hook denied tool ${tool.toolName}")
-                    rewritten.copy(approvalState = ToolApprovalState.Denied(decision.reason))
+                    rewritten.copy(
+                        approvalState = ToolApprovalState.Denied(decision.reason),
+                        // T10: provenance marker so the UI can badge "blocked by hook" — a user
+                        // denial and a hook denial share the Denied state but not the metadata.
+                        metadata = markDeniedByHook(rewritten.metadata),
+                    )
                 }
 
                 HookDecision.Ask -> rewritten.copy(approvalState = ToolApprovalState.Pending)

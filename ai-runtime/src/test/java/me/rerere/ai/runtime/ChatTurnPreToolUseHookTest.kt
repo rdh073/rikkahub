@@ -35,6 +35,7 @@ import me.rerere.ai.runtime.hooks.HookEvent
 import me.rerere.ai.runtime.hooks.HookExecutor
 import me.rerere.ai.runtime.hooks.HookHandler
 import me.rerere.ai.runtime.hooks.HookMatcher
+import me.rerere.ai.runtime.hooks.isDeniedByHook
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.ToolApprovalState
@@ -261,6 +262,9 @@ class ChatTurnPreToolUseHookTest {
         // The denial flows through the EXISTING denied path: the result the model sees carries the reason.
         val output = (tool.output.single() as UIMessagePart.Text).text
         assertTrue("denied result must surface the hook reason", output.contains("blocked by hook policy"))
+        // Provenance marker (#200 T10): the UI must be able to badge this as "blocked by hook",
+        // distinguishable from a user denial — never silent.
+        assertTrue("hook denial must carry the provenance marker", isDeniedByHook(tool.metadata))
     }
 
     @Test
