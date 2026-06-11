@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
@@ -55,6 +56,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.mcp.McpManager
+import me.rerere.rikkahub.data.ai.mcp.McpTool
 import me.rerere.automation.act.AlwaysDeny
 import me.rerere.automation.cap.Capability
 import me.rerere.automation.cap.CapabilityGuard
@@ -802,6 +804,15 @@ class ChatService(
         session.setJob(job)
     }
 
+    // Appends the resolved MCP [mcpTools] to a tool-pool builder via the shared [mapMcpTool] adapter
+    // (issue #244, DRY #1) — used by BOTH the main-agent pool and the subagent pool so the "mcp__"
+    // prefix + callTool wiring can no longer drift between them.
+    private fun MutableList<Tool>.addMcpTools(mcpTools: List<Pair<Uuid, McpTool>>) {
+        mcpTools.forEach { (serverId, tool) ->
+            add(mapMcpTool(serverId, tool) { sid, name, args -> mcpManager.callTool(sid, name, args) })
+        }
+    }
+
     // ---- 处理消息补全 ----
 
     private suspend fun handleMessageComplete(
@@ -973,19 +984,7 @@ class ChatService(
                             )
                         )
                     }
-                    mcpManager.getAllAvailableTools(assistant).forEach { (serverId, tool) ->
-                        add(
-                            Tool(
-                                name = "mcp__" + tool.name,
-                                description = tool.description ?: "",
-                                parameters = { tool.inputSchema },
-                                needsApproval = tool.needsApproval,
-                                execute = {
-                                    mcpManager.callTool(serverId, tool.name, it.jsonObject)
-                                },
-                            )
-                        )
-                    }
+                    addMcpTools(mcpManager.getAllAvailableTools(assistant))
                     // Subagent spawn tool (issue #201). Built ONLY here so a subagent's own pool
                     // (via SubagentRunner -> generateText, which bypasses this buildList) never
                     // contains it — the structural recursion guard. No-op when nothing is spawnable.
@@ -1014,19 +1013,7 @@ class ChatService(
                                                 )
                                             )
                                         }
-                                        mcpManager.getAllAvailableTools(sub).forEach { (serverId, tool) ->
-                                            add(
-                                                Tool(
-                                                    name = "mcp__" + tool.name,
-                                                    description = tool.description ?: "",
-                                                    parameters = { tool.inputSchema },
-                                                    needsApproval = tool.needsApproval,
-                                                    execute = {
-                                                        mcpManager.callTool(serverId, tool.name, it.jsonObject)
-                                                    },
-                                                )
-                                            )
-                                        }
+                                        addMcpTools(mcpManager.getAllAvailableTools(sub))
                                     }
                                 },
                                 processingStatus = session.processingStatus,
@@ -1628,6 +1615,26 @@ internal fun removedFileUris(oldFiles: List<String>, newFiles: List<String>): Li
     val newSet = newFiles.toHashSet()
     return oldFiles.filter { it !in newSet }
 }
+
+/**
+ * Adapts a single MCP [tool] (selected for some server [serverId]) into the AI-SDK [Tool] shape
+ * (issue #244, DRY #1). This owns the one invariant the two pools (main-agent + subagent) must not
+ * let drift: the `"mcp__"` name prefix and the `callTool(serverId, tool.name, args)` wiring.
+ *
+ * [callTool] is injected (not the Android/Koin-coupled [McpManager]) so the mapping is a pure,
+ * JVM-unit-testable function — mirroring [selectMcpToolsForAssistant]/[callToolWithHeal] in McpManager.kt.
+ */
+internal fun mapMcpTool(
+    serverId: Uuid,
+    tool: McpTool,
+    callTool: suspend (Uuid, String, JsonObject) -> List<UIMessagePart>,
+): Tool = Tool(
+    name = "mcp__" + tool.name,
+    description = tool.description ?: "",
+    parameters = { tool.inputSchema },
+    needsApproval = tool.needsApproval,
+    execute = { callTool(serverId, tool.name, it.jsonObject) },
+)
 
 /**
  * Atomic streaming-UI publish seam (issue #108). Merges the accumulated [messages] into the LIVE
