@@ -40,7 +40,7 @@ dependencies {
     // okhttp
     api(libs.okhttp)
     api(libs.okhttp.sse)
-    api(libs.okhttp.logging)
+    implementation(libs.okhttp.logging)
 
     // kotlinx
     api(libs.kotlinx.serialization.json)
@@ -50,17 +50,12 @@ dependencies {
     // apache commons
     api(libs.commons.text)
 
-    // floating
-    // https://github.com/Petterpx/FloatingX
-    api(libs.floatingx)
-    api(libs.floatingx.compose)
-
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
 
     // quickjs
-    api(libs.quickjs)
+    implementation(libs.quickjs)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotest.property)
