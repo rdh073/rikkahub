@@ -9,6 +9,7 @@ import me.rerere.ai.runtime.contract.TurnMode
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.mcp.McpTool
 import me.rerere.rikkahub.data.ai.subagent.SPAWN_TOOL_NAME
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -62,16 +63,20 @@ class AppToolCatalogPolicyTest {
         Tool(name = SPAWN_TOOL_NAME, description = "", execute = { emptyList() })
 
     // serverId -> the McpTool that server exposes.
-    private fun catalog(serverTools: Map<Uuid, McpTool>): AppToolCatalog = AppToolCatalog(
-        baseTools = { _, _ ->
+    private fun catalog(
+        serverTools: Map<Uuid, McpTool>,
+        baseTools: suspend (AssistantConfig, TurnMode) -> List<Tool> = { _, _ ->
             listOf(tool("local_read"), tool("dangerous_write", needsApproval = true))
         },
+        spawnTool: (parentModelId: Uuid?) -> Tool? = { spawnToolStub() },
+    ): AppToolCatalog = AppToolCatalog(
+        baseTools = baseTools,
         mcpToolsForAssistant = { target ->
             // The REAL by-target selection idiom: only servers in the TARGET assistant's set.
             target.mcpServers.mapNotNull { id -> serverTools[id]?.let { id to it } }
         },
         mcpCall = { _, _, _ -> emptyList<UIMessagePart>() },
-        spawnTool = { spawnToolStub() },
+        spawnTool = spawnTool,
     )
 
     @Test
@@ -155,5 +160,77 @@ class AppToolCatalogPolicyTest {
         ).map { it.name }
 
         assertFalse(names.contains(SPAWN_TOOL_NAME))
+    }
+
+    /**
+     * The spawn tool's parent model must be the current (main/parent) assistant's own
+     * `chatModelId`, not `ctx.parentModelId` (which is null on a main turn). Production passes
+     * `parentModelId = assistant.chatModelId` at the spawn site so an UNPINNED subagent inherits
+     * the parent's model via `resolveSubagentModel`. If the adapter fed `ctx.parentModelId` here,
+     * the spawn tool would be built with null and that inheritance would silently break.
+     */
+    @Test
+    fun spawnToolBuiltWithParentAssistantModelOnMainTurn() = runBlocking {
+        val parentModel = Uuid.random()
+        var capturedParentModel: Uuid? = null
+        var spawnBuilt = false
+        val catalog = catalog(
+            serverTools = emptyMap(),
+            spawnTool = { parentModelId ->
+                capturedParentModel = parentModelId
+                spawnBuilt = true
+                spawnToolStub()
+            },
+        )
+        val main = assistant(Uuid.random(), mcpServers = emptySet()).copy(chatModelId = parentModel)
+
+        catalog.tools(
+            ToolAssemblyContext(
+                mode = TurnMode.Main,
+                targetAssistant = main,
+                // The subagent-turn carrier is null on a main turn; it must NOT be the spawn parent.
+                parentModelId = null,
+                allowApprovalTools = true,
+                includeSpawnTool = true,
+            )
+        )
+
+        assertTrue("spawn tool was built on a main turn", spawnBuilt)
+        assertEquals(
+            "spawn parent is the main assistant's own model, not the null subagent carrier",
+            parentModel,
+            capturedParentModel,
+        )
+    }
+
+    /**
+     * The spawn-strip (recursion guard) is orthogonal to the approval-strip. A base tool literally
+     * named `task` (== [SPAWN_TOOL_NAME]) must be stripped on ANY subagent context, even one that
+     * allows approval tools — production strips spawn unconditionally on every subagent pool
+     * (SubagentRunner -> filterToolsForSubagent), independent of approval stripping. Coupling the
+     * two would leak this tool whenever `allowApprovalTools` is true.
+     */
+    @Test
+    fun spawnNamedBaseToolStrippedOnSubagentEvenWhenApprovalAllowed() = runBlocking {
+        val catalog = catalog(
+            serverTools = emptyMap(),
+            baseTools = { _, _ -> listOf(tool("local_read"), tool(SPAWN_TOOL_NAME)) },
+        )
+        val sub = assistant(Uuid.random(), mcpServers = emptySet())
+
+        val names = catalog.tools(
+            ToolAssemblyContext(
+                mode = TurnMode.Subagent,
+                targetAssistant = sub,
+                parentModelId = Uuid.random(),
+                // The orthogonality boundary: a subagent context that nonetheless allows approval
+                // tools must STILL strip the recursion-guarded `task` tool.
+                allowApprovalTools = true,
+                includeSpawnTool = false,
+            )
+        ).map { it.name }
+
+        assertFalse("spawn-named base tool stripped on subagent pool", names.contains(SPAWN_TOOL_NAME))
+        assertTrue("non-spawn base tool retained", names.contains("local_read"))
     }
 }

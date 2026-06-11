@@ -48,15 +48,29 @@ class AppToolCatalog(
                 add(mapMcpTool(serverId, tool) { sid, name, args -> mcpCall(sid, name, args) })
             }
             if (ctx.mode == TurnMode.Main && ctx.includeSpawnTool) {
-                spawnTool(ctx.parentModelId)?.let { add(it) }
+                // The spawn parent is the current (main/parent) assistant's model, exactly as the
+                // production spawn site passes `parentModelId = assistant.chatModelId`
+                // (ChatService.buildGenerationTools). An unpinned subagent must inherit it via
+                // resolveSubagentModel, so it is the TARGET (= main) assistant here, not
+                // ctx.parentModelId (which is the SUBAGENT-turn carrier, null on a main turn).
+                spawnTool(ctx.targetAssistant.chatModelId)?.let { add(it) }
             }
         }
-        // Subagent pools (allowApprovalTools=false) drop approval-gated tools, and never carry the
-        // spawn tool regardless of source (recursion guard).
-        return if (ctx.allowApprovalTools) {
-            pool
+        // The spawn-strip (recursion guard) and the approval-strip are orthogonal policies, mirrored
+        // independently. Production strips the spawn tool from EVERY subagent pool unconditionally
+        // (SubagentRunner -> filterToolsForSubagent), keyed on the recursion-guard inputs, never on
+        // approval stripping; approval-gated tools are dropped separately when allowApprovalTools is
+        // false. Coupling them would let a base tool literally named `task` leak into a subagent pool
+        // that happens to allow approval tools.
+        val recursionGuarded = if (ctx.mode == TurnMode.Subagent || !ctx.includeSpawnTool) {
+            filterToolsForSubagent(pool)
         } else {
-            filterToolsForSubagent(pool).filterNot { it.needsApproval }
+            pool
+        }
+        return if (ctx.allowApprovalTools) {
+            recursionGuarded
+        } else {
+            recursionGuarded.filterNot { it.needsApproval }
         }
     }
 }

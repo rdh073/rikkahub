@@ -20,7 +20,10 @@ enum class TurnMode { Main, Subagent }
  * @param targetAssistant the assistant whose allowlist the pool is built from. For a subagent turn
  *   this is the SUB assistant, so MCP selection keys off the target — a subagent never inherits the
  *   parent's MCP servers (the §C3 by-target-assistant invariant).
- * @param parentModelId the spawning (parent) model id when [mode] is [TurnMode.Subagent], else null.
+ * @param parentModelId the spawning (parent) model id for a [TurnMode.Subagent] turn, else null.
+ *   It is the model the subagent should inherit when it pins none. On a [TurnMode.Main] turn the
+ *   spawn tool's parent model is NOT this field (it is null then) but [targetAssistant]'s own
+ *   `chatModelId` — the current/parent assistant's model — so an unpinned subagent inherits it.
  * @param allowApprovalTools when false, approval-gated tools are stripped from the pool (subagent
  *   pools drop `needsApproval` tools — §D).
  * @param includeSpawnTool when false, the subagent-spawn tool is absent (the structural recursion
