@@ -41,8 +41,8 @@ import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.hooks.useThrottle
 import me.rerere.rikkahub.ui.pages.chat.ChatVM
-import me.rerere.rikkahub.utils.UpdateDownload
-import me.rerere.rikkahub.utils.Version
+import me.rerere.rikkahub.utils.lifecycle.UpdateDownload
+import me.rerere.rikkahub.utils.lifecycle.Version
 import me.rerere.rikkahub.utils.onError
 import me.rerere.rikkahub.utils.onSuccess
 import me.rerere.rikkahub.utils.toLocalDateTime
