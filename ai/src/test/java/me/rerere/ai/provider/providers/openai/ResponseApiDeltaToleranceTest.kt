@@ -5,6 +5,7 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.util.KeyRoulette
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 
@@ -39,5 +40,16 @@ class ResponseApiDeltaToleranceTest {
             put("type", "response.some_future_event")
         }
         assertNull(api.parseResponseDelta(frame))
+    }
+
+    // The boundary the onEvent catch relies on: an UNKNOWN/absent type degrades to null (skipped,
+    // above), but a RECOGNIZED event missing a required field THROWS — and onEvent surfaces that via
+    // close(e) instead of silently swallowing it (#247 review: log-and-skip on a recognized frame
+    // hands the user a quietly-incomplete response). response.output_item.added requires `item`.
+    @Test
+    fun `a recognized event missing a required field throws rather than degrading to null`() {
+        assertThrows(Exception::class.java) {
+            api.parseResponseDelta(buildJsonObject { put("type", "response.output_item.added") })
+        }
     }
 }

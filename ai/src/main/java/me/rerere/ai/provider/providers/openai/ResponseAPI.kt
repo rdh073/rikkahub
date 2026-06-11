@@ -176,10 +176,15 @@ class ResponseAPI(
                 val chunk = try {
                     parseResponseDelta(json)
                 } catch (e: Exception) {
-                    // A single malformed SSE frame must not kill the stream; skip it.
-                    // Log metadata only — the frame data may carry user/model content.
+                    // An unknown/absent event TYPE already returns null from parseResponseDelta (a
+                    // skipped forward-compat frame — that is the intended tolerance). Reaching this
+                    // catch means a RECOGNIZED event was MALFORMED (e.g. a required field is missing).
+                    // Surface it as a stream failure rather than log-and-skip: silently dropping a
+                    // recognized frame hands the user a quietly-incomplete response with no error.
+                    // close(e) ends the flow gracefully (no app crash; the UI shows the failure).
                     AiLog.parseFailure(TAG, e)
-                    null
+                    close(e)
+                    return
                 }
                 if (chunk != null) {
                     trySend(chunk)
