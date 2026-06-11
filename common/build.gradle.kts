@@ -54,8 +54,11 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
 
-    // quickjs
-    implementation(libs.quickjs)
+    // quickjs — stays `api`: QuickJSContext is part of :common's PUBLIC ABI via the top-level
+    // `fun QuickJSContext.injectFetch(...)` extension (consumed by :search), so a consumer of that
+    // function needs QuickJS on its classpath transitively. Only okhttp-logging / floatingx (not in
+    // any public signature) were safe to demote to implementation.
+    api(libs.quickjs)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotest.property)
