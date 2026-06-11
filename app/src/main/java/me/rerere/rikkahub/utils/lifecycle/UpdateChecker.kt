@@ -1,6 +1,6 @@
 package me.rerere.rikkahub.utils.lifecycle
 
-import me.rerere.rikkahub.utils.UiState
+import me.rerere.common.state.UiState
 import me.rerere.rikkahub.utils.openUrl
 
 import android.app.DownloadManager
