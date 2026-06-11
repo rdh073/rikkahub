@@ -7,7 +7,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.common.json.JsonInstant
 import me.rerere.rikkahub.data.datastore.Settings
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -33,8 +32,9 @@ import org.junit.Test
  *
  * The assertion is structural, NOT raw-string identity: app `JsonInstant` uses the default
  * `explicitNulls = true`, so re-encode emits omitted nulls and reorders keys — expected, not a
- * regression. So the test walks the re-encoded tree and compares the SET of `"type"` discriminator
- * values found at the polymorphic paths against the frozen expected set.
+ * regression. So the test walks the re-encoded tree and asserts the ORDERED list of `"type"`
+ * discriminator values found at each SPECIFIC polymorphic array path against a frozen expected list
+ * (exact equality — extra/wrong/colliding discriminators are rejected, not tolerated).
  *
  * Pure JVM JUnit4, no Robolectric: none of these types touch android.* at encode/decode time
  * (Uri/Log live only in non-serialized helpers/@Transient fields; kotlin.uuid.Uuid serializes as a
@@ -47,25 +47,32 @@ class RuntimeSerializationCompatibilityTest {
     private fun reencodeTree(decodedReencoded: String): JsonObject =
         JsonInstant.parseToJsonElement(decodedReencoded) as JsonObject
 
-    /** Collect every `"type"` discriminator value anywhere in the tree (recursively). */
-    private fun collectDiscriminators(element: JsonElement, acc: MutableList<String>) {
-        when (element) {
-            is JsonObject -> {
-                element["type"]?.let { t ->
-                    runCatching { t.jsonPrimitive.content }.getOrNull()?.let { acc.add(it) }
-                }
-                element.values.forEach { collectDiscriminators(it, acc) }
+    /**
+     * Pull the ordered list of `"type"` discriminator values found at a SPECIFIC array path.
+     *
+     * Path segments are object keys; the final segment must address a `JsonArray` whose elements are
+     * `JsonObject`s carrying (or omitting) a `"type"` key. Returns the discriminator of each element
+     * in array order (null for an element without `"type"`).
+     *
+     * Path-scoped (vs. a recursive whole-tree collect) is the load-bearing property of this gate: it
+     * (a) pins each discriminator to the field that actually persists it, so a wrong/extra `"type"`
+     * elsewhere cannot vacuously satisfy the assertion, and (b) is immune to default sub-blobs that
+     * re-emit a colliding discriminator under `encodeDefaults = true` (e.g. the `ttsProviders`
+     * default contains a `TTSProviderSetting.OpenAI` whose `@SerialName` is also `"openai"`, which a
+     * whole-tree collect would let stand in for the `providers` `ProviderSetting.OpenAI`).
+     */
+    private fun typesAtArray(root: JsonObject, vararg path: String): List<String?> {
+        var current: JsonElement = root
+        for (segment in path) {
+            current = when (current) {
+                is JsonArray -> current[segment.toInt()]
+                is JsonObject -> current.getValue(segment)
+                else -> error("path segment '$segment' cannot index into $current")
             }
-
-            is JsonArray -> element.forEach { collectDiscriminators(it, acc) }
-            else -> {}
         }
-    }
-
-    private fun discriminatorsOf(json: JsonObject): Set<String> {
-        val acc = mutableListOf<String>()
-        collectDiscriminators(json, acc)
-        return acc.toSet()
+        return (current as JsonArray).map { element ->
+            (element as JsonObject)["type"]?.let { it.jsonPrimitive.content }
+        }
     }
 
     // ---- (1) Settings --------------------------------------------------------------------------
@@ -73,7 +80,7 @@ class RuntimeSerializationCompatibilityTest {
     @Test
     fun `settings legacy json round-trips and keeps SerialName discriminator semantics`() {
         // Frozen pre-move Settings exercising the persisted polymorphic members: ProviderSetting
-        // (openai/google/claude), Assistant.localTools (time_info/clipboard), a presetMessages
+        // (openai/google/claude), Assistant.localTools (time_info/clipboard/tts), a presetMessages
         // UIMessage with a text part, an AssistantRegex, plus a modeInjections entry and a Lorebook
         // entry.
         //
@@ -83,8 +90,9 @@ class RuntimeSerializationCompatibilityTest {
         // "type" discriminator for them on disk (a discriminator is only written when the static
         // type is the sealed base, which never happens in persistence — `List<PromptInjection>` is
         // used only in transient transformer logic). So the frozen fixture omits "type" on those
-        // entries, and the discriminator-set assertion below does NOT expect "mode"/"regex"; their
-        // compatibility is instead guarded by the value-equality round-trip at the end of this test.
+        // entries, and the path-scoped discriminator assertions below do NOT cover "mode"/"regex";
+        // their compatibility is instead guarded by direct literal assertions on the decoded value
+        // (decoded.modeInjections.single().name == "study" etc.) plus the value-equality round-trip.
         val legacySettings = """
             {
               "providers": [
@@ -96,7 +104,7 @@ class RuntimeSerializationCompatibilityTest {
                 {
                   "id": "11111111-1111-1111-1111-111111111111",
                   "name": "Legacy Assistant",
-                  "localTools": [ { "type": "time_info" }, { "type": "clipboard" } ],
+                  "localTools": [ { "type": "time_info" }, { "type": "clipboard" }, { "type": "tts" } ],
                   "presetMessages": [
                     {
                       "id": "22222222-2222-2222-2222-222222222222",
@@ -131,18 +139,35 @@ class RuntimeSerializationCompatibilityTest {
         """.trimIndent()
 
         val decoded = JsonInstant.decodeFromString<Settings>(legacySettings)
-        val tree = reencodeTree(JsonInstant.encodeToString(decoded))
-        val discriminators = discriminatorsOf(tree)
 
-        // The load-bearing assertion: every PERSISTED discriminator survives the round-trip.
-        val expected = setOf(
-            "openai", "google", "claude", // ProviderSetting
-            "time_info", "clipboard",     // LocalToolOption
-            "text",                       // UIMessagePart
+        // The fixture freezes the OLD on-disk shape; assert the decode actually mapped those literals
+        // (not silently dropped by `ignoreUnknownKeys = true` on a future @SerialName rename) BEFORE
+        // the round-trip. Without this, decode→encode→decode would be tautologically equal even if a
+        // rename had thrown the fixture's data away on the first decode.
+        assertEquals("study", decoded.modeInjections.single().name)
+        assertEquals("lb", decoded.lorebooks.single().name)
+        assertEquals(
+            listOf(
+                me.rerere.rikkahub.data.ai.tools.LocalToolOption.TimeInfo,
+                me.rerere.rikkahub.data.ai.tools.LocalToolOption.Clipboard,
+                me.rerere.rikkahub.data.ai.tools.LocalToolOption.Tts,
+            ),
+            decoded.assistants.single().localTools
         )
-        assertTrue(
-            "missing discriminators after Settings round-trip: ${expected - discriminators}",
-            discriminators.containsAll(expected)
+
+        val tree = reencodeTree(JsonInstant.encodeToString(decoded))
+
+        // The load-bearing assertion: every PERSISTED discriminator survives the round-trip, asserted
+        // at its SPECIFIC array path so a colliding discriminator elsewhere (e.g. the `ttsProviders`
+        // default's `TTSProviderSetting.OpenAI` under `encodeDefaults = true`) cannot stand in for it,
+        // and an EXTRA/wrong discriminator is rejected (exact list, not containsAll).
+        assertEquals(
+            listOf("openai", "google", "claude"),
+            typesAtArray(tree, "providers")
+        )
+        assertEquals(
+            listOf("time_info", "clipboard", "tts"),
+            typesAtArray(tree, "assistants", "0", "localTools")
         )
 
         // Value-equality round-trip guards the concrete-subtype fields (modeInjections /
@@ -186,10 +211,9 @@ class RuntimeSerializationCompatibilityTest {
         assertEquals(setOf(AssistantAffectScope.USER), decoded.regexes.single().affectingScope)
 
         val tree = reencodeTree(JsonInstant.encodeToString(decoded))
-        val discriminators = discriminatorsOf(tree)
-        assertTrue(
-            "localTools discriminators not preserved: ${discriminators}",
-            discriminators.containsAll(setOf("javascript_engine", "ask_user"))
+        assertEquals(
+            listOf("javascript_engine", "ask_user"),
+            typesAtArray(tree, "localTools")
         )
         // affectingScope enum SerialNames (enum entries serialize by name) survive.
         val scope = (tree["regexes"] as JsonArray)
@@ -222,6 +246,8 @@ class RuntimeSerializationCompatibilityTest {
                       "parts": [
                         { "type": "text", "text": "look at this" },
                         { "type": "image", "url": "file:///x.png" },
+                        { "type": "video", "url": "file:///v.mp4" },
+                        { "type": "audio", "url": "file:///a.mp3" },
                         { "type": "document", "url": "file:///d.pdf", "fileName": "d.pdf" }
                       ]
                     },
@@ -259,16 +285,30 @@ class RuntimeSerializationCompatibilityTest {
 
         val decoded = JsonInstant.decodeFromString<Conversation>(legacyConversation)
         val tree = reencodeTree(JsonInstant.encodeToString(decoded))
-        val discriminators = discriminatorsOf(tree)
 
-        val expected = setOf(
-            "text", "image", "document", "reasoning", "tool", // UIMessagePart subtypes
-            "denied", "answered",                              // ToolApprovalState
-            "url_citation",                                    // UIMessageAnnotation
+        // Path-scoped discriminator assertions: each polymorphic member is pinned at the exact array
+        // it persists in, so a colliding "type" elsewhere cannot vacuously satisfy the gate and an
+        // extra/wrong discriminator is rejected (exact list equality, not containsAll).
+        assertEquals(
+            listOf("text", "image", "video", "audio", "document"), // UIMessagePart subtypes (user)
+            typesAtArray(tree, "messageNodes", "0", "messages", "0", "parts")
         )
-        assertTrue(
-            "missing discriminators after Conversation round-trip: ${expected - discriminators}",
-            discriminators.containsAll(expected)
+        assertEquals(
+            listOf("reasoning", "tool", "tool"), // UIMessagePart subtypes (assistant)
+            typesAtArray(tree, "messageNodes", "0", "messages", "1", "parts")
+        )
+        // approvalState is a single polymorphic OBJECT (not an array) nested in each tool part.
+        val assistantParts =
+            (((tree["messageNodes"] as JsonArray)[0] as JsonObject)["messages"] as JsonArray)
+                .let { it[1] as JsonObject }["parts"] as JsonArray
+        assertEquals(
+            listOf("denied", "answered"), // ToolApprovalState
+            listOf(assistantParts[1] as JsonObject, assistantParts[2] as JsonObject)
+                .map { (it["approvalState"] as JsonObject)["type"]!!.jsonPrimitive.content }
+        )
+        assertEquals(
+            listOf("url_citation"), // UIMessageAnnotation
+            typesAtArray(tree, "messageNodes", "0", "messages", "1", "annotations")
         )
         // Value-equality cross-check: data classes round-trip identically.
         val redecoded = JsonInstant.decodeFromString<Conversation>(JsonInstant.encodeToString(decoded))
@@ -305,11 +345,10 @@ class RuntimeSerializationCompatibilityTest {
 
         val decoded = JsonInstant.decodeFromString<MessageNode>(legacyNode)
         val tree = reencodeTree(JsonInstant.encodeToString(decoded))
-        val discriminators = discriminatorsOf(tree)
 
-        assertTrue(
-            "missing part discriminators after MessageNode round-trip",
-            discriminators.containsAll(setOf("reasoning", "text", "tool"))
+        assertEquals(
+            listOf("reasoning", "text", "tool"),
+            typesAtArray(tree, "messages", "0", "parts")
         )
         val redecoded = JsonInstant.decodeFromString<MessageNode>(JsonInstant.encodeToString(decoded))
         assertEquals(decoded, redecoded)
