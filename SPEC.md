@@ -1,8 +1,8 @@
 # Spec: User-configurable event-hooks (PreToolUse / UserPromptSubmit / Stop) — Issues #200, #202
 
-> Source of truth: GitHub issue **#200** (arch-design proposal + the owner's 4-comment
-> design-gate review, `@rdh073`, rounds 1 & 2) and the **#202** epic that frames execution
-> order/conflict policy. The issue bodies + the owner design-proposal comments ARE the primary
+> Source of truth: GitHub issue **#200** (arch-design proposal + the owner's design-gate
+> comments, `@rdh073`: round-1 reject, round-2 re-gate, reopen note) and the **#202** epic that
+> frames execution order/conflict policy. The issue bodies + the owner design-proposal comments ARE the primary
 > requirement. This spec reconciles them against the **actual current code**, which has moved
 > since the review was written (the tool-exec/approval loop now lives in `ai-runtime`'s
 > `ChatTurnRuntime`, not `GenerationHandler.kt:190-302` as the review cites). Stale anchors are
@@ -63,7 +63,7 @@ master, but its hook type is a hooks-v2 that depends on hooks-v1 landing first).
   OkHttp, QuickJS (`wang.harlon.quickjs:wrapper-android:3.2.3` — **not used in v1**).
 - Tests: JUnit + AndroidX Test; **property tests use `io.kotest:kotest-property:6.1.11`**
   (`Arb` / `checkAll` + JUnit `assert*`), matching the existing
-  `ToolApprovalStateInvariantPropertyTest.kt` style.
+  `ai/src/test/java/me/rerere/ai/ui/ToolApprovalStateInvariantPropertyTest.kt` style.
 - Modules touched: `ai-runtime` (the turn loop + new pure primitives + dispatcher port), `app`
   (executors, Koin wiring, UI, import-trust, backup), `ai` (the cancellation fix in the shared
   `Call.await()` lives in `common`/`ai` — see §Cancellation).
@@ -102,9 +102,10 @@ ai-runtime/src/main/java/me/rerere/ai/runtime/
 app/src/main/java/me/rerere/rikkahub/
   data/ai/hooks/LlmHookExecutor.kt        → NEW: fastModel single-shot, cancellation-aware, short per-hook timeout
   data/ai/hooks/HookExecutorRegistry.kt   → NEW: Koin composition root binds HookHandler.Llm -> LlmHookExecutor
-  service/ChatService.kt                  → TOUCHED: UserPromptSubmit (on send) + Stop dispatch fire-points
+  service/ChatService.kt                  → TOUCHED: UserPromptSubmit (sendMessage:566) + Stop dispatch fire-points
   data/model/Assistant.kt                 → TOUCHED: additive `val hooks: HookConfig = HookConfig()`
   data/sync/archive/BackupArchiveRestorer.kt → TOUCHED: route restored assistants through import-trust untrust
+  ui/pages/assistant/detail/AssistantImporter.kt → TOUCHED: force imported assistants' hooks untrusted (H4)
   ui/pages/assistant/detail/
     AssistantHooksPage.kt                 → NEW: sibling of AssistantMcpPage; editor + import-trust grant + "test hook"
   di/...                                  → TOUCHED: Koin module binds the executor registry + dispatcher
@@ -121,13 +122,18 @@ The owner's review cites a pre-refactor layout. The **current** seams are:
 
 | Review's claim (issue #200) | Current reality (verified file:line) |
 |---|---|
-| approval seam `GenerationHandler.kt:190-228` / execute `:237-302` | Moved to `ai-runtime/.../ChatTurnRuntime.kt:184-238` (approval gate) + `executeTool` at `:480-560` (the `else -> execute` branch is `:524+`). `GenerationHandler.kt` is now a thin app wrapper delegating to `ChatTurnRuntime` (issue #243 slice 9). |
+| approval seam `GenerationHandler.kt:190-228` / execute `:237-302` | Moved to `ai-runtime/.../ChatTurnRuntime.kt:184-238` (approval gate) + `executeTool` at `:481` (the `else -> execute` branch is `:515+`). `GenerationHandler.kt` is now a thin app wrapper delegating to `ChatTurnRuntime` (issue #243 slice 9). |
 | `ToolApprovalState` states + no `updatedInput` | Confirmed: `Message.kt:342-363` (`Auto/Pending/Approved/Denied/Answered`); rewrite via `tool.copy(input=…)` — `UIMessagePart.Tool.input` is a raw JSON `String` (`Message.kt:468-476`). |
-| per-Assistant additive field, `@Serializable`, no migration | Confirmed: `Assistant` `@Serializable` (`Assistant.kt:16-62`); pattern of additive defaulted fields already present (`localTools:44`, `mcpServers:43`, `enabledSkills:51`, `spawnable:57`, `uiAutomationEnabled:62`). |
-| AssistantImporter is the import vector | Confirmed: `AssistantImporter.kt` `onImport:(Assistant)->Unit` (`:67`), SillyTavern JSON/PNG. |
+| per-Assistant additive field, `@Serializable`, no migration | Confirmed: `Assistant` `@Serializable` (`Assistant.kt:16-63`); pattern of additive defaulted fields already present (`localTools:44`, `mcpServers:43`, `enabledSkills:51`, `spawnable:57`, `uiAutomationEnabled:63`). |
+| AssistantImporter is the import vector | Confirmed: `app/.../ui/pages/assistant/detail/AssistantImporter.kt` `onImport:(Assistant)->Unit` (`:67`), SillyTavern JSON/PNG. |
 | Backup-restore is a SECOND vector (round-2 H4) | Confirmed: `AndroidBackupArchiveEnvironment` `decodeFromString<Settings>` (`:31`) → `Settings.assistants`; `BackupArchiveRestorer.kt:43` `restoreSettingsJson`. |
 | LLM call not cancellable (round-2 H1) | Confirmed STILL OPEN: `common/http/Request.kt` `Call.await()` uses `suspendCancellableCoroutine` but registers **no** `invokeOnCancellation { cancel() }`; shared client `readTimeout(10, MINUTES)` (`DataSourceModule.kt:211`). |
 | "QuickJS sandboxed by construction" conditional (net bridge exists) | Confirmed: `QuickJSFetch.injectFetch` installs `globalThis.fetch` (`QuickJSFetch.kt:53-107`). Moot for v1 (no JS); re-applies in v2. |
+
+All anchors in this table re-verified against the working tree on 2026-06-12 (branch
+`feat/hooks-event-system`, base `667f178f`). Notably `Call.await()`
+(`common/src/main/java/me/rerere/common/http/Request.kt:11-27`) still registers no
+`invokeOnCancellation` — H1 remains open and is in scope.
 
 ---
 

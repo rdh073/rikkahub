@@ -1,221 +1,249 @@
 # Implementation Plan: User-configurable event-hooks (PreToolUse / UserPromptSubmit / Stop)
 
-Issues: #200 (arch-design + owner design-gate, rounds 1 & 2), #202 (epic / conflict policy).
-Branch: `feat/hooks-event-system` (already checked out). One branch, both issues.
+Spec: `SPEC.md` (v1 = LLM hooks only + H1 cancellation fix + H4 import-trust + H2
+pre-approval rewrite). Issues: Refs #200, Refs #202. Branch: `feat/hooks-event-system`,
+base `667f178f`.
 
 ## Overview
 
-Add a per-Assistant event-hooks system firing at three agent-loop lifecycle points
-(PreToolUse / UserPromptSubmit / Stop). Hooks can **gate** a tool (deny/ask/allow),
-**modify** a tool's input before approval, or **inject context**. v1 ships **LLM hooks
-only** (owner-prescribed Option A) plus the two round-2 blockers: H1 cancellation-aware
-provider call, H4 import-trust over both ingestion vectors, and H2 pre-approval input
-rewrite. `js`/QuickJS, `subagent`, `http` hook types and PostToolUse are explicitly v2 —
-not implemented here.
+Add per-Assistant lifecycle hooks that can gate (deny/ask/allow), rewrite tool input
+pre-approval, and inject context — all wired through the EXISTING `ToolApprovalState`
+machine (no new exec path). v1 ships only the `llm` handler type; `js`/`subagent`/`http`
+and PostToolUse are v2 by owner decision. Two round-2 blockers are in scope: H1
+(`Call.await()` must honor coroutine cancellation) and H4 (import-trust gate on both
+ingestion vectors).
 
 ## Architecture Decisions
 
-- **Pure-first, bottom-up.** Config types → pure primitives (`aggregate`/`matches`/
-  `parseHookOutput`) → cancellation root-cause fix → DIP dispatcher+port → concrete
-  executor → loop wiring → import-trust → UI. The pure primitives live in `ai-runtime`
-  (no product flavor) where CI gates cheapest.
-- **DIP at the dispatcher.** The turn loop calls `dispatch(event,…)` and never names a
-  handler; executors are injected at the Koin composition root. Adding a v2 handler type
-  is additive — zero edits to the loop or dispatcher.
-- **No new exec path.** Decisions map onto the existing `ToolApprovalState` machine
-  (`Denied`/`Pending`/`Auto-Approved`). The dispatcher only feeds that machine + a
-  separate pre-approval input rewrite step.
-- **H1 fix at root cause.** `Call.await()` in `common/http/Request.kt` lacks
-  `invokeOnCancellation { cancel() }`; fixing it there makes every provider caller
-  cancellable, not just hooks. Its OWN commit — touches a non-hook shared seam.
-- **Additive serialization.** `Assistant.hooks: HookConfig = HookConfig()` is defaulted so
-  old JSON decodes; `HookConfig.trusted: Boolean = false` defaults untrusted.
-
-## Dependency Graph
-
-```
-T1 Config types (Assistant.hooks)
-   │
-   ├── T2 Pure primitives + PBT (aggregate / matches / parseHookOutput)
-   │       │
-   │       ├── T4 Dispatcher + executor port + Koin registry (DIP)
-   │       │       │
-   │       │       └── T5 LlmHookExecutor (concrete, cancellation-aware) ── needs T3
-   │       │               │
-   │       │               ├── T6 Wire PreToolUse + updatedInput rewrite (ChatTurnRuntime, H2)
-   │       │               └── T7 Wire UserPromptSubmit + Stop (ChatService)
-   │       │
-   │       └── (primitives also consumed by T6/T7)
-   │
-   ├── T3 H1 cancellation fix (Call.await) — independent, parallel to T2/T4
-   │
-   └── T8 Import-trust H4 (force trusted=false on both vectors)
-           │
-           └── T9 AssistantHooksPage UI (editor + grant + test-hook) ── needs T5
-                   │
-T6,T7,T9 ──────────┴── T10 Tool-step "by hook" indicator (no silent action)
-```
+- Pure decision primitives (`aggregate`, `matches`, `parseHookOutput`) live in
+  `ai-runtime` — flavor-free, fast, CI gates on `:ai-runtime:test`.
+- DIP: `HookDispatcher` depends on the `HookExecutor` port; `LlmHookExecutor` is bound
+  at the Koin composition root. Adding a v2 handler is additive — zero loop edits.
+- H2 ordering: PreToolUse dispatch + `updatedInput` rewrite run BEFORE the approval
+  gate sets `Pending` (`ChatTurnRuntime.kt:184-222`); approval tracks `toolCallId`, so
+  post-approval rewrite would approve stale input.
+- H1 fix at root cause: `common/http/Request.kt` `Call.await()` registers
+  `invokeOnCancellation { cancel() }`. Own commit — shared seam touching non-hook paths.
+- Trust flag in-record (`HookConfig.trusted = false` default), forced `false` on both
+  import paths; in-app authoring sets `true` (spec Assumption 3, open Q #5 default).
+- Matcher: exact tool-name OR regex; `null` = always (open Q #3 conservative default).
 
 ## Task List
 
-### Phase 1: Foundation (pure, fast-testable)
+Each task = one commit. T2/T3 split the spec's plan-step 2 to keep slices thin; T7/T8
+split step 5 by module; T9/T10 split step 6 into enforcement vs UI.
 
-- **T1 — Config types: `Assistant.hooks: HookConfig`**
-  Add `HookConfig`/`HookEvent`/`HookMatcher`/`HookHandler` (sealed, `Llm` only) +
-  `AggregatedHookResult`/`HookDecision`, and the additive defaulted `hooks` field on
-  `Assistant`. Verify migrators don't choke on old JSON.
-  Files: `ai-runtime/.../hooks/HookConfig.kt` (NEW), `app/.../data/model/Assistant.kt`,
-  `app/src/test/.../AssistantHooksSerializationTest.kt` (NEW).
-  Acceptance: existing assistant JSON with no `hooks` field decodes unchanged (roundtrip
-  test green); `HookConfig.trusted` defaults `false`; `:ai-runtime:test` +
-  `:app:testPlayDebugUnitTest` compile and pass. Deps: none. Risk: normal.
+### Phase 1: Foundation (pure, no behavior change)
 
-- **T2 — Pure primitives + property tests**
-  `aggregate()` (deny>ask>allow, context concatenation, updatedInput chaining),
-  `matches()`/`matchesIf()` (null=always; exact OR regex), `parseHookOutput()`
-  (error-not-throw on malformed JSON; reject event-name mismatch). kotest-property suites.
-  Files: `ai-runtime/.../hooks/HookPrimitives.kt` (NEW),
-  `ai-runtime/src/test/.../HookPrimitivesPropertyTest.kt`,
-  `.../HookAggregatePropertyTest.kt` (NEW).
-  Acceptance: PBT green in `:ai-runtime:test` for INVARIANT deny>ask>allow (metamorphic:
-  adding Allow never weakens), BOUNDARY empty→passthrough, CONSERVATION context concat,
-  DETERMINISM rewrite order, parse malformed→typed failure, event-spoof→rejected.
-  Deps: T1. Risk: normal.
+#### T1: Hook config types + additive `Assistant.hooks` field
+**Description:** `HookConfig`/`HookEvent`/`HookMatcher`/`HookHandler.Llm` (sealed,
+`@SerialName("llm")`, `failClosed`, `trusted: Boolean = false` on `HookConfig`) in
+`ai-runtime/.../hooks/HookConfig.kt`; additive defaulted `val hooks: HookConfig =
+HookConfig()` on `Assistant`.
+**Acceptance criteria:**
+- [ ] Old assistant JSON (no `hooks` field) decodes unchanged — roundtrip test; verified
+      against `SettingsJsonMigrator` / `PreferenceStoreV3Migration` (not assumed).
+- [ ] `HookConfig` with an `llm` handler serializes/deserializes round-trip.
+- [ ] Only the `Llm` variant exists (no `Js`/`Subagent` in v1).
+**Verification:** `./gradlew :ai-runtime:test :app:testPlayDebugUnitTest`
+**Dependencies:** None
+**Files:** `ai-runtime/src/main/java/me/rerere/ai/runtime/hooks/HookConfig.kt` (NEW),
+`app/src/main/java/me/rerere/rikkahub/data/model/Assistant.kt`, decode-roundtrip test
+**Scope:** S | **Risk:** normal
 
-- **T3 — H1: cancellation-aware `Call.await()`**
-  Register `continuation.invokeOnCancellation { this@await.cancel() }` in
-  `common/http/Request.kt`. Failing-before/passing-after regression test asserting a
-  cancelled coroutine cancels the in-flight call. OWN commit (shared seam, non-hook path).
-  Files: `common/.../http/Request.kt`,
-  `common/src/test/.../http/CallAwaitCancellationTest.kt` (NEW).
-  Acceptance: test fails on the pre-fix code and passes after; success-path behavior
-  unchanged (no regression in non-stream provider callers). Deps: none. Risk: normal.
+#### T2: Pure primitives — `aggregate` + `matches`/`matchesIf` + PBT
+**Description:** `AggregatedHookResult`, `HookDecision`, `aggregate()`, `matches()`,
+`matchesIf()` in `HookPrimitives.kt` + kotest-property 6.1.11 suites (style of
+`ToolApprovalStateInvariantPropertyTest.kt`).
+**Acceptance criteria:**
+- [ ] PBT green: deny>ask>allow invariant; metamorphic
+      `aggregate(S+[Allow]).decision == aggregate(S).decision`; empty set → Allow
+      passthrough; `additionalContext` concatenation order-stable; `updatedInput`
+      chaining order-deterministic.
+- [ ] `matches`: null matcher always matches; exact tool-name and regex both covered.
+**Verification:** `./gradlew :ai-runtime:test`
+**Dependencies:** T1
+**Files:** `ai-runtime/.../hooks/HookPrimitives.kt` (NEW),
+`ai-runtime/src/test/java/me/rerere/ai/runtime/hooks/HookAggregatePropertyTest.kt`,
+`.../HookPrimitivesPropertyTest.kt`
+**Scope:** S | **Risk:** normal
 
-### Checkpoint A — Foundation
-- [ ] `:ai-runtime:test` green (config roundtrip + all primitive PBT)
-- [ ] `common` cancellation regression green
-- [ ] No public signature change in `ai`/`ai-runtime`
+#### T3: Pure primitives — `parseHookOutput` + PBT
+**Description:** `parseHookOutput()` returning a typed result (never throws to the
+loop), with event-name validation (spoof rejection), + property tests.
+**Acceptance criteria:**
+- [ ] Malformed JSON → typed failure, never an exception (PBT over garbage inputs).
+- [ ] Output claiming a different event than dispatched is rejected.
+- [ ] Valid Allow/Ask/Deny + `updatedInput` + `additionalContext` roundtrip (PBT).
+**Verification:** `./gradlew :ai-runtime:test`
+**Dependencies:** T1
+**Files:** `ai-runtime/.../hooks/HookPrimitives.kt` (extend),
+`ai-runtime/src/test/.../HookPrimitivesPropertyTest.kt` (extend)
+**Scope:** XS | **Risk:** normal
 
-### Phase 2: Dispatch & execution (DIP)
+#### T4: H1 — `Call.await()` cancellation fix + regression test
+**Description:** Register `continuation.invokeOnCancellation { this@await.cancel() }`
+in `common/http/Request.kt:11-27`. Own commit; surfaced in the PR body as the
+load-bearing change (touches non-hook provider paths `ChatCompletionsAPI.kt:98`,
+`ResponseAPI.kt:104` — strict improvement, no success-path change).
+**Acceptance criteria:**
+- [ ] Regression test failing-before/passing-after: cancelling the awaiting coroutine
+      invokes `Call.cancel()` (fake/mock `Call`).
+- [ ] Success and failure paths of `await()` behave exactly as before.
+**Verification:** `./gradlew :common:test` (module test task) then `./gradlew test`
+**Dependencies:** None (parallel-safe with T1-T3)
+**Files:** `common/src/main/java/me/rerere/common/http/Request.kt`, new `common` test
+**Scope:** XS | **Risk:** normal
 
-- **T4 — Dispatcher + executor port + Koin registry (DIP)**
-  `HookExecutor` port interface, `HookDispatcher.dispatch(event,input,ctx)` (registry
-  lookup → matcher filter → per-handler executor under `withTimeoutOrNull(perHookTimeout)`
-  → `parseHookOutput` → `aggregate`), `failClosed` error→Deny, Koin
-  `HookExecutorRegistry`. No concrete executor here.
-  Files: `ai-runtime/.../hooks/HookExecutor.kt`, `.../hooks/HookDispatcher.kt` (NEW),
-  `app/.../data/ai/hooks/HookExecutorRegistry.kt` (NEW), `app/.../di/*` (Koin),
-  `ai-runtime/src/test/.../HookDispatcherTest.kt` (NEW, fake executor).
-  Acceptance: dispatcher resolves handlers only via injected port (no `LlmHookExecutor`
-  import); failClosed executor error/timeout → aggregated Deny; non-failClosed error →
-  Allow (logged); test with fake executor green. Deps: T2. Risk: normal.
+### Checkpoint A (after T1-T4)
+- [ ] `./gradlew :ai-runtime:test` and `./gradlew test` green; zero app behavior change.
 
-- **T5 — LlmHookExecutor (concrete, cancellation-aware)**
-  `fastModel` single-shot; dedicated short per-hook `callTimeout` OkHttpClient (never
-  inherits the 10-min ceiling); cancellation propagates to the call (relies on T3);
-  `failClosed` error→Deny.
-  Files: `app/.../data/ai/hooks/LlmHookExecutor.kt` (NEW), Koin binding update,
-  `app/src/test/.../LlmHookExecutorTest.kt` (NEW, fake `Call`).
-  Acceptance: a cancelled hook coroutine invokes `Call.cancel()` (asserted on fake Call);
-  per-hook short timeout honored independent of shared 10-min readTimeout; failClosed
-  error→Deny; default model resolves to `settings.fastModelId` when `model == null`.
-  Deps: T4, T3. Risk: normal.
+### Phase 2: Dispatch machinery
 
-### Checkpoint B — Dispatch
-- [ ] Dispatcher + executor unit tests green; DIP verified (loop/dispatcher import no concrete)
-- [ ] `:app:testPlayDebugUnitTest` green
+#### T5: `HookExecutor` port + `HookDispatcher` (DIP)
+**Description:** Port interface + dispatcher in `ai-runtime`: registry lookup by event
+→ matcher filter → executor lookup via injected port →
+`withTimeoutOrNull(perHookTimeout)` → `parseHookOutput` → `aggregate`.
+**Acceptance criteria:**
+- [ ] `dispatch(event, input, ctx)` returns `AggregatedHookResult`; the loop never sees
+      individual handlers (unit test with fake executors).
+- [ ] failClosed executor error/timeout aggregates as Deny; non-failClosed error
+      contributes Allow (logged, not swallowed silently).
+- [ ] Untrusted `HookConfig` (`trusted=false`) dispatches as passthrough — no executor
+      invoked (test).
+**Verification:** `./gradlew :ai-runtime:test`
+**Dependencies:** T2, T3
+**Files:** `ai-runtime/.../hooks/HookExecutor.kt` (NEW),
+`ai-runtime/.../hooks/HookDispatcher.kt` (NEW), dispatcher unit test
+**Scope:** S | **Risk:** normal
 
-### Phase 3: Loop wiring & fire-points
+#### T6: `LlmHookExecutor` + Koin registry binding
+**Description:** fastModel single-shot executor (model = handler's or
+`settings.fastModelId`), short per-hook `callTimeout` independent of the shared 10-min
+client ceiling, cancellation-aware (rides T4); `HookExecutorRegistry` bound at the Koin
+composition root.
+**Acceptance criteria:**
+- [ ] `LlmHookExecutorTest`: cancelled hook coroutine cancels the underlying call
+      (assert `Call.cancel()` via fake); short per-hook timeout honored; failClosed
+      error → Deny.
+- [ ] Koin module resolves `HookDispatcher` with the `Llm → LlmHookExecutor` binding.
+**Verification:** `./gradlew :app:testPlayDebugUnitTest`
+**Dependencies:** T4, T5
+**Files:** `app/src/main/java/me/rerere/rikkahub/data/ai/hooks/LlmHookExecutor.kt` (NEW),
+`app/.../data/ai/hooks/HookExecutorRegistry.kt` (NEW), `app/.../di/...` (Koin module),
+`app/src/test/.../data/ai/hooks/LlmHookExecutorTest.kt`
+**Scope:** M | **Risk:** normal
 
-- **T6 — Wire PreToolUse + pre-approval `updatedInput` rewrite (H2)**
-  In `ChatTurnRuntime` (~`:184-238`): for each not-yet-executed tool dispatch PreToolUse,
-  apply `updatedInput` via `tool.copy(input=…)` as a SEPARATE explicit step (not folded
-  into `ToolApprovalState`), then map decision: `Deny→Denied(reason)`, `Ask→Pending`,
-  `Allow→Auto/Approved`; THEN the existing `needsApproval→Pending` gate runs on the
-  rewritten tool. No new exec path.
-  Files: `ai-runtime/.../ChatTurnRuntime.kt`,
-  `ai-runtime/src/test/.../ChatTurnRuntimePreToolUseTest.kt` (NEW).
-  Acceptance: `Deny` → tool reaches `ToolApprovalState.Denied`; `Ask` → `Pending`;
-  `Allow`+`updatedInput` rewrites `tool.input` BEFORE the approval gate sets `Pending`
-  (assert order); no behavior change when no hooks match. Deps: T5. Risk: normal.
+### Phase 3: Fire-points (behavior goes live)
 
-- **T7 — Wire UserPromptSubmit (on send) + Stop dispatch**
-  Fire UserPromptSubmit on send in `ChatService` injecting `additionalContext`; fire Stop
-  injecting context / honoring `preventContinuation`.
-  Files: `app/.../service/ChatService.kt`,
-  `app/src/test/.../ChatServiceHookFirePointsTest.kt` (NEW).
-  Acceptance: UserPromptSubmit `additionalContext` is injected into the outgoing turn;
-  Stop `preventContinuation=true` halts continuation; Stop `additionalContext` injected.
-  Deps: T5. Risk: normal.
+#### T7: Wire PreToolUse + pre-approval `updatedInput` rewrite (H2)
+**Description:** In `ChatTurnRuntime.kt:184-238`, for each not-yet-executed tool:
+dispatch PreToolUse → apply `tool.copy(input = updatedInput)` as a separate explicit
+step (NOT folded into `ToolApprovalState`) → map Deny→`Denied(reason)`, Ask→`Pending`,
+Allow→leave `Auto`/`Approved` → THEN the existing `needsApproval` gate runs on the
+rewritten tool. Re-verify the line anchors against the working tree first.
+**Acceptance criteria:**
+- [ ] Deny blocks via existing `ToolApprovalState.Denied` with the hook's reason (test).
+- [ ] Ask routes to the existing HITL `Pending` (test).
+- [ ] Allow + `updatedInput` rewrites `tool.input` BEFORE the approval gate — the
+      approval prompt sees the rewritten input (test asserts ordering).
+- [ ] No hooks configured → loop behavior unchanged (all existing tests still green).
+**Verification:** `./gradlew :ai-runtime:test` then `./gradlew test`
+**Dependencies:** T5
+**Files:** `ai-runtime/.../ChatTurnRuntime.kt`, runtime wiring test
+**Scope:** M | **Risk:** normal
 
-### Checkpoint C — Core flow end-to-end
-- [ ] PreToolUse deny/ask/allow + rewrite proven in `:ai-runtime:test`
-- [ ] UserPromptSubmit + Stop proven in app tests
+#### T8: Wire UserPromptSubmit + Stop into `ChatService`
+**Description:** Dispatch UserPromptSubmit at the send seam (`ChatService.kt:566`)
+injecting `additionalContext`; dispatch Stop at turn end honoring
+`preventContinuation` + context injection.
+**Acceptance criteria:**
+- [ ] UserPromptSubmit `additionalContext` is appended to the outgoing turn (test).
+- [ ] Stop `preventContinuation=true` stops continuation; Stop context injection works
+      (test).
+- [ ] No hooks configured → send/stop paths unchanged.
+**Verification:** `./gradlew :app:testPlayDebugUnitTest`
+**Dependencies:** T6, T7
+**Files:** `app/src/main/java/me/rerere/rikkahub/service/ChatService.kt`, app unit test
+**Scope:** S | **Risk:** normal
 
-### Phase 4: Import-trust & UX
+### Checkpoint B (after T5-T8)
+- [ ] End-to-end: an `llm` PreToolUse hook on a trusted Assistant denies/rewrites a
+      tool through the existing approval machine; `./gradlew test` green.
 
-- **T8 — Import-trust H4: force `trusted=false` on both vectors**
-  Route restored assistants through untrust in `BackupArchiveRestorer` /
-  `AndroidBackupArchiveEnvironment.restoreSettingsJson` (force every assistant's
-  `HookConfig.trusted=false` after decode) AND in `AssistantImporter.onImport`
-  (SillyTavern JSON/PNG). In-app-authored hooks stay trusted.
-  Files: `app/.../data/sync/archive/BackupArchiveRestorer.kt`,
-  `app/.../ui/pages/assistant/detail/AssistantImporter.kt`,
-  `app/src/test/.../ImportTrustTest.kt` (NEW).
-  Acceptance: assistants from `AssistantImporter` AND backup-restore both yield
-  `HookConfig.trusted == false`; in-app-authored hooks remain `trusted == true`;
-  untrusted hooks do NOT run in the dispatcher. Deps: T8 wiring depends on T1; trust gate
-  honored by T4. Deps: T4. Risk: normal.
+### Phase 4: Import-trust + UX
 
-- **T9 — AssistantHooksPage (editor + import-trust grant + test-hook)**
-  New sibling of `AssistantMcpPage`: per-event hook editor (prompt + target model),
-  import-trust review surface (prompt text + model + privilege tier "data egress, medium")
-  with a Grant button, and a "test hook" button that runs the executor once.
-  Files: `app/.../ui/pages/assistant/detail/AssistantHooksPage.kt` (NEW),
-  navigation/registration wiring.
-  Acceptance: page edits `Assistant.hooks`; untrusted hooks show the review surface and a
-  Grant action flips `trusted=true`; test-hook button invokes `LlmHookExecutor` and shows
-  its decision; in-app-created hooks are trusted on creation. Deps: T5, T8. Risk: normal.
+#### T9: H4 — import-trust enforcement on BOTH vectors
+**Description:** Force `HookConfig.trusted = false` in `AssistantImporter.onImport`
+(SillyTavern JSON/PNG, `:67`) and in `BackupArchiveRestorer` /
+`AndroidBackupArchiveEnvironment.restoreSettingsJson` (after `Settings.assistants`
+decode). In-app-authored hooks are created `trusted = true`.
+**Acceptance criteria:**
+- [ ] `ImportTrustTest`: import via `AssistantImporter` yields `trusted == false` even
+      when the imported JSON carries `trusted: true`.
+- [ ] Backup-restore forces `trusted == false` on every restored assistant.
+- [ ] In-app-authored hooks remain trusted.
+**Verification:** `./gradlew :app:testPlayDebugUnitTest`
+**Dependencies:** T1 (runtime enforcement of untrusted = T5's passthrough)
+**Files:** `app/.../ui/pages/assistant/detail/AssistantImporter.kt`,
+`app/.../data/sync/archive/BackupArchiveRestorer.kt`,
+`app/src/test/.../data/ai/hooks/ImportTrustTest.kt`
+**Scope:** S | **Risk:** normal
 
-- **T10 — Tool-step "by hook" indicator (no silent action)**
-  Surface a visible "blocked/modified by hook" badge by reusing `ChatMessageToolStep`
-  `isDenied`/`isPending` rendering, so hook-driven deny/ask is never silent.
-  Files: `app/.../ui/components/chat/ChatMessageToolStep.kt` (or sibling),
-  related rendering.
-  Acceptance: a hook-denied tool renders a visible "by hook" indicator; a hook-asked tool
-  shows the HITL pending UI; manual visual check in the play-debug build. Deps: T6, T7, T9.
-  Risk: normal.
+#### T10: `AssistantHooksPage` editor + trust grant + "by hook" indicator
+**Description:** New page, sibling of `AssistantMcpPage` (open Q #6 default): list/edit
+`llm` hooks (prompt, model, failClosed, matcher, event); import-trust review surface
+(prompt text + target model + privilege tier "llm = data egress to provider, medium")
+with grant action; "test hook" button; tool-step "blocked by hook" badge reusing
+`ChatMessageToolStep` isDenied/isPending — never silent.
+**Acceptance criteria:**
+- [ ] User can author/edit/delete an `llm` hook per event with matcher; authored hooks
+      are trusted.
+- [ ] Untrusted hooks render a review+grant flow; granting flips `trusted=true`.
+- [ ] A hook-denied tool shows a visible "blocked by hook" indicator with the reason.
+- [ ] "Test hook" runs the handler once and shows the parsed result.
+**Verification:** `./gradlew :app:testPlayDebugUnitTest :app:assemblePlayDebug` +
+manual check of page navigation and badge
+**Dependencies:** T7, T9
+**Files:** `app/.../ui/pages/assistant/detail/AssistantHooksPage.kt` (NEW), navigation
+registration, tool-step badge in chat UI
+**Scope:** M | **Risk:** normal
 
-### Checkpoint D — Complete
-- [ ] All success criteria (§Spec) met
-- [ ] `./gradlew :ai-runtime:test` + new app unit tests pass
-- [ ] `./gradlew lint` clean for new files; `:app:assemblePlayDebug` builds
-- [ ] PR body uses `Refs #200` / `Refs #202` (conservative; v2 items deferred), names the
-      H1 `Call.await()` fix as the load-bearing shared-seam change
+#### T11: Full verification gate
+**Description:** Run the complete gate from the spec's Commands section; fix lint
+findings in new files; confirm all 8 spec success criteria.
+**Acceptance criteria:**
+- [ ] `./gradlew test` green (all modules); `./gradlew :ai-runtime:test` green.
+- [ ] `./gradlew lint` clean for new files; `./gradlew :app:assemblePlayDebug` builds.
+- [ ] Spec Success Criteria 1-8 each verified and checked off.
+**Verification:** the commands above
+**Dependencies:** T8, T10
+**Files:** none new (fixes only if the gate fails)
+**Scope:** XS | **Risk:** normal
+
+### Checkpoint: Complete
+- [ ] All acceptance criteria met; PR body uses `Refs #200` / `Refs #202` (not Fixes,
+      per spec) and surfaces T4's shared-seam change as load-bearing; no
+      tooling/provenance text (public repo).
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
-|---|---|---|
-| H1 `Call.await()` fix regresses non-hook provider callers | Med | Own commit + failing-before/passing-after test; success path asserted unchanged (T3) |
-| `updatedInput` rewrite applied after approval (security hole) | High-if-wrong | T6 enforces rewrite-before-gate ordering with an explicit order assertion |
-| Imported config carries `trusted=true` and runs unreviewed | High-if-wrong | T8 forces `false` on BOTH vectors; dispatcher refuses untrusted (T4) |
-| Regex matcher ReDoS on imported configs | Med | Default exact-OR-regex per Assumptions; open Q #4 flags restricting to exact if owner prefers |
-| Stale review anchors drift further | Low | Spec re-grounds anchors to current `file:line`; T6/T7 re-verify at build time |
+|------|--------|------------|
+| T4 touches the shared non-stream provider path | Med | Own commit + failing-before regression test; success path asserted unchanged; scheduled early (fail fast) |
+| `ChatTurnRuntime` seam drift vs spec line anchors | Med | Re-verify `:184-238` / `executeTool:481` before T7; anchors re-grounded 2026-06-12 |
+| Old JSON decode breakage from new fields | Med | Additive defaulted fields only; T1 roundtrip test against both migrators |
+| Regex matcher ReDoS on imported configs (open Q #4) | Low | Untrusted-until-granted (T9) bounds exposure; flag in PR if owner wants exact-only |
+| In-record `trusted` flag spoofable in imported JSON | Med | T9 forces `false` on both vectors regardless of payload; test asserts override of `trusted:true` |
 
-## Open Questions (carry to PR / owner)
+## Open Questions (defaults chosen, flagged in PR)
 
-1. Does v1 (LLM-only + H1 + H4 + H2) close #200 or stay `Refs`? Default: `Refs #200`.
-2. PostToolUse in v1? Default: defer to v2.
-3. Global `Settings.hooks`? Default: per-Assistant only.
-4. `matcher` regex vs exact-only (ReDoS surface)? Default: exact OR regex.
-5. Trust-flag placement — in-record `HookConfig.trusted` vs device-local store? Default: in-record.
-6. Hooks editor as new `AssistantHooksPage` sibling vs section in `AssistantExtensionsPage`?
-   Default: new sibling.
+Spec §Open Questions 1-6 — all resolved with the spec's conservative defaults:
+Refs-not-Fixes; no PostToolUse; per-Assistant only; exact-or-regex matcher; in-record
+trust flag forced on import; new sibling `AssistantHooksPage`.
 
-## Notes on scope
+## Parallelization
 
-- No high-risk tasks: no auth/permission system changes, no destructive migration (additive
-  defaulted field only), no payments/deletions/secrets/deploys. Import-trust (T8) ADDS a
-  restriction (untrust-by-default) and is fully git-revertable — classified normal.
-- `js`/QuickJS/`subagent`/`http`/PostToolUse are v2 and intentionally absent.
+T4 is independent of T1-T3 (safe in parallel). T2 and T3 are parallel after T1.
+T5 onward is sequential — shared `ChatTurnRuntime`/`ChatService` seams per #202's
+serialize-the-tool-exec-block conflict policy.
