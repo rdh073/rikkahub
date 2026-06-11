@@ -1,5 +1,8 @@
 package me.rerere.ai.runtime.hooks
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
 /**
  * Pure decision primitives for the hook dispatcher (#200 v1). Everything here is
  * side-effect-free and order-deterministic so the agent loop's behavior is a pure function of
@@ -80,3 +83,84 @@ fun matches(matcher: String?, toolName: String?): Boolean {
 /** [matches] lifted to a [HookMatcher]. */
 fun matchesIf(matcher: HookMatcher, toolName: String?): Boolean =
     matches(matcher.matcher, toolName)
+
+/**
+ * Result of parsing a raw handler response. Hook output is untrusted text (an LLM wrote it),
+ * so failures are values, never exceptions — the dispatcher maps a [Failure] through the
+ * handler's `failClosed` flag instead of crashing the agent loop.
+ */
+sealed interface HookOutputParseResult {
+    data class Parsed(val output: HookOutput) : HookOutputParseResult
+
+    sealed interface Failure : HookOutputParseResult {
+        val detail: String
+
+        data class Malformed(override val detail: String) : Failure
+
+        /**
+         * The output named a different lifecycle event than the one actually dispatched.
+         * Rejected outright: a handler must not smuggle, say, a Stop-shaped decision into a
+         * PreToolUse gate (event spoofing).
+         */
+        data class EventMismatch(
+            val claimedEvent: String,
+            val dispatchedEvent: HookEvent,
+        ) : Failure {
+            override val detail: String
+                get() = "hook output claims event '$claimedEvent' but '$dispatchedEvent' was dispatched"
+        }
+    }
+}
+
+/**
+ * Parses one handler's raw response against the event that was actually dispatched.
+ *
+ * - Malformed JSON / wrong shape / unknown `decision` value → [HookOutputParseResult.Failure.Malformed].
+ *   An unrecognized decision is a failure, not a silent Allow — whether that blocks is the
+ *   handler's `failClosed` policy, decided by the dispatcher.
+ * - `hookEventName`, when present, must equal the dispatched event exactly, otherwise
+ *   [HookOutputParseResult.Failure.EventMismatch]. Absent = the output claims nothing.
+ * - Absent `decision` is a context-only Allow (UserPromptSubmit/Stop hooks that merely inject).
+ * - Unknown extra keys are ignored: the producer is an LLM and over-production is benign.
+ */
+fun parseHookOutput(raw: String, dispatchedEvent: HookEvent): HookOutputParseResult {
+    val wire = try {
+        HookOutputJson.decodeFromString<HookOutputWire>(raw)
+    } catch (e: IllegalArgumentException) {
+        // kotlinx throws SerializationException (an IllegalArgumentException) on bad JSON and
+        // IllegalArgumentException on non-decodable input — both are "the text is not a hook
+        // output", which is a value here, never a crash of the agent loop.
+        return HookOutputParseResult.Failure.Malformed(e.message ?: "malformed hook output")
+    }
+    wire.hookEventName?.let { claimed ->
+        if (claimed != dispatchedEvent.name) {
+            return HookOutputParseResult.Failure.EventMismatch(claimed, dispatchedEvent)
+        }
+    }
+    val decision = when (wire.decision) {
+        null, "allow" -> HookDecision.Allow
+        "ask" -> HookDecision.Ask
+        "deny" -> HookDecision.Deny(wire.reason.orEmpty())
+        else -> return HookOutputParseResult.Failure.Malformed("unknown decision '${wire.decision}'")
+    }
+    return HookOutputParseResult.Parsed(
+        HookOutput(
+            decision = decision,
+            updatedInput = wire.updatedInput,
+            additionalContext = wire.additionalContext,
+            preventContinuation = wire.preventContinuation,
+        ),
+    )
+}
+
+private val HookOutputJson = Json { ignoreUnknownKeys = true }
+
+@Serializable
+private data class HookOutputWire(
+    val hookEventName: String? = null,
+    val decision: String? = null,
+    val reason: String? = null,
+    val updatedInput: String? = null,
+    val additionalContext: String? = null,
+    val preventContinuation: Boolean = false,
+)
