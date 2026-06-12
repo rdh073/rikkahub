@@ -107,6 +107,9 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                 // window. getAndSet is atomic against the act coroutine's waiter (design D3/P13).
                 settleSignal.getAndSet(CompletableDeferred()).complete(Unit)
             }
+            // serviceInfo.eventTypes subscribes to exactly the two types above; any other
+            // delivery carries no state-settling information, so it is deliberately ignored.
+            else -> Unit
         }
     }
 
