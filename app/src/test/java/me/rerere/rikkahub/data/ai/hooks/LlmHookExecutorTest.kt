@@ -104,6 +104,27 @@ class LlmHookExecutorTest {
         assertTrue("the timed-out in-flight call must be cancelled", call.isCanceled())
     }
 
+    // Codex review mustFix #1: withTimeoutOrNull alone cannot interrupt the provider's BLOCKING
+    // body read once headers arrived — only OkHttp's per-call timeout spans the whole call. The
+    // executor must therefore push its timeout down to the HTTP layer via
+    // TextGenerationParams.callTimeoutMillis.
+    @Test
+    fun `hook call carries callTimeoutMillis down to the provider params`() = runBlocking {
+        var seen: TextGenerationParams? = null
+        val executor = LlmHookExecutor(
+            settings = { settings },
+            providerManager = providerManager(FakeOpenAIProvider { params ->
+                seen = params
+                denyChunk("ok")
+            }),
+            callTimeout = 200.milliseconds,
+        )
+
+        executor.execute(HookEvent.PreToolUse, llmHandler(), input = "{}")
+
+        assertEquals(200L, seen?.callTimeoutMillis)
+    }
+
     @Test
     fun `failClosed executor error aggregates as Deny`() = runBlocking {
         val dispatcher = dispatcherWith(FakeOpenAIProvider { throw IOException("provider down") })
@@ -222,14 +243,14 @@ class LlmHookExecutorTest {
     }
 
     private class FakeOpenAIProvider(
-        private val onGenerateText: suspend () -> MessageChunk,
+        private val onGenerateText: suspend (TextGenerationParams) -> MessageChunk,
     ) : Provider<ProviderSetting.OpenAI> {
         override suspend fun listModels(providerSetting: ProviderSetting.OpenAI): List<Model> = emptyList()
         override suspend fun generateText(
             providerSetting: ProviderSetting.OpenAI,
             messages: List<UIMessage>,
             params: TextGenerationParams,
-        ): MessageChunk = onGenerateText()
+        ): MessageChunk = onGenerateText(params)
 
         override suspend fun streamText(
             providerSetting: ProviderSetting.OpenAI,

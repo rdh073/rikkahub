@@ -28,11 +28,15 @@ fun interface HookSettingsReader {
  * `parseHookOutput` (#200 v1, spec §LlmHookExecutor).
  *
  * Timeout contract (H1): [callTimeout] bounds every hook call independently of the shared
- * OkHttp client's 10-minute read-timeout ceiling. Because `Call.await()` cancels the in-flight
- * call on coroutine cancellation, the `withTimeoutOrNull` here genuinely aborts the HTTP call.
- * The timeout is rethrown as a plain failure — never a CancellationException — so the
- * dispatcher maps it through the handler's `failClosed` policy instead of cancelling the whole
- * dispatch; real (external) cancellation still propagates untouched.
+ * OkHttp client's 10-minute read-timeout ceiling, via TWO complementary mechanisms.
+ * `withTimeoutOrNull` cancels while the call is suspended waiting for headers (Call.await()
+ * cancels the in-flight call on coroutine cancellation), but it CANNOT interrupt the provider's
+ * blocking body read once headers arrived — so the same bound is also pushed down as
+ * [TextGenerationParams.callTimeoutMillis], OkHttp's per-call timeout spanning the entire call
+ * including body reads. Either bound is rethrown as a plain failure — never a
+ * CancellationException — so the dispatcher maps it through the handler's `failClosed` policy
+ * instead of cancelling the whole dispatch; real (external) cancellation still propagates
+ * untouched.
  */
 class LlmHookExecutor(
     private val settings: HookSettingsReader,
@@ -54,7 +58,8 @@ class LlmHookExecutor(
             providerHandler.generateText(
                 providerSetting = provider,
                 messages = listOf(UIMessage.user(buildPrompt(event, handler, input))),
-                params = backgroundTextGenerationParams(model),
+                params = backgroundTextGenerationParams(model)
+                    .copy(callTimeoutMillis = callTimeout.inWholeMilliseconds),
             )
         } ?: error("hook llm call timed out after $callTimeout")
         return result.choices.firstOrNull()?.message?.toText().orEmpty()
