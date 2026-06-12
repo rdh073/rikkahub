@@ -77,6 +77,7 @@ import me.rerere.rikkahub.data.ai.runtime.AppToolCatalog
 import me.rerere.rikkahub.data.ai.runtime.toAssistantConfig
 import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.ai.subagent.buildSpawnTool
+import me.rerere.rikkahub.data.ai.subagent.subagentBoardTools
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
 import me.rerere.rikkahub.data.ai.tools.createSkillTools
@@ -1177,6 +1178,21 @@ class ChatService(
                                             mcpManager.callTool(sid, name, args)
                                         })
                                     }
+                                    // The shared per-conversation board tools (finding #1). The
+                                    // production spawn path feeds THIS list straight to
+                                    // TaskCoordinator.run, never the catalog's TurnMode.Subagent arm,
+                                    // so without this a spawned subagent cannot task_list/task_update
+                                    // the board the parent and UI share (spec assumption 5 / decision
+                                    // #5). Bound to THIS conversation and owned by a per-subagent
+                                    // actor so its claims are attributable; the repository remains the
+                                    // single enforcement point (decision #4).
+                                    addAll(
+                                        subagentBoardTools(
+                                            repository = taskBoardRepository,
+                                            conversationId = conversationId,
+                                            sub = sub,
+                                        )
+                                    )
                                 }
                             },
                             processingStatus = session.processingStatus,
