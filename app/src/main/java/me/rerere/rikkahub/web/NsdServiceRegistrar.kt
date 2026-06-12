@@ -2,6 +2,7 @@ package me.rerere.rikkahub.web
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -118,14 +119,49 @@ class NsdServiceRegistrar(
             val connectivityManager = context.applicationContext
                 .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 ?: return null
-            val linkProperties = connectivityManager
-                .getLinkProperties(connectivityManager.activeNetwork) ?: return null
+            // The active network must not be trusted blindly: with a VPN up it is the tun
+            // network, whose address LAN peers cannot reach, while the underlying Wi-Fi
+            // network is still connected and listed. Prefer the active network only when it
+            // is a non-VPN Wi-Fi/Ethernet network; otherwise scan the others. Cellular-only
+            // yields null so register() aborts, matching the old WifiManager-based behavior.
+            @Suppress("DEPRECATION") // allNetworks: the NetworkCallback replacement is async; this synchronous one-shot lookup needs a snapshot
+            val candidates = (listOfNotNull(connectivityManager.activeNetwork) +
+                connectivityManager.allNetworks).distinct()
+            val lanNetwork = selectLanNetwork(candidates) { network ->
+                connectivityManager.getNetworkCapabilities(network)?.let { capabilities ->
+                    LanTransports(
+                        wifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+                        ethernet = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+                        vpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    )
+                }
+            } ?: return null
+            val linkProperties = connectivityManager.getLinkProperties(lanNetwork) ?: return null
             selectIpv4Address(linkProperties.linkAddresses.map { it.address })
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get local IP address", e)
             null
         }
     }
+}
+
+internal data class LanTransports(
+    val wifi: Boolean,
+    val ethernet: Boolean,
+    val vpn: Boolean
+)
+
+/**
+ * Picks the first candidate network reachable by LAN peers: Wi-Fi or Ethernet transport,
+ * and never a VPN — a VPN network's capabilities include the underlying transport, so a
+ * VPN-over-Wi-Fi network matches WIFI yet its tun address is useless for mDNS.
+ */
+internal fun <T : Any> selectLanNetwork(
+    candidates: List<T>,
+    transportsOf: (T) -> LanTransports?
+): T? = candidates.firstOrNull { candidate ->
+    val transports = transportsOf(candidate) ?: return@firstOrNull false
+    (transports.wifi || transports.ethernet) && !transports.vpn
 }
 
 /**
