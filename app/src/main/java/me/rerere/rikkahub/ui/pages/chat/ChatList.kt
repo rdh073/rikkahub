@@ -619,6 +619,9 @@ private fun ChatListPreview(
     var searchQuery by remember { mutableStateOf("") }
 
     // 过滤消息，同时保留原始 index 避免后续 O(n) indexOf 查找
+    // Perf-audited: messageNodes is rebuilt once per throttled stream publish
+    // (StreamingUiCoalescer via ChatService), so this key churns per coalesce window,
+    // not per chunk; recompute frequency is throttle-bounded. Measured, no change.
     val filteredMessages = remember(conversation.messageNodes, searchQuery) {
         if (searchQuery.isBlank()) {
             conversation.messageNodes.mapIndexed { index, node -> index to node }

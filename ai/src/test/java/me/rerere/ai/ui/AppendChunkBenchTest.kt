@@ -20,6 +20,11 @@ import java.lang.management.ManagementFactory
  * Quartile breakdown is reported because the Text merge concatenates the accumulated
  * string per chunk (`lastPart.text + deltaPart.text`), so cost is expected to grow
  * with stream position — a single mean would hide that.
+ *
+ * VERDICT (audit close-out): measured, not material, no change. nsPerOp=2001,
+ * allocBytesPerOp=12386, quartile ns/op 822 -> 1518 -> 2315 -> 3345 — the growth is
+ * real but the absolute per-chunk cost sits orders of magnitude below the throttled
+ * UI publish window, so the per-chunk immutable rebuild stays untouched.
  */
 class AppendChunkBenchTest {
     @Test

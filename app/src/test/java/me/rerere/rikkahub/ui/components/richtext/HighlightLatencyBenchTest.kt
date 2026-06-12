@@ -34,6 +34,14 @@ import kotlin.coroutines.resumeWithException
  *     decoding prism-shaped token JSON at token counts proportional to input size.
  *
  * Numbers are recorded as BEFORE-evidence only; no thresholds asserted (CI-stable).
+ *
+ * VERDICT (audit close-out): material at large inputs (token decode alone reaches
+ * ~7 ms per filter() call at 100KB). Landed fix: HighlightCodeVisualTransformation
+ * gained value semantics so CoreTextField's remember(value, visualTransformation)
+ * cache stops re-running filter() on recompositions with unchanged text — see
+ * HighlightCodeVisualTransformationCacheKeyTest for the guard and numbers. The full
+ * async pre-highlight restructure is UX-visible (briefly unstyled text while typing)
+ * and remains ask-first per the spec's Open Question 4 — deliberately not landed.
  */
 class HighlightLatencyBenchTest {
     @Test
