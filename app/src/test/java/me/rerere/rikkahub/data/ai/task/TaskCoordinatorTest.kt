@@ -94,12 +94,14 @@ class TaskCoordinatorTest {
         val events = ConcurrentHashMap<Uuid, MutableList<TaskEvent>>()
         val usage = ConcurrentHashMap<Uuid, TaskBudgetUsage>()
         val created = mutableListOf<TaskSpec>()
+        val summaries = ConcurrentHashMap<Uuid, MutableList<String>>()
 
         override suspend fun create(spec: TaskSpec): TaskState {
             created += spec
             states[spec.taskId] = TaskState.Created
             events[spec.taskId] = mutableListOf()
             usage[spec.taskId] = TaskBudgetUsage()
+            summaries[spec.taskId] = mutableListOf()
             return TaskState.Created
         }
 
@@ -125,7 +127,10 @@ class TaskCoordinatorTest {
             return won
         }
 
-        override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? = 0L
+        override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? {
+            summaries.getOrPut(taskId) { mutableListOf() } += summary
+            return summaries.getValue(taskId).size.toLong()
+        }
 
         override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget) =
             usage.compute(taskId) { _, prev -> (prev ?: TaskBudgetUsage()).record(reported) }
@@ -248,6 +253,31 @@ class TaskCoordinatorTest {
         val kinds = store.events.getValue(taskId).map { it::class }
         assertTrue("Enqueued must precede SlotClaimed", kinds.indexOf(TaskEvent.Enqueued::class) < kinds.indexOf(TaskEvent.SlotClaimed::class))
         assertTrue("a final result must terminate the run", store.events.getValue(taskId).any { it is TaskEvent.FinalResult })
+    }
+
+    @Test
+    fun `child progress is persisted as an event summary so recovery resumes from real progress`() {
+        // Review finding #3: the coordinator records state + usage but never persisted a progress
+        // summary, so recovery (recoverInterruptedRuns reads the LAST event summary) always saw an
+        // empty history and re-spawned interrupted runs as a fresh prompt — repeating side effects.
+        // A run that progresses must append the child's latest assistant text as a progress summary.
+        val store = FakeStore()
+        val sub = Assistant(name = "Sub", chatModelId = subModel.id)
+        val emit = listOf(
+            GenerationChunk.Messages(listOf(assistantMsg("looked up the weather"))),
+            GenerationChunk.Messages(listOf(assistantMsg("looked up the weather"), assistantMsg("booked the flight"))),
+        )
+        val coordinator = coordinator(capturingGenerate(Captured(), emit), store = store)
+
+        runBlocking { coordinator.run(sub = sub, prompt = "go", parentModelId = null, settings = settingsWith(subModel)) }
+
+        val taskId = store.created.single().taskId
+        val persisted = store.summaries.getValue(taskId)
+        assertTrue("each progress chunk must persist a non-empty progress summary", persisted.isNotEmpty())
+        assertTrue(
+            "the last persisted summary must reflect the child's latest progress so resume injects it; was: $persisted",
+            persisted.last().contains("booked the flight"),
+        )
     }
 
     @Test

@@ -381,6 +381,19 @@ class TaskCoordinator(
                                 store.applyEvent(taskId, TaskEvent.ChildProgressed)
                                 progressed = true
                             }
+                            // Persist the child's latest progress as an event summary (review
+                            // finding #4). recoverInterruptedRuns() seeds a resume from the LAST
+                            // persisted summary; without this the history is always empty, so a
+                            // process-death recovery re-spawns from the bare prompt and repeats any
+                            // side effects the child already performed. The summary is the latest
+                            // assistant text — the same projection the terminal result extracts — so
+                            // a resumed child sees what it had already done. A progress chunk with no
+                            // assistant text yet (blank) is skipped: an empty marker would teach
+                            // recovery nothing and only churn the sequence cursor.
+                            val progressText = extractFinalAssistantText(chunk.messages)
+                            if (progressText.isNotBlank()) {
+                                store.appendEventSummary(taskId, progressText)
+                            }
                             // Fold the child's CUMULATIVE usage (steps from assistant turns, tokens
                             // from the message usage counters, elapsed from the monotonic clock) and
                             // STOP the run on the first cap breach. A bare `return@collect` only
