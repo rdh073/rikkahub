@@ -119,10 +119,10 @@ class ClaudeProvider(
 
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
-                error("Failed to get models: ${response.code} ${response.body?.string()}")
+                error("Failed to get models: ${response.code} ${response.body.string()}")
             }
 
-            val bodyStr = response.body?.string() ?: ""
+            val bodyStr = response.body.string()
             val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
             val data = bodyJson["data"]?.jsonArray ?: return@withContext emptyList()
 
@@ -163,10 +163,10 @@ class ClaudeProvider(
 
         val response = client.newCall(request).await(params.callTimeoutMillis?.milliseconds)
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body?.string()}")
+            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
         }
 
-        val bodyStr = response.body?.string() ?: ""
+        val bodyStr = response.body.string()
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
 
         // 从 JsonObject 中提取必要的信息
