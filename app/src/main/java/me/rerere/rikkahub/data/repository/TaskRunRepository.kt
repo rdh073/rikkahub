@@ -99,6 +99,35 @@ class TaskRunRepository(
     }
 
     /**
+     * Retention sweep (SPEC.md M6 + the "Unbounded board" Failure-mode): delete TERMINAL task runs
+     * that are both older than [maxAgeMillis] and beyond the newest [keepNewestPerConversation] of
+     * their conversation. Active and `Interrupted` rows are never candidates — an interrupted run
+     * is resumable (decisions #1/#3), so it is kept indefinitely until the user resumes or the
+     * conversation is deleted. Returns the number of rows deleted.
+     *
+     * The windowing decision is the shared pure [selectExpiredForRetention]; this method only feeds
+     * it the terminal rows and applies the deletion in one transaction.
+     */
+    suspend fun sweepRetention(
+        now: Long = now(),
+        maxAgeMillis: Long = DEFAULT_RETENTION_MAX_AGE_MILLIS,
+        keepNewestPerConversation: Int = DEFAULT_RETENTION_KEEP_NEWEST,
+    ): Int = transactions.inTransaction {
+        val terminalStates = TaskRunStateTag.entries.filter { it.isTerminal }.map { it.name }.toSet()
+        val candidates = dao.listRetainable(terminalStates)
+        val expired = selectExpiredForRetention(
+            rows = candidates,
+            now = now,
+            maxAgeMillis = maxAgeMillis,
+            keepNewestPerConversation = keepNewestPerConversation,
+            conversationOf = { it.conversationId },
+            updatedAtOf = { it.updatedAt },
+            idOf = { it.id },
+        )
+        if (expired.isEmpty()) 0 else dao.deleteByIds(expired)
+    }
+
+    /**
      * Fold [event] over the run's persisted state via [TaskStateReducer] and persist the result.
      *
      * Returns the resulting domain state, or null when no run exists. The reducer — not this
@@ -262,4 +291,12 @@ class TaskRunRepository(
 
     private fun TaskRunPendingApproval.toRequest(): TaskApprovalRequest =
         TaskApprovalRequest(childToolCallId = childToolCallId, toolName = toolName)
+
+    companion object {
+        /** Retention cutoff for terminal runs: 30 days (SPEC.md M6 Failure-modes row). */
+        const val DEFAULT_RETENTION_MAX_AGE_MILLIS: Long = 30L * 24 * 60 * 60 * 1000
+
+        /** Newest terminal runs kept per conversation regardless of age (SPEC.md M6). */
+        const val DEFAULT_RETENTION_KEEP_NEWEST: Int = 200
+    }
 }

@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import me.rerere.rikkahub.data.db.dao.WorkItemDAO
+import me.rerere.rikkahub.data.db.dao.WorkItemRetentionRow
 import me.rerere.rikkahub.data.db.entity.WorkItemDependencyEntity
 import me.rerere.rikkahub.data.db.entity.WorkItemEntity
 import me.rerere.rikkahub.data.repository.BoardTransactionRunner
@@ -52,6 +53,23 @@ class FakeWorkItemDAO : WorkItemDAO {
 
     override suspend fun deleteById(id: String): Int = synchronized(lock) {
         if (items.remove(id) != null) 1 else 0
+    }
+
+    override suspend fun listRetainable(statuses: Set<String>): List<WorkItemRetentionRow> =
+        synchronized(lock) {
+            items.values.filter { it.status in statuses }
+                .map { WorkItemRetentionRow(id = it.id, conversationId = it.conversationId, updatedAt = it.updatedAt) }
+        }
+
+    override suspend fun deleteByIds(ids: List<String>): Int = synchronized(lock) {
+        ids.count { items.remove(it) != null }
+    }
+
+    override suspend fun deleteDependenciesTouchingAny(ids: List<String>): Int = synchronized(lock) {
+        val idSet = ids.toSet()
+        val touching = edges.filter { it.blockerId in idSet || it.blockedId in idSet }
+        edges.removeAll(touching.toSet())
+        touching.size
     }
 
     override suspend fun deleteByConversationId(conversationId: String): Int = synchronized(lock) {

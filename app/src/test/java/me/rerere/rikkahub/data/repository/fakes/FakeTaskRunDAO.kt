@@ -3,6 +3,7 @@ package me.rerere.rikkahub.data.repository.fakes
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import me.rerere.rikkahub.data.db.dao.TaskRunDAO
+import me.rerere.rikkahub.data.db.dao.TaskRunRetentionRow
 import me.rerere.rikkahub.data.db.entity.TaskRunEntity
 
 /**
@@ -41,6 +42,16 @@ class FakeTaskRunDAO : TaskRunDAO {
 
     override suspend fun deleteById(id: String): Int = synchronized(lock) {
         if (runs.remove(id) != null) 1 else 0
+    }
+
+    override suspend fun listRetainable(states: Set<String>): List<TaskRunRetentionRow> =
+        synchronized(lock) {
+            runs.values.filter { it.latestState in states }
+                .map { TaskRunRetentionRow(id = it.id, conversationId = it.conversationId, updatedAt = it.updatedAt) }
+        }
+
+    override suspend fun deleteByIds(ids: List<String>): Int = synchronized(lock) {
+        ids.count { runs.remove(it) != null }
     }
 
     override suspend fun deleteByConversationId(conversationId: String): Int = synchronized(lock) {

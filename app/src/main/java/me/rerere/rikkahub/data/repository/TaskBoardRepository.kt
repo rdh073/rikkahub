@@ -128,6 +128,37 @@ class TaskBoardRepository(
         return released
     }
 
+    /**
+     * Retention sweep (SPEC.md M6 + the "Unbounded board" Failure-mode): delete COMPLETED and
+     * DELETED work items that are both older than [maxAgeMillis] and beyond the newest
+     * [keepNewestPerConversation] of their conversation, removing their dependency edges in the
+     * same transaction so no dangling edge survives. Open items (Pending/InProgress) are kept
+     * indefinitely — only the panel's done/deleted history is bounded. Returns items deleted.
+     *
+     * The windowing decision is the shared pure [selectExpiredForRetention]; this method feeds it
+     * the retained rows and applies the cascade deletion atomically.
+     */
+    suspend fun sweepRetention(
+        now: Long = now(),
+        maxAgeMillis: Long = DEFAULT_RETENTION_MAX_AGE_MILLIS,
+        keepNewestPerConversation: Int = DEFAULT_RETENTION_KEEP_NEWEST,
+    ): Int = transactions.inTransaction {
+        val retainedStatuses = setOf(WorkItemStatus.Completed.name, WorkItemStatus.Deleted.name)
+        val candidates = dao.listRetainable(retainedStatuses)
+        val expired = selectExpiredForRetention(
+            rows = candidates,
+            now = now,
+            maxAgeMillis = maxAgeMillis,
+            keepNewestPerConversation = keepNewestPerConversation,
+            conversationOf = { it.conversationId },
+            updatedAtOf = { it.updatedAt },
+            idOf = { it.id },
+        )
+        if (expired.isEmpty()) return@inTransaction 0
+        dao.deleteDependenciesTouchingAny(expired)
+        dao.deleteByIds(expired)
+    }
+
     suspend fun get(conversationId: Uuid, id: Uuid): BoardItemSnapshot? = transactions.inTransaction {
         val entity = dao.getById(id.toString())
             ?.takeIf { it.conversationId == conversationId.toString() }
@@ -341,5 +372,11 @@ class TaskBoardRepository(
          * claims become take-over-able.
          */
         const val DEFAULT_CLAIM_LEASE_MILLIS: Long = 10 * 60_000L
+
+        /** Retention cutoff for completed/deleted items: 30 days (SPEC.md M6 Failure-modes row). */
+        const val DEFAULT_RETENTION_MAX_AGE_MILLIS: Long = 30L * 24 * 60 * 60 * 1000
+
+        /** Newest completed/deleted items kept per conversation regardless of age (SPEC.md M6). */
+        const val DEFAULT_RETENTION_KEEP_NEWEST: Int = 200
     }
 }

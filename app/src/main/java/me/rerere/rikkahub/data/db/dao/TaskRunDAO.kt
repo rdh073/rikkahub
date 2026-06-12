@@ -32,7 +32,27 @@ interface TaskRunDAO {
     @Query("DELETE FROM task_runs WHERE id = :id")
     suspend fun deleteById(id: String): Int
 
+    /**
+     * Retention sweep candidates (M6): every row in a terminal/deleted [states] set, with just the
+     * columns the sweeper needs to decide (conversation + recency). The newest-N-per-conversation
+     * windowing is done in the repository so the same logic is JVM-testable against a DAO fake;
+     * this query only narrows the scan to retained states.
+     */
+    @Query("SELECT id, conversation_id AS conversationId, updated_at AS updatedAt FROM task_runs WHERE latest_state IN (:states)")
+    suspend fun listRetainable(states: Set<String>): List<TaskRunRetentionRow>
+
+    /** Delete the rows the retention sweep selected. No-op on an empty list. */
+    @Query("DELETE FROM task_runs WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>): Int
+
     /** Cascade with conversation cleanup (retention, M6). */
     @Query("DELETE FROM task_runs WHERE conversation_id = :conversationId")
     suspend fun deleteByConversationId(conversationId: String): Int
 }
+
+/** Minimal projection the retention sweep reads: which conversation a retained row belongs to and how recent it is. */
+data class TaskRunRetentionRow(
+    val id: String,
+    val conversationId: String,
+    val updatedAt: Long,
+)

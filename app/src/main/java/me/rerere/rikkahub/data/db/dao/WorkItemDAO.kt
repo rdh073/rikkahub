@@ -43,6 +43,21 @@ interface WorkItemDAO {
     @Query("DELETE FROM work_items WHERE id = :id")
     suspend fun deleteById(id: String): Int
 
+    /**
+     * Retention sweep candidates (M6): every item in a retained [statuses] set (Completed/Deleted),
+     * with just the columns the sweeper needs (conversation + recency). The newest-N-per-conversation
+     * windowing runs in the repository so the same logic is JVM-testable against a DAO fake.
+     */
+    @Query("SELECT id, conversation_id AS conversationId, updated_at AS updatedAt FROM work_items WHERE status IN (:statuses)")
+    suspend fun listRetainable(statuses: Set<String>): List<WorkItemRetentionRow>
+
+    /** Delete the items the retention sweep selected, with their dependency edges. No-op on empty. */
+    @Query("DELETE FROM work_items WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>): Int
+
+    @Query("DELETE FROM work_item_dependencies WHERE blocker_id IN (:ids) OR blocked_id IN (:ids)")
+    suspend fun deleteDependenciesTouchingAny(ids: List<String>): Int
+
     /** Cascade with conversation cleanup (retention, M6). */
     @Query("DELETE FROM work_items WHERE conversation_id = :conversationId")
     suspend fun deleteByConversationId(conversationId: String): Int
@@ -76,3 +91,10 @@ interface WorkItemDAO {
     @Query("DELETE FROM work_item_dependencies WHERE conversation_id = :conversationId")
     suspend fun deleteDependenciesByConversationId(conversationId: String): Int
 }
+
+/** Minimal projection the retention sweep reads: which conversation a retained item belongs to and how recent it is. */
+data class WorkItemRetentionRow(
+    val id: String,
+    val conversationId: String,
+    val updatedAt: Long,
+)
