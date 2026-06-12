@@ -268,8 +268,16 @@ class TaskCoordinator(
             // Created -> Queued: the spawn tool call was accepted; the run now waits for a slot.
             store.applyEvent(taskId, TaskEvent.Enqueued)
 
-            grouped = parentToolCallId.isNotBlank()
-            val parentMutex = if (grouped) acquireParentMutex(parentToolCallId) else null
+            // grouped flips ONLY after acquireParentMutex returns (review mustFix round 5):
+            // the acquire suspends on the registry lock, and a cancellation inside it must not
+            // make the finally release a ref this run never registered — that would decrement a
+            // sibling's entry and break per-parent serialization. No suspension point sits
+            // between the acquire returning and the flag assignment.
+            val parentMutex = if (parentToolCallId.isNotBlank()) {
+                val acquired = acquireParentMutex(parentToolCallId)
+                grouped = true
+                acquired
+            } else null
 
             globalSemaphore(budget.globalConcurrency).withPermit {
                 if (parentMutex != null) {
