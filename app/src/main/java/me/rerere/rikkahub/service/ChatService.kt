@@ -1926,8 +1926,9 @@ internal fun assembleConversationJobsFlow(
  *  - SUPERSEDE BARRIER: [block] must not run until [previousJob] (the cancelled generation this
  *    one replaces, including its NonCancellable persistence finalizer) has finished — otherwise
  *    the old job's writes race the new job's and can resurrect state the user just removed.
- *    `runCatching` around the join only absorbs this job's own cancellation while waiting; it is
- *    rethrown by the catch below via [shouldRethrowVmError].
+ *    The join is deliberately unguarded: [Job.join] never rethrows the joined job's failure, it
+ *    only throws this job's own [CancellationException] — which must reach the catch below and
+ *    be rethrown via [shouldRethrowVmError] so [block] never runs after cancellation.
  *  - CANCELLATION RETHROW: cancellation (stopGeneration / a newer entry superseding this job)
  *    must propagate per [shouldRethrowVmError], never be reported through [onError] — a cancelled
  *    job that "completes normally" breaks the structured-concurrency contract CoroutineUtils pins.
@@ -1941,7 +1942,7 @@ internal fun launchGenerationEntryJob(
     block: suspend () -> Unit,
 ): Job = scope.launch {
     try {
-        runCatching { previousJob?.join() }
+        previousJob?.join()
         block()
     } catch (e: Exception) {
         if (shouldRethrowVmError(e)) throw e

@@ -80,6 +80,38 @@ class GenerationEntryJobLifecycleTest {
     }
 
     @Test
+    fun `cancellation while joining the superseded job must not run the block`() = runBlocking {
+        val reported = CopyOnWriteArrayList<Exception>()
+        val blockRan = AtomicBoolean(false)
+        val previousStarted = AtomicBoolean(false)
+
+        // The superseded job is still finalizing, so the new entry job is suspended inside
+        // previousJob.join() at the moment the user cancels it (stopGeneration / yet another
+        // supersede). The cancelled join must propagate — entry logic must never run.
+        val previous = launch {
+            previousStarted.set(true)
+            awaitCancellation()
+        }
+        while (!previousStarted.get()) yield()
+
+        val job = launchGenerationEntryJob(
+            scope = this,
+            previousJob = previous,
+            onError = { reported.add(it) },
+        ) {
+            blockRan.set(true)
+        }
+        repeat(3) { yield() } // let the entry job reach previousJob.join()
+        job.cancel()
+        job.join()
+
+        assertFalse("a cancelled entry job must never run generation entry logic", blockRan.get())
+        assertTrue("cancellation must propagate (job cancelled, not completed normally)", job.isCancelled)
+        assertTrue("cancellation must never reach onError", reported.isEmpty())
+        previous.cancel()
+    }
+
+    @Test
     fun `block waits for the superseded job - including its NonCancellable finalizer`() = runBlocking {
         val finalizerDone = AtomicBoolean(false)
         val previousStarted = AtomicBoolean(false)
