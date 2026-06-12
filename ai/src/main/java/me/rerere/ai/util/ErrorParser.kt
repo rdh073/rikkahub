@@ -11,6 +11,15 @@ class HttpException(
     message: String
 ) : RuntimeException(message)
 
+/**
+ * Resolves a non-2xx response body into the typed [HttpException] the streaming paths already
+ * produce (their onFailure handlers route the body through [parseErrorDetail]). A non-JSON body
+ * (e.g. an HTML proxy error page) falls back to the raw code+body shape so nothing is lost.
+ */
+fun parseHttpErrorBody(code: Int, body: String): HttpException =
+    runCatching { Json.parseToJsonElement(body).parseErrorDetail() }
+        .getOrElse { HttpException("Failed to get response: $code $body") }
+
 fun JsonElement.parseErrorDetail(): HttpException {
     return when (this) {
         is JsonObject -> {

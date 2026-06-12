@@ -41,6 +41,7 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.util.AiLog
 import me.rerere.ai.util.HttpException
 import me.rerere.ai.util.KeyRoulette
+import me.rerere.ai.util.parseHttpErrorBody
 import me.rerere.ai.util.bufferStreamChunks
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.encodeBase64
@@ -98,7 +99,7 @@ class ChatCompletionsAPI(
 
         val response = client.newCall(request).await(params.callTimeoutMillis?.milliseconds)
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
+            throw parseHttpErrorBody(response.code, response.body.string())
         }
 
         val bodyStr = response.body.string()
