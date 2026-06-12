@@ -880,6 +880,9 @@ class ChatService(
 
                 _generationDoneFlow.emit(conversationId)
             } catch (e: Exception) {
+                // Same contract as the sendMessage catch above: cancellation (stopGeneration / a
+                // newer entry point superseding this job) must propagate, never report as an error.
+                if (shouldRethrowVmError(e)) throw e
                 addError(e, conversationId, title = context.getString(R.string.error_title_regenerate_message))
             }
         }
@@ -943,6 +946,8 @@ class ChatService(
 
                 _generationDoneFlow.emit(conversationId)
             } catch (e: Exception) {
+                // Same contract as the sendMessage catch above: cancellation must propagate.
+                if (shouldRethrowVmError(e)) throw e
                 addError(e, conversationId, title = context.getString(R.string.error_title_tool_approval))
             }
         }
@@ -1673,8 +1678,10 @@ class ChatService(
                 // Save the conversation after translation is complete
                 saveConversation(conversationId, getConversationFlow(conversationId).value)
             } catch (e: Exception) {
-                // Clear translation field on error
+                // Clear the translation field on error AND on cancellation (the loading placeholder
+                // must never stick), but cancellation itself must propagate, not report.
                 clearTranslationField(conversationId, message.id)
+                if (shouldRethrowVmError(e)) throw e
                 addError(e, conversationId, title = context.getString(R.string.error_title_translate_message))
             }
         }
