@@ -81,6 +81,13 @@ class TaskCancelCascadesPropertyTest {
             events.getValue(taskId) += event
             return states[taskId]
         }
+        override suspend fun claimResume(taskId: Uuid): Boolean {
+            var won = false
+            states.compute(taskId) { _, current ->
+                if (current is TaskState.Interrupted) { won = true; TaskState.Resuming } else current
+            }
+            return won
+        }
         override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? = 0L
         override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget): TaskBudgetBreach? = null
     }

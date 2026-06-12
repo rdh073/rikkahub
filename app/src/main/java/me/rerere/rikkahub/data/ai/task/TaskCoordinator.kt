@@ -195,12 +195,13 @@ class TaskCoordinator(
      * "resume" is a re-spawn from the summary, never a transcript replay (decision #1).
      *
      * **Single-active-handle is enforced in persisted state, not an in-memory flag (decision #3).**
-     * The first thing this does is fold [TaskEvent.ResumeRequested] through the store: the reducer's
-     * ONLY edge out of `Interrupted` is `Interrupted -> Resuming`, so exactly one caller can take it.
-     * Any other persisted state (a concurrent resume that already moved the run to `Resuming`/
-     * `Running`, or a terminal) folds to a non-`Resuming` result, which this rejects with
-     * [IllegalStateException] BEFORE spawning anything. A rejected resume therefore never creates a
-     * second handle.
+     * The first thing this does is atomically take the `Interrupted -> Resuming` edge via
+     * [TaskRunStore.claimResume], the ONLY edge out of `Interrupted`. claimResume reports the win
+     * DIRECTLY (true only for the caller that found the run `Interrupted` before the fold), not via
+     * the post-fold state — so a concurrent resume that arrives during the `Resuming` window (after
+     * a sibling took the edge but before the child's first event flips it to `Running`) loses and
+     * is rejected with [IllegalStateException] BEFORE spawning anything. A rejected resume therefore
+     * never creates a second handle.
      *
      * @throws IllegalStateException if the run does not exist or is not currently resumable.
      */
@@ -215,12 +216,14 @@ class TaskCoordinator(
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
         budget: TaskBudget = defaultBudget,
     ): String {
-        // The single-active-handle gate: only the run currently in Interrupted folds to Resuming.
-        // Take this BEFORE resolving the model / spawning anything, so a losing concurrent resume
-        // (or a resume of a non-interrupted run) is rejected without side effects.
-        val gated = store.applyEvent(taskId, TaskEvent.ResumeRequested)
-        check(gated == TaskState.Resuming) {
-            "task $taskId is not resumable (state=$gated): at most one active handle per task"
+        // The single-active-handle gate: atomically take the Interrupted -> Resuming edge. Only the
+        // caller that drove the REAL transition wins; a losing concurrent resume (it found the run
+        // already Resuming/Running) or a resume of a non-interrupted/absent run gets false and is
+        // rejected here, BEFORE resolving the model or spawning anything — so it has no side
+        // effects. claimResume reports the win directly, closing the Resuming-window race that an
+        // applyEvent-return check could not distinguish (review finding #2).
+        check(store.claimResume(taskId)) {
+            "task $taskId is not resumable: at most one active handle per task"
         }
 
         val modelId = resolveSubagentModel(

@@ -149,6 +149,23 @@ class TaskRunRepository(
     }
 
     /**
+     * Compare-and-set the `Interrupted -> Resuming` edge (review finding #2 / decision #3). The
+     * read-fold-write runs in one [BoardTransactionRunner] transaction, so two concurrent resumes
+     * serialize: the first observes `Interrupted` and wins; the second observes `Resuming` and
+     * loses. Crucially the win/loss is decided by whether THIS caller saw `Interrupted` BEFORE the
+     * fold — not by the post-fold state, which is `Resuming` in both cases. That is the exact
+     * ambiguity [applyEvent] could not resolve.
+     */
+    override suspend fun claimResume(taskId: Uuid): Boolean = transactions.inTransaction {
+        val entity = dao.getById(taskId.toString()) ?: return@inTransaction false
+        if (entity.toTaskState() !is TaskState.Interrupted) {
+            return@inTransaction false
+        }
+        dao.upsert(entity.applyState(TaskState.Resuming, updatedAt = now()))
+        true
+    }
+
+    /**
      * Append a summary-only event to the run's history with a strictly monotone sequence
      * ([TaskRunEntity.eventSequence] + 1). Returns the assigned sequence, or null if the run is
      * gone. The monotone cursor lets a redelivered (lower-sequence) event be recognised as stale.

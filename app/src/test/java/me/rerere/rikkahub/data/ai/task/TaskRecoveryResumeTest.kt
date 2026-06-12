@@ -1,7 +1,13 @@
 package me.rerere.rikkahub.data.ai.task
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.atomic.AtomicInteger
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderSetting
@@ -279,6 +285,76 @@ class TaskRecoveryResumeTest {
         assertTrue("rejection must name resumability: ${error.message}", error.message!!.contains("resum"))
         // Exactly one child was ever spawned for this task.
         assertEquals("a rejected double-resume must not spawn a second handle", 1, captured.size)
+    }
+
+    @Test
+    fun `two concurrent resumes spawn exactly one handle - the Resuming window does not duplicate`() = runBlocking {
+        // The dangerous window (review finding #2): the first resume has moved the run to Resuming
+        // but the child has not produced its first event yet (so it is NOT Running). A second
+        // resume arriving in this window must be rejected — otherwise it spawns a second handle for
+        // the same task, violating decision #3 (one active handle, resume never duplicates).
+        val f = RunFixture()
+        val taskId = Uuid.random()
+        seedRun(f, taskId, TaskRunStateTag.RUNNING)
+        f.repository.applyEvent(taskId, TaskEvent.ProcessInterrupted("partial"))
+
+        val spawnCount = AtomicInteger(0)
+        val firstReachedResuming = CompletableDeferred<Unit>()
+        val releaseFirstChild = CompletableDeferred<Unit>()
+        // The first resume's child suspends BEFORE emitting, holding the run in Resuming; the
+        // second resume races in during that hold.
+        val gatedGenerate: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            spawnCount.incrementAndGet()
+            flow {
+                firstReachedResuming.complete(Unit)
+                releaseFirstChild.await()
+                emit(GenerationChunk.Messages(listOf(assistantMsg("done"))))
+            }
+        }
+        val coordinator = TaskCoordinator(generate = gatedGenerate, store = f.repository)
+
+        coroutineScope {
+            val first = async {
+                coordinator.resume(
+                    taskId = taskId,
+                    sub = Assistant(name = "Sub", chatModelId = subModel.id),
+                    prompt = "do the thing",
+                    progressSummary = "partial",
+                    parentModelId = null,
+                    settings = settings(),
+                )
+            }
+            try {
+                // Wait until the first resume is parked in Resuming (child spawned, pre-emit).
+                firstReachedResuming.await()
+                assertTrue("first resume must be parked in Resuming", f.repository.get(taskId) is TaskState.Resuming)
+
+                // Second resume in the Resuming window MUST be rejected at the claim, BEFORE it can
+                // spawn anything. With the fix it throws synchronously; with the bug it slips past
+                // the gate into execute() and hangs on the held child — the timeout converts that
+                // hang into a deterministic RED failure rather than a frozen test.
+                val error = withTimeout(2_000) {
+                    try {
+                        coordinator.resume(
+                            taskId = taskId,
+                            sub = Assistant(name = "Sub", chatModelId = subModel.id),
+                            prompt = "do the thing",
+                            progressSummary = "partial",
+                            parentModelId = null,
+                            settings = settings(),
+                        )
+                        null
+                    } catch (e: IllegalStateException) {
+                        e
+                    }
+                }
+                assertTrue("second concurrent resume must be rejected: $error", error is IllegalStateException)
+            } finally {
+                releaseFirstChild.complete(Unit)
+            }
+            first.await()
+        }
+        assertEquals("exactly one child handle may exist for a task across concurrent resumes", 1, spawnCount.get())
     }
 
     @Test

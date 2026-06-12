@@ -61,6 +61,7 @@ class TaskApprovalVisiblePropertyTest {
         val summaries = ConcurrentHashMap<Uuid, MutableList<Pair<String, String>>>()
         override suspend fun create(spec: TaskSpec): TaskState = TaskState.Created
         override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? = null
+        override suspend fun claimResume(taskId: Uuid): Boolean = false
         override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? {
             summaries.getOrPut(taskId) { mutableListOf() } += kind to summary
             return summaries.getValue(taskId).size.toLong()

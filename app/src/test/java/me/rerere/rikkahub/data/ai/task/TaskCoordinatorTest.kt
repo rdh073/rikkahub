@@ -111,6 +111,20 @@ class TaskCoordinatorTest {
             return next
         }
 
+        override suspend fun claimResume(taskId: Uuid): Boolean {
+            // Atomic CAS on the in-memory state map, mirroring the repository's transactional claim.
+            var won = false
+            states.compute(taskId) { _, current ->
+                if (current is TaskState.Interrupted) {
+                    won = true
+                    TaskState.Resuming
+                } else {
+                    current
+                }
+            }
+            return won
+        }
+
         override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? = 0L
 
         override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget) =

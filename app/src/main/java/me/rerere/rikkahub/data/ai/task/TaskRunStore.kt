@@ -21,6 +21,21 @@ interface TaskRunStore {
 
     suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState?
 
+    /**
+     * Atomically take the single `Interrupted -> Resuming` edge for [taskId] (decision #3: one
+     * active handle per task). Returns true ONLY when THIS caller drove a real transition out of
+     * [TaskState.Interrupted]; false when the run does not exist, is not interrupted, or was
+     * already moved to `Resuming`/`Running` by a concurrent resume.
+     *
+     * This is a compare-and-set, NOT [applyEvent]: folding `ResumeRequested` through the reducer
+     * returns `Resuming` BOTH when the caller won the edge AND when the state was already
+     * `Resuming` and the fold no-op'd — the two are indistinguishable from the returned state. A
+     * resume that inferred its win from that ambiguous result could spawn a second handle during
+     * the `Resuming` window (review finding #2). This method reports win/loss directly, so the
+     * loser is rejected before it spawns anything.
+     */
+    suspend fun claimResume(taskId: Uuid): Boolean
+
     suspend fun appendEventSummary(
         taskId: Uuid,
         summary: String,
@@ -43,6 +58,7 @@ interface TaskRunStore {
 object NoopTaskRunStore : TaskRunStore {
     override suspend fun create(spec: TaskSpec): TaskState = TaskState.Created
     override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? = null
+    override suspend fun claimResume(taskId: Uuid): Boolean = false
     override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? = null
     override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget): TaskBudgetBreach? = null
 }
