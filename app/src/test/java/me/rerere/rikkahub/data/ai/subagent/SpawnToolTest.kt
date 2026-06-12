@@ -95,6 +95,32 @@ class SpawnToolTest {
         assertEquals(conversationId, store.spec!!.parentConversationId)
     }
 
+    @Test
+    fun `execute emits the structured task envelope, not bare final text`() {
+        // The tool output must be the {task:{...}} envelope so the live renderer reads the terminal
+        // status / budget, not a bare-text string that always degrades to "Done" (review finding
+        // #1). NoopTaskRunStore makes applyEvent return null, so the terminal degrades to Succeeded.
+        val status = MutableStateFlow<String?>(null)
+        val sub = Assistant(name = "Researcher", chatModelId = subModel.id, spawnable = true)
+        val tool = buildSpawnTool(
+            spawnableAssistants = listOf(sub),
+            coordinator = fakeCoordinator(mutableListOf()),
+            parentModelId = null,
+            settings = settingsWith(subModel),
+            buildSubagentTools = { emptyList() },
+            processingStatus = status,
+            progressLabel = { "Running $it" },
+            parentConversationId = Uuid.random(),
+        )
+
+        val output = runBlocking { tool.execute(spawnArgs("Researcher")) }
+
+        val text = (output.single() as UIMessagePart.Text).text
+        val task = kotlinx.serialization.json.Json.parseToJsonElement(text)
+            .let { it as kotlinx.serialization.json.JsonObject }["task"]
+        assertTrue("the tool output must carry a {task:{...}} envelope, was: $text", task != null)
+    }
+
     private fun spawnArgs(subagent: String, prompt: String = "go") = buildJsonObject {
         put("subagent", subagent)
         put("prompt", prompt)

@@ -11,6 +11,7 @@ import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.task.TaskCoordinator
+import me.rerere.rikkahub.data.ai.task.buildTaskEnvelope
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import kotlin.uuid.Uuid
@@ -137,7 +138,11 @@ fun buildSpawnTool(
         } finally {
             processingStatus.value = prevStatus
         }
-        listOf(UIMessagePart.Text(result))
+        // Emit the structured {task:{...}} envelope (review finding #1) so the live renderer shows
+        // the TERMINAL status, budget counters, and interrupted/budget-exhausted identity instead
+        // of always falling back to a bare-text "Done". The envelope is JSON in a Text part — the
+        // existing `UIMessagePart.Tool` output shape, no new part subtype (v1 prohibition).
+        listOf(UIMessagePart.Text(buildTaskEnvelope(result).toString()))
     },
 )
 

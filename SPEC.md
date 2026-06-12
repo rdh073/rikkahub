@@ -462,6 +462,31 @@ Design for the follow-up slice:
 Both gaps are real and must be tracked as a follow-up slice; this branch fixes findings #2, #3, #4
 (startup recovery scan + retention sweep + reachable board panel) and explicitly scopes A and B out.
 
+## Second-round review findings — disposition
+
+A later cross-model review raised four findings (its own numbering, distinct from Gap A/B above):
+
+- **R-#1 — task tool never emitted the `{task:{...}}` envelope.** FIXED for the TERMINAL case:
+  `TaskCoordinator.run`/`resume` now return a `TaskRunResult` (terminal `TaskState` + final usage +
+  `maxSteps`), and `buildSpawnTool` serializes it into the envelope via `buildTaskEnvelope` so the
+  live renderer reads the real terminal status (Succeeded / Failed / BudgetExhausted / Interrupted),
+  budget counters, and the resume affordance instead of always falling back to a bare-text "Done".
+  REMAINING (tracked): LIVE status WHILE the child runs — emitting intermediate envelopes mid-run —
+  still requires the streaming-envelope seam through `ChatService`'s async generation; a synchronous
+  `execute` cannot produce them. That portion is sequenced with Gap A (same spawn-execution seam).
+- **R-#2 — orphaned parent ids.** `parentConversationId` FIXED: `buildSpawnTool` now takes a
+  required conversation id and threads it into `run`, so persisted rows associate with the real
+  conversation. `parentToolCallId` REMAINING (tracked): the spawn tool call id is unreachable inside
+  `Tool.execute` (`suspend (JsonElement) -> List<…>`, shared engine-wide); passing it needs an ABI
+  change to `Tool` and the Ask-first spawn-path tool assembly. Per-parent concurrency grouping
+  degrades to the still-enforced global cap until then.
+- **R-#3 — budget breach did not stop the child.** FIXED: the breach now throws a `BudgetStop`
+  sentinel out of `collect`, cancelling the upstream child flow, instead of a `return@collect` that
+  only skipped one chunk.
+- **R-#4 — corrupt summaries recovered as empty progress.** FIXED: recovery distinguishes a corrupt
+  blob (`decodeEventSummaries() == null`) from an empty history and seeds a non-blank marker so a
+  resume does not treat unreadable progress as a clean slate.
+
 ## Verification (skill gate)
 
 - [x] Six core areas covered (objective, commands, structure, style, testing, boundaries)

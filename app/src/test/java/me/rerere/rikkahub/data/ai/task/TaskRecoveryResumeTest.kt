@@ -236,7 +236,8 @@ class TaskRecoveryResumeTest {
             settings = settings(),
         )
 
-        assertEquals("finished", result)
+        assertEquals("finished", result.text)
+        assertEquals(TaskState.Succeeded("finished"), result.state)
         // Same task id, driven to a terminal — the run is NOT a fresh task.
         assertEquals(TaskState.Succeeded("finished"), f.repository.get(taskId))
         // The seeded child message carries BOTH the original prompt AND the persisted summary

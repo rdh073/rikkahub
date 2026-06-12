@@ -187,7 +187,7 @@ class TaskCoordinatorTest {
 
         val result = runBlocking { coordinator.run(sub = sub, prompt = "go", parentModelId = null, settings = settingsWith(subModel)) }
 
-        assertEquals("final answer", result)
+        assertEquals("final answer", result.text)
     }
 
     @Test
@@ -241,7 +241,8 @@ class TaskCoordinatorTest {
         val taskId = store.created.single().taskId
         // The lifecycle reached Succeeded carrying the final answer.
         assertEquals(TaskState.Succeeded("final answer"), store.states[taskId])
-        assertEquals("final answer", result)
+        assertEquals("final answer", result.text)
+        assertEquals(TaskState.Succeeded("final answer"), result.state)
         // The legal happy-path event sequence was emitted in order (Enqueued -> SlotClaimed ->
         // ChildProgressed -> FinalResult).
         val kinds = store.events.getValue(taskId).map { it::class }
@@ -264,7 +265,8 @@ class TaskCoordinatorTest {
         val taskId = store.created.single().taskId
         assertTrue("a provider failure must terminate as Failed", store.states[taskId] is TaskState.Failed)
         // The tool output is a structured error string, not a thrown exception (existing tool-error-as-output behavior).
-        assertTrue("the error must surface in the returned output: $result", result.contains("boom"))
+        assertTrue("the error must surface in the returned output: ${result.text}", result.text.contains("boom"))
+        assertTrue("the terminal state must be Failed", result.state is TaskState.Failed)
     }
 
     // --- budget enforcement --------------------------------------------------------------------

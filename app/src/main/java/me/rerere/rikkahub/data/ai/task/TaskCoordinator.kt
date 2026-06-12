@@ -37,12 +37,35 @@ import kotlin.uuid.Uuid
  * Local sentinel thrown out of the child-flow `collect` to STOP collection on a budget breach.
  * Deliberately NOT a [CancellationException]: it must unwind past the collect (cancelling the
  * upstream child flow) but be caught at the collection site, not by [TaskCoordinator.execute]'s
- * cancellation arm — a budget stop is a normal terminal, not a parent cancel.
+ * cancellation arm — a budget stop is a normal terminal, not a parent cancel. Carries the
+ * BudgetExhausted [TaskState] the breach event produced so the terminal result reports it.
  */
-private object BudgetStop : RuntimeException() {
-    private fun readResolve(): Any = BudgetStop
+private class BudgetStop(val terminal: TaskState?) : RuntimeException() {
     override fun fillInStackTrace(): Throwable = this
 }
+
+/**
+ * The terminal outcome of a task run (review finding #1). [run]/[resume] return this instead of a
+ * bare final-text string so the spawn tool can mirror the run's TERMINAL lifecycle into its
+ * `UIMessagePart.Tool` output envelope — the status, the budget counters, and the
+ * interrupted/budget-exhausted identity the live renderer (`TaskToolUI`) needs. The renderer's
+ * legacy fallback (bare text => Succeeded) is then only hit by genuinely pre-envelope transcripts.
+ *
+ * Note: this carries the TERMINAL state only. Live status WHILE the child runs still requires the
+ * streaming-envelope seam through `ChatService`'s async generation (the tracked follow-up gap); a
+ * synchronous `execute` cannot emit intermediate envelopes.
+ *
+ * @param text the parent-visible final text (parity with the old `String` return).
+ * @param state the terminal [TaskState] the run reached.
+ * @param usage the run's final cumulative budget counters.
+ * @param maxSteps the step ceiling this run was bounded by (for the renderer's `steps/maxSteps`).
+ */
+data class TaskRunResult(
+    val text: String,
+    val state: TaskState,
+    val usage: TaskBudgetUsage,
+    val maxSteps: Int,
+)
 
 /**
  * The lifecycle-aware orchestrator that runs one self-contained sub-task against another
@@ -160,7 +183,8 @@ class TaskCoordinator(
     internal suspend fun parentMutexCount(): Int = parentRegistryLock.withLock { parentMutexes.size }
 
     /**
-     * Run a sub-task to completion and return its final text (parity with `SubagentRunner.run`).
+     * Run a sub-task to completion and return its terminal outcome ([TaskRunResult] — its `.text`
+     * is the parity-preserving final text of `SubagentRunner.run`).
      *
      * @param parentToolCallId the spawn tool call that owns this child; the per-parent concurrency
      *   cap is keyed on it (a `null`/blank id means "no parent grouping" — only the global cap
@@ -179,7 +203,7 @@ class TaskCoordinator(
         parentToolCallId: String = "",
         taskId: Uuid = Uuid.random(),
         budget: TaskBudget = defaultBudget,
-    ): String {
+    ): TaskRunResult {
         val modelId = resolveSubagentModel(
             sub = sub.toAssistantConfig(),
             parentModelId = parentModelId,
@@ -268,7 +292,7 @@ class TaskCoordinator(
         tools: List<Tool> = emptyList(),
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
         budget: TaskBudget = defaultBudget,
-    ): String {
+    ): TaskRunResult {
         // The single-active-handle gate: atomically take the Interrupted -> Resuming edge. Only the
         // caller that drove the REAL transition wins; a losing concurrent resume (it found the run
         // already Resuming/Running) or a resume of a non-interrupted/absent run gets false and is
@@ -336,12 +360,15 @@ class TaskCoordinator(
         maxSteps: Int,
         processingStatus: MutableStateFlow<String?>,
         budget: TaskBudget,
-    ): String {
+    ): TaskRunResult {
         // Queued -> Starting: a concurrency slot is now held.
         store.applyEvent(taskId, TaskEvent.SlotClaimed)
         val startedAt = monotonicNow()
         var finalMessages: List<UIMessage> = messages
         var progressed = false
+        // Track the latest folded usage locally so the terminal result carries the run's final
+        // counters for the renderer's budget row (review finding #1) without a second store read.
+        var lastUsage = TaskBudgetUsage()
 
         return try {
             try {
@@ -361,24 +388,29 @@ class TaskCoordinator(
                             // tools past the cap (review finding #3); throwing the sentinel out of
                             // collect cancels the upstream child flow's coroutine so it actually
                             // stops, then is absorbed just below.
-                            val breach = store.recordUsage(taskId, usageOf(chunk.messages, startedAt), budget)
+                            lastUsage = usageOf(chunk.messages, startedAt)
+                            val breach = store.recordUsage(taskId, lastUsage, budget)
                             if (breach != null) {
-                                store.applyEvent(taskId, TaskEvent.BudgetExceeded(breach))
-                                throw BudgetStop
+                                val terminal = store.applyEvent(taskId, TaskEvent.BudgetExceeded(breach))
+                                throw BudgetStop(terminal)
                             }
                         }
                     }
                 }
-            } catch (_: BudgetStop) {
+            } catch (stop: BudgetStop) {
                 // The breach already fired TaskEvent.BudgetExceeded and the collection unwound,
-                // cancelling the child flow. Fall through to extract the partial summary below.
+                // cancelling the child flow. The run is BudgetExhausted; surface the partial text.
+                return resultOf(
+                    text = extractFinalAssistantText(finalMessages),
+                    terminal = stop.terminal,
+                    usage = lastUsage,
+                    maxSteps = maxSteps,
+                )
             }
-            // If a budget breach already terminated the run, a FinalResult on the absorbing
-            // BudgetExhausted terminal is a reducer no-op — but extracting text is still correct as
-            // the parent-visible partial summary.
+            // The run finished cleanly: drive FinalResult and report the Succeeded terminal.
             val result = extractFinalAssistantText(finalMessages)
-            store.applyEvent(taskId, TaskEvent.FinalResult(result))
-            result
+            val terminal = store.applyEvent(taskId, TaskEvent.FinalResult(result))
+            resultOf(text = result, terminal = terminal, usage = lastUsage, maxSteps = maxSteps)
         } catch (cancellation: CancellationException) {
             // Structured cancellation (parent generation stopped): surface the cancel to the
             // lifecycle, then rethrow so the coroutine tree tears down correctly.
@@ -389,10 +421,23 @@ class TaskCoordinator(
             // tool-error string (existing tool-error-as-output behavior) rather than a thrown
             // exception that would abort the parent turn.
             val reason = error.message ?: error::class.simpleName.orEmpty()
-            store.applyEvent(taskId, TaskEvent.ExecutionFailed(reason))
-            "Subagent failed: $reason"
+            val terminal = store.applyEvent(taskId, TaskEvent.ExecutionFailed(reason))
+            resultOf(text = "Subagent failed: $reason", terminal = terminal, usage = lastUsage, maxSteps = maxSteps)
         }
     }
+
+    /**
+     * Package the terminal [TaskState] for the result. [terminal] may be null (a no-op store, or a
+     * missing run): the result then degrades to [TaskState.Succeeded] with the text, matching the
+     * renderer's legacy fallback so nothing crashes.
+     */
+    private fun resultOf(text: String, terminal: TaskState?, usage: TaskBudgetUsage, maxSteps: Int): TaskRunResult =
+        TaskRunResult(
+            text = text,
+            state = terminal ?: TaskState.Succeeded(text),
+            usage = usage,
+            maxSteps = maxSteps,
+        )
 
     /**
      * The child's cumulative usage at this point in the stream: one step per assistant message,
