@@ -127,6 +127,21 @@ import kotlin.uuid.Uuid
 
 private const val TAG = "ChatService"
 
+// Turn-end sequencing for the sendMessage path (review mustFix #2). The invariant it pins: the
+// Stop-hook continuation strictly precedes ONE turn-end job launch, so title/suggestion jobs are
+// always built from the final transcript and never race a continued turn; a failed completion
+// launches no jobs (the continuation still runs, matching the previous unconditional behavior).
+// Top-level so the ordering contract is JVM-testable without constructing ChatService.
+internal suspend fun sequenceTurnEnd(
+    complete: suspend () -> Boolean,
+    continueAfterStopHook: suspend () -> Unit,
+    launchTurnEndJobs: () -> Unit,
+) {
+    val completed = complete()
+    continueAfterStopHook()
+    if (completed) launchTurnEndJobs()
+}
+
 internal fun backgroundTextGenerationParams(
     model: Model,
     reasoningLevel: ReasoningLevel = ReasoningLevel.OFF,
@@ -681,12 +696,16 @@ class ChatService(
 
                 // 开始补全
                 if (answer) {
-                    handleMessageComplete(conversationId)
                     // Stop hooks (#200 T8): turn end. Injected context (unless vetoed by
                     // preventContinuation) triggers exactly ONE more completion — the continuation's
                     // own turn end does NOT re-dispatch Stop, so a hook that always injects cannot
-                    // loop the agent unboundedly.
-                    continueAfterStopHookIfRequested(conversationId, assistant)
+                    // loop the agent unboundedly. Title/suggestion jobs are deferred until after the
+                    // continuation so they reflect the final transcript (review mustFix #2).
+                    sequenceTurnEnd(
+                        complete = { handleMessageComplete(conversationId, runTurnEndJobs = false) },
+                        continueAfterStopHook = { continueAfterStopHookIfRequested(conversationId, assistant) },
+                        launchTurnEndJobs = { launchTurnEndJobs(conversationId) },
+                    )
                 }
 
                 _generationDoneFlow.emit(conversationId)
@@ -734,7 +753,9 @@ class ChatService(
                 ).toMessageNode(),
             ),
         )
-        handleMessageComplete(conversationId)
+        // runTurnEndJobs = false: the sendMessage path owns the single turn-end job launch via
+        // sequenceTurnEnd, after this continuation finished (review mustFix #2).
+        handleMessageComplete(conversationId, runTurnEndJobs = false)
     }
 
     // 自动压缩历史的触发与执行（design #193 Stage 1：token 触发器 + 熔断器）。
@@ -1015,15 +1036,18 @@ class ChatService(
 
     // ---- 处理消息补全 ----
 
+    // Returns whether the completion ran to success — the sendMessage path needs it to decide
+    // whether the deferred turn-end jobs may launch (see [sequenceTurnEnd]).
     private suspend fun handleMessageComplete(
         conversationId: Uuid,
-        messageRange: ClosedRange<Int>? = null
-    ) {
+        messageRange: ClosedRange<Int>? = null,
+        runTurnEndJobs: Boolean = true,
+    ): Boolean {
         val settings = settingsStore.settingsFlow.first()
         val initialConversation = getConversationFlow(conversationId).value
         val assistant = settings.getAssistantById(initialConversation.assistantId)
             ?: settings.getCurrentAssistant()
-        val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId) ?: return
+        val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId) ?: return false
 
         val senderName = if (assistant.useAssistantAvatar) {
             assistant.name.ifEmpty { context.getString(R.string.assistant_page_default_assistant) }
@@ -1031,7 +1055,7 @@ class ChatService(
             model.displayName
         }
 
-        runCatching {
+        return runCatching {
 
             // reset suggestions
             updateConversationStateOnly(conversationId, initialConversation.copy(chatSuggestions = emptyList()))
@@ -1280,15 +1304,25 @@ class ChatService(
             Logging.log(TAG, "handleMessageComplete: $it")
             Logging.log(TAG, it.stackTraceToString())
         }.onSuccess {
-            val finalConversation = getConversationFlow(conversationId).value
-            saveConversation(conversationId, finalConversation)
+            saveConversation(conversationId, getConversationFlow(conversationId).value)
 
-            launchWithConversationReference(conversationId) {
-                generateTitle(conversationId, finalConversation)
-            }
-            launchWithConversationReference(conversationId) {
-                generateSuggestion(conversationId, finalConversation)
-            }
+            // Review mustFix #2: the sendMessage path defers these to AFTER the Stop-hook
+            // continuation (runTurnEndJobs = false + sequenceTurnEnd) — launching here would
+            // build title/suggestions from the pre-continuation transcript and race the final
+            // metadata. Other entry points (regenerate, approval-resume) end the turn here.
+            if (runTurnEndJobs) launchTurnEndJobs(conversationId)
+        }.isSuccess
+    }
+
+    // Post-turn side jobs (title + suggestions), built from the conversation as it is NOW —
+    // callers must only invoke this once the turn is final.
+    private fun launchTurnEndJobs(conversationId: Uuid) {
+        val finalConversation = getConversationFlow(conversationId).value
+        launchWithConversationReference(conversationId) {
+            generateTitle(conversationId, finalConversation)
+        }
+        launchWithConversationReference(conversationId) {
+            generateSuggestion(conversationId, finalConversation)
         }
     }
 
