@@ -17,6 +17,7 @@ import me.rerere.ai.runtime.GenerationChunk
 import me.rerere.ai.runtime.contract.TurnConfig
 import me.rerere.ai.runtime.subagent.resolveSubagentModel
 import me.rerere.ai.runtime.task.TaskBudget
+import me.rerere.ai.runtime.task.TaskBudgetCap
 import me.rerere.ai.runtime.task.TaskBudgetUsage
 import me.rerere.ai.runtime.task.TaskEvent
 import me.rerere.ai.runtime.task.TaskSpec
@@ -36,6 +37,7 @@ import org.junit.Test
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.minutes
 import kotlin.uuid.Uuid
 
 /**
@@ -270,6 +272,29 @@ class TaskCoordinatorTest {
 
         val taskId = store.created.single().taskId
         assertTrue("a step-cap breach must terminate as BudgetExhausted", store.states[taskId] is TaskState.BudgetExhausted)
+    }
+
+    @Test
+    fun `exceeding the wall-time budget drives the reducer to BudgetExhausted`() {
+        val store = FakeStore()
+        // The clock jumps 11 minutes between startedAt and the first usage fold, past the default
+        // 10-minute wall-time cap. A frozen ZERO clock (the DI bug, review finding #1) would leave
+        // elapsed = 0 and never breach — this test fails if the wall-time fold is not wired.
+        val ticks = ArrayDeque(listOf(Duration.ZERO, 11.minutes))
+        val steppingClock = { ticks.removeFirst() }
+        val reporting: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            flowOf(GenerationChunk.Messages(listOf(assistantMsg("turn"))))
+        }
+        val coordinator = coordinator(reporting, store = store, clock = steppingClock)
+
+        runBlocking {
+            coordinator.run(sub = Assistant(name = "Sub", chatModelId = subModel.id), prompt = "go", parentModelId = null, settings = settingsWith(subModel))
+        }
+
+        val taskId = store.created.single().taskId
+        val terminal = store.states[taskId]
+        assertTrue("a wall-time breach must terminate as BudgetExhausted, was $terminal", terminal is TaskState.BudgetExhausted)
+        assertEquals(TaskBudgetCap.WallTime, (terminal as TaskState.BudgetExhausted).breach.cap)
     }
 
     // --- concurrency gating --------------------------------------------------------------------

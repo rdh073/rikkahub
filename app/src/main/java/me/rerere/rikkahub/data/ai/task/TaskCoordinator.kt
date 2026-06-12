@@ -10,6 +10,7 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.Model
 import me.rerere.ai.runtime.GenerationChunk
+import me.rerere.ai.runtime.contract.TaskBudgetClock
 import me.rerere.ai.runtime.contract.TurnConfig
 import me.rerere.ai.runtime.subagent.extractFinalAssistantText
 import me.rerere.ai.runtime.subagent.filterToolsForSubagent
@@ -21,6 +22,7 @@ import me.rerere.ai.runtime.task.TaskSpec
 import me.rerere.ai.runtime.task.TaskState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.data.ai.GenerationHandler
+import me.rerere.rikkahub.data.ai.runtime.MonotonicTaskBudgetClock
 import me.rerere.rikkahub.data.ai.runtime.toAssistantConfig
 import me.rerere.rikkahub.data.ai.subagent.SPAWN_TOOL_NAME
 import me.rerere.rikkahub.data.ai.subagent.SubagentGenerate
@@ -66,12 +68,21 @@ class TaskCoordinator(
     private val defaultBudget: TaskBudget = TaskBudget(),
     private val monotonicNow: () -> Duration = { Duration.ZERO },
 ) {
-    /** DI/composition-root constructor: bind the engine to [GenerationHandler.generateText]. */
+    /**
+     * DI/composition-root constructor: bind the engine to [GenerationHandler.generateText] and the
+     * wall-time budget to a real [TaskBudgetClock].
+     *
+     * The [clock] is REQUIRED, not defaulted: a default here is exactly how wall-time enforcement
+     * silently died in the shipped build (review finding #1) — the previous `monotonicNow` default
+     * of `{ Duration.ZERO }` made `elapsed` always 0, so the wall-time cap never tripped. The
+     * composition root must supply a monotonic clock ([MonotonicTaskBudgetClock]); there is no
+     * zero-clock fallback that can re-disable the cap.
+     */
     constructor(
         generationHandler: GenerationHandler,
         store: TaskRunStore,
+        clock: TaskBudgetClock,
         defaultBudget: TaskBudget = TaskBudget(),
-        monotonicNow: () -> Duration = { Duration.ZERO },
     ) : this(
         generate = { settings, model, messages, assistant, tools, maxSteps, processingStatus ->
             generationHandler.generateText(
@@ -86,7 +97,7 @@ class TaskCoordinator(
         },
         store = store,
         defaultBudget = defaultBudget,
-        monotonicNow = monotonicNow,
+        monotonicNow = clock::monotonicNow,
     )
 
     /** Process-wide concurrency gate. Recomputed per cap so a test/override budget is honored. */
