@@ -66,9 +66,13 @@ invariant below is pinned by a kotest property that runs in plain JVM CI.
    (`AgentTypeSpec.toolPolicy`, e.g. `ask_user` and read-only/non-destructive tools) forward to
    the parent's approval surface; everything else auto-denies with the reason recorded in the
    task summary. Allowlist, not heuristics.
-3. **Interrupted tasks: resumable.** Parent UI shows a resume button on `Interrupted` tasks;
-   resume consumes the summary (per #1). Additional invariant: resume never duplicates side
-   effects — one task has at most ONE active handle.
+3. **Interrupted tasks: resumable.** The resume MECHANISM exists and is tested
+   (`TaskCoordinator.resume` + the `claimResume` single-active-handle CAS); resume consumes the
+   summary (per #1) and resume never duplicates side effects — one task has at most ONE active
+   handle. NOT YET WIRED to the UI end-to-end: the renderer shows only a non-interactive
+   "Interrupted — resume available" affordance, and no production caller invokes
+   `TaskCoordinator.resume` — see the disposition section (finding S2-#2). **This sub-criterion is
+   NOT met by this branch and must not be claimed met.**
 4. **Board v1: user-editable.** Read-write board UI (create/edit/status/delete). Consequence:
    ALL board invariants (cycle check, claim atomicity, legal transitions) are enforced in the
    repository/domain layer, caller-agnostic — tool calls and UI go through the same path, never
@@ -346,7 +350,11 @@ a milestone.)
    visible in the task summary.
 4. Kill the process mid-task: on restart the task row reads `Interrupted`, its board claims are
    released, the parent message shows resume; resuming spawns exactly one new handle seeded
-   with prompt + summary; double-resume is rejected.
+   with prompt + summary; double-resume is rejected. PARTIALLY met: the restart→`Interrupted`
+   scan, the summary-seeded re-spawn, and the double-resume rejection are implemented and tested
+   (`TaskRecoveryResumeTest`, `claimResume`), but "the parent message shows resume" is NOT wired —
+   the renderer affordance is non-interactive and nothing invokes `TaskCoordinator.resume` in
+   production (finding S2-#2 in the disposition section).
 5. Board: user edits and tool calls hit the same repository path; cycle insertion is rejected;
    concurrent claims of one item yield exactly one owner; deleting a blocker unblocks
    dependents; one subagent can hold several claims.
@@ -486,6 +494,62 @@ A later cross-model review raised four findings (its own numbering, distinct fro
 - **R-#4 — corrupt summaries recovered as empty progress.** FIXED: recovery distinguishes a corrupt
   blob (`decodeEventSummaries() == null`) from an empty history and seeds a non-blank marker so a
   resume does not treat unreadable progress as a clean slate.
+
+## Third-round review findings — disposition
+
+A later cross-model review raised four findings (its own numbering, S2-#1..#4):
+
+- **S2-#1 — spawned subagents never received board tools in production.** FIXED.
+  `AppToolCatalog` adds the board tools on a `TurnMode.Subagent` pool, but the production spawn
+  path assembles the subagent pool through `buildSpawnTool`'s `buildSubagentTools` lambda and feeds
+  it straight to `TaskCoordinator.run` — never the catalog — so that arm was dead for spawned
+  children and a subagent could not `task_list` / `task_update` the shared board. The assembly seam
+  now appends `subagentBoardTools(...)` (a pure binding of `buildBoardTools` over a
+  `BoardPortAdapter` scoped to the parent conversation, owned by a per-subagent `BoardActor`), so a
+  spawned subagent coordinates over the one shared board (spec assumption 5 / decision #5).
+  Regression: `SubagentBoardToolsTest`. This is the "no board tools at all" gap, distinct from
+  Gap B (per-HANDLE claim ownership for orphan release), which stays deferred.
+- **S2-#2 — interrupted tasks are not resumable from the UI.** REJECTED for this branch (real, not
+  fixed). The renderer shows only a non-interactive `ResumePlaceholder()` and no production caller
+  invokes `TaskCoordinator.resume`. A correct user-explicit resume must (a) make the affordance
+  interactive, (b) reassemble the subagent spawn context — `sub` Assistant, live `Settings`,
+  `parentModelId`, and the full subagent tool pool (`localTools` / `skillManager` / `mcpManager` /
+  automation guard) — which only `ChatService` builds per generation, and (c) fold the resumed
+  run's terminal `TaskRunResult` back into the ORIGINAL message's `UIMessagePart.Tool` envelope so
+  the renderer updates. (c) re-enters `ChatService`'s async generation + streaming-merge seam: the
+  renderer reads the message tool envelope, NOT a Room flow, so a coordinator-only resume could run
+  side effects but never surface its answer. That is the same multi-hundred-line, Ask-first
+  spawn-execution seam Gap A and the R-#1 LIVE-status remainder are sequenced on. Per "design
+  before patch for the lifecycle class" and "do not ship a stub / do not decide a large scope split
+  unilaterally", it is documented for a follow-up slice rather than half-wired. The false "resume
+  is shipped" claims in §Assumptions #3 and Success Criterion #4 have been corrected to "NOT met".
+
+  Design for the follow-up slice (state-machine class — design before patch):
+  1. Make the renderer affordance interactive: thread an `onResume(taskId)` callback through
+     `ToolUIContext` (or surface a resume action on a task-run list panel backed by
+     `TaskRunDAO.listByConversationFlow`), invoked from the chat message/board surface.
+  2. Add `ChatService.resumeTask(conversationId, taskId)` that loads the persisted `TaskRunEntity`,
+     resolves `agentTypeId` → the `spawnable` `Assistant`, rebuilds the subagent tool pool exactly
+     as `buildSubagentTools` does (now including `subagentBoardTools`), and calls
+     `TaskCoordinator.resume` inside a generation entry. `claimResume` already guarantees exactly
+     one new active handle and rejects a double-resume.
+  3. Fold the returned `TaskRunResult` into the original task message's `UIMessagePart.Tool` output
+     via `buildTaskEnvelope`, through the same streaming-merge path `handleMessageComplete` uses,
+     so the renderer flips `Interrupted` → the new terminal. This is the Ask-first async-generation
+     seam; sequence it with Gap A and the R-#1 live-status remainder (all the same seam).
+- **S2-#3 — child progress never persisted into `eventSummaries`.** ALREADY FIXED at branch HEAD
+  (not a new change): `TaskCoordinator.execute` appends the child's latest assistant text via
+  `store.appendEventSummary` on each non-blank progress chunk
+  (`TaskCoordinator.kt`, "Persist the child's latest progress as an event summary"), so
+  `recoverInterruptedRuns` seeds a resume from real progress rather than an empty summary.
+  Regression already present: `TaskCoordinatorTest` — "child progress is persisted as an event
+  summary so recovery resumes from real progress". The finding was verified against an earlier tree.
+- **S2-#4 — deleting a conversation leaves orphan task/board rows.** ALREADY FIXED at branch HEAD
+  (not a new change): `ConversationRepository.deleteConversation` calls
+  `deleteConversationTaskArtifacts(taskRunDAO, workItemDAO, conversation.id)` in the SAME
+  transaction as the conversation delete (the new entities have no FK to the conversation, so Room
+  CASCADE does not reach them). Regression already present: `ConversationTaskArtifactCascadeTest`.
+  The finding was verified against an earlier tree.
 
 ## Verification (skill gate)
 
