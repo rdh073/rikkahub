@@ -218,7 +218,6 @@
   <string name="backup_page_s3_secret_access_key">シークレットアクセスキー</string>
   <string name="backup_page_test_connection">接続テスト</string>
   <string name="backup_page_title">バックアップと復元</string>
-  <string name="backup_page_unknown_error">不明なエラー</string>
   <string name="backup_page_username">ユーザー名</string>
   <string name="backup_page_webdav_backup">WebDAVバックアップ</string>
   <string name="backup_page_webdav_backup_files">WebDavバックアップファイル一覧</string>

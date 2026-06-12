@@ -218,7 +218,6 @@
   <string name="backup_page_s3_secret_access_key">Секретный ключ доступа</string>
   <string name="backup_page_test_connection">Проверить подключение</string>
   <string name="backup_page_title">Резервное копирование и восстановление</string>
-  <string name="backup_page_unknown_error">Неизвестная ошибка</string>
   <string name="backup_page_username">Имя пользователя</string>
   <string name="backup_page_webdav_backup">Резервное копирование WebDAV</string>
   <string name="backup_page_webdav_backup_files">Файлы резервного копирования WebDAV</string>

@@ -218,7 +218,6 @@
   <string name="backup_page_s3_secret_access_key">秘密访问密钥</string>
   <string name="backup_page_test_connection">测试连接</string>
   <string name="backup_page_title">备份与恢复</string>
-  <string name="backup_page_unknown_error">未知错误</string>
   <string name="backup_page_username">用户名</string>
   <string name="backup_page_webdav_backup">WebDAV备份</string>
   <string name="backup_page_webdav_backup_files">WebDav备份文件列表</string>
