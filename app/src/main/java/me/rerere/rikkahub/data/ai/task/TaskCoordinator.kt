@@ -178,6 +178,84 @@ class TaskCoordinator(
     }
 
     /**
+     * Resume an [TaskState.Interrupted] run (SPEC.md M6, maintainer decisions #1/#3): keep the
+     * SAME [taskId], seed a NEW child with the original [prompt] plus the persisted [progressSummary]
+     * as context, and drive the run to a fresh terminal. There is no provider state to continue —
+     * "resume" is a re-spawn from the summary, never a transcript replay (decision #1).
+     *
+     * **Single-active-handle is enforced in persisted state, not an in-memory flag (decision #3).**
+     * The first thing this does is fold [TaskEvent.ResumeRequested] through the store: the reducer's
+     * ONLY edge out of `Interrupted` is `Interrupted -> Resuming`, so exactly one caller can take it.
+     * Any other persisted state (a concurrent resume that already moved the run to `Resuming`/
+     * `Running`, or a terminal) folds to a non-`Resuming` result, which this rejects with
+     * [IllegalStateException] BEFORE spawning anything. A rejected resume therefore never creates a
+     * second handle.
+     *
+     * @throws IllegalStateException if the run does not exist or is not currently resumable.
+     */
+    suspend fun resume(
+        taskId: Uuid,
+        sub: Assistant,
+        prompt: String,
+        progressSummary: String,
+        parentModelId: Uuid?,
+        settings: Settings,
+        tools: List<Tool> = emptyList(),
+        processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
+        budget: TaskBudget = defaultBudget,
+    ): String {
+        // The single-active-handle gate: only the run currently in Interrupted folds to Resuming.
+        // Take this BEFORE resolving the model / spawning anything, so a losing concurrent resume
+        // (or a resume of a non-interrupted run) is rejected without side effects.
+        val gated = store.applyEvent(taskId, TaskEvent.ResumeRequested)
+        check(gated == TaskState.Resuming) {
+            "task $taskId is not resumable (state=$gated): at most one active handle per task"
+        }
+
+        val modelId = resolveSubagentModel(
+            sub = sub.toAssistantConfig(),
+            parentModelId = parentModelId,
+            turn = TurnConfig(
+                defaultModelId = settings.chatModelId,
+                providers = emptyList(),
+                assistants = emptyList(),
+            ),
+        )
+        val model = settings.findModelById(modelId)
+            ?: error("Subagent model not found for id $modelId")
+
+        val ephemeralSub = sub.copy(
+            chatModelId = model.id,
+            enableMemory = false,
+            enableRecentChatsReference = false,
+        )
+        val maxSteps = sub.maxSteps ?: budget.maxSteps
+        // Seed the new child with the original task plus the persisted progress summary as context
+        // (decision #1). The summary is injected, not replayed: a blank summary degrades to the
+        // bare prompt, which is still a valid fresh spawn.
+        val messages = listOf(UIMessage.user(resumePrompt(prompt, progressSummary)))
+        val childTools = filterToolsForSubagent(tools, SPAWN_TOOL_NAME)
+
+        // The run already holds no slot (its handle died); re-acquire one, then drive the engine.
+        // From Resuming, the first child event folds Resuming -> Running (an early SlotClaimed is an
+        // illegal no-op the reducer absorbs), so execute() is reused unchanged.
+        return globalSemaphore(budget.globalConcurrency).withPermit {
+            execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget)
+        }
+    }
+
+    /**
+     * The seed message a resume injects: the original task prompt followed by the persisted
+     * progress summary as recovery context. Kept tiny and pure so the prompt shape is testable.
+     */
+    private fun resumePrompt(prompt: String, progressSummary: String): String =
+        if (progressSummary.isBlank()) {
+            prompt
+        } else {
+            "$prompt\n\n[Resuming a previously interrupted run. Progress so far:\n$progressSummary]"
+        }
+
+    /**
      * The slot-acquired body: drive the child through the engine seam, fold usage against the
      * budget, and terminate the run. Separated from [run] so the concurrency wrappers stay thin.
      */

@@ -99,6 +99,35 @@ class TaskBoardRepository(
             BoardMutationResult.Accepted(BoardItemSnapshot(item, blockers))
         }
 
+    /**
+     * Orphan recovery (SPEC.md M6, maintainer decision #5): release EVERY board claim owned by a
+     * dead execution handle, regardless of lease. The lease is only a backstop for a handle that
+     * dies without recovery ever running; when recovery DOES run it must release all of the dead
+     * handle's claims explicitly. Returns the number of items released.
+     *
+     * Each release goes through the same validated [update] path the UI/tools use (decision #4),
+     * so an `InProgress` claim folds `InProgress -> Pending` via [WorkItemAction.Release] and
+     * clears the owner/lease; a row that is no longer `InProgress` (already completed/deleted by a
+     * concurrent caller, or whose release the validator rejects) is skipped, never force-written.
+     */
+    suspend fun releaseClaimsOf(handleId: String): Int {
+        // The owner scan is its own read; each release is then one atomic [update] transaction.
+        // A claim that races to a terminal between the scan and the release simply fails the
+        // Release transition and is skipped — no partial/forced write.
+        val owned = transactions.inTransaction { dao.listByOwner(handleId) }
+        var released = 0
+        for (entity in owned) {
+            val item = entity.toDomain()
+            if (item.status != WorkItemStatus.InProgress) continue
+            val result = update(
+                conversationId = Uuid.parse(entity.conversationId),
+                patch = WorkItemPatch(id = item.id, action = WorkItemAction.Release),
+            )
+            if (result is BoardMutationResult.Accepted) released++
+        }
+        return released
+    }
+
     suspend fun get(conversationId: Uuid, id: Uuid): BoardItemSnapshot? = transactions.inTransaction {
         val entity = dao.getById(id.toString())
             ?.takeIf { it.conversationId == conversationId.toString() }

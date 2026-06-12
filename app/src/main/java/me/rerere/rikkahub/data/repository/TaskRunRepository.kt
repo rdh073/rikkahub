@@ -64,6 +64,41 @@ class TaskRunRepository(
     }
 
     /**
+     * Startup recovery scan (SPEC.md M6, maintainer decisions #1/#3): mark every ACTIVE task row
+     * [TaskState.Interrupted]. A process killed mid-run leaves rows claiming to be in flight
+     * (Created/Queued/Starting/Running/WaitingApproval/Resuming) whose live coroutine handle is
+     * gone; this scan folds each through the reducer's [TaskEvent.ProcessInterrupted] so the row
+     * reads `Interrupted` and the parent UI can offer an explicit resume.
+     *
+     * What this DOES NOT do, on purpose:
+     * - **No side-effect replay.** It only rewrites the lifecycle tag; it never re-runs the child
+     *   or re-applies any persisted event.
+     * - **No auto-resume.** `Interrupted` is not in [TaskRunStateTag.ACTIVE], so a second scan
+     *   leaves it alone (idempotent); the only edge out is the user-explicit resume.
+     *
+     * The interrupted summary is the run's last persisted event summary (decision #1: resume
+     * injects this, never a transcript), or empty when the run had logged none yet. Returns the
+     * ids of the rows actually recovered.
+     */
+    suspend fun recoverInterruptedRuns(): List<Uuid> = transactions.inTransaction {
+        val active = dao.listByStates(TaskRunStateTag.ACTIVE.map { it.name }.toSet())
+        active.mapNotNull { entity ->
+            val taskId = Uuid.parse(entity.id)
+            val current = entity.toTaskState()
+            val summary = entity.decodeEventSummaries()?.lastOrNull()?.summary.orEmpty()
+            val next = TaskStateReducer.reduce(current, TaskEvent.ProcessInterrupted(summary))
+            if (next == current) {
+                // Defensive no-op guard mirroring [applyEvent]: a row whose state does not fold to
+                // Interrupted is left byte-identical and reported as not-recovered.
+                null
+            } else {
+                dao.upsert(entity.applyState(next, updatedAt = now()))
+                taskId
+            }
+        }
+    }
+
+    /**
      * Fold [event] over the run's persisted state via [TaskStateReducer] and persist the result.
      *
      * Returns the resulting domain state, or null when no run exists. The reducer — not this
