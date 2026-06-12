@@ -289,6 +289,48 @@ class TaskCoordinatorTest {
     }
 
     @Test
+    fun `a budget breach stops collecting the child flow instead of letting it keep running`() {
+        // The child flow emits a breaching chunk and then KEEPS emitting. A budget breach must
+        // cancel the collection so the child stops producing chunks / running tools after the cap —
+        // `return@collect` only skips one chunk, leaving the child to run on (review finding #3).
+        val store = FakeStore()
+        val emitted = AtomicInteger(0)
+        val collected = AtomicInteger(0)
+        val running: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            flow {
+                // First chunk already breaches the 1-step cap (one assistant turn => 1 step, with a
+                // cap of 0 the first fold breaches). Then the child tries to keep going.
+                repeat(5) { i ->
+                    emitted.incrementAndGet()
+                    emit(GenerationChunk.Messages(listOf(assistantMsg("turn $i"))))
+                }
+            }
+        }
+        val coordinator = coordinator(running, store = store, budget = TaskBudget(maxSteps = 0))
+
+        runBlocking {
+            // Wrap the seam so we observe how many chunks the coordinator actually consumed.
+            val countingCoordinator = coordinator(
+                generate = { s, m, msgs, a, t, ms, ps ->
+                    kotlinx.coroutines.flow.flow {
+                        running(s, m, msgs, a, t, ms, ps).collect {
+                            collected.incrementAndGet()
+                            emit(it)
+                        }
+                    }
+                },
+                store = store,
+                budget = TaskBudget(maxSteps = 0),
+            )
+            countingCoordinator.run(sub = Assistant(name = "Sub", chatModelId = subModel.id), prompt = "go", parentModelId = null, settings = settingsWith(subModel))
+        }
+
+        val taskId = store.created.single().taskId
+        assertTrue("a step-cap breach must terminate as BudgetExhausted", store.states[taskId] is TaskState.BudgetExhausted)
+        assertEquals("collection must stop at the first breaching chunk, not drain the child flow", 1, collected.get())
+    }
+
+    @Test
     fun `exceeding the wall-time budget drives the reducer to BudgetExhausted`() {
         val store = FakeStore()
         // The clock jumps 11 minutes between startedAt and the first usage fold, past the default

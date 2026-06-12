@@ -34,6 +34,17 @@ import kotlin.time.Duration
 import kotlin.uuid.Uuid
 
 /**
+ * Local sentinel thrown out of the child-flow `collect` to STOP collection on a budget breach.
+ * Deliberately NOT a [CancellationException]: it must unwind past the collect (cancelling the
+ * upstream child flow) but be caught at the collection site, not by [TaskCoordinator.execute]'s
+ * cancellation arm — a budget stop is a normal terminal, not a parent cancel.
+ */
+private object BudgetStop : RuntimeException() {
+    private fun readResolve(): Any = BudgetStop
+    override fun fillInStackTrace(): Throwable = this
+}
+
+/**
  * The lifecycle-aware orchestrator that runs one self-contained sub-task against another
  * [Assistant] (SPEC.md M4). It is the product replacement for `SubagentRunner`: same final-text
  * return so the spawn tool's output still lands in `UIMessagePart.Tool`, but with three additions
@@ -333,25 +344,34 @@ class TaskCoordinator(
         var progressed = false
 
         return try {
-            generate(settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus).collect { chunk ->
-                when (chunk) {
-                    is GenerationChunk.Messages -> {
-                        finalMessages = chunk.messages
-                        if (!progressed) {
-                            // First child event: Starting -> Running.
-                            store.applyEvent(taskId, TaskEvent.ChildProgressed)
-                            progressed = true
-                        }
-                        // Fold the child's CUMULATIVE usage (steps from assistant turns, tokens from
-                        // the message usage counters, elapsed from the monotonic clock) and stop the
-                        // run on the first cap breach.
-                        val breach = store.recordUsage(taskId, usageOf(chunk.messages, startedAt), budget)
-                        if (breach != null) {
-                            store.applyEvent(taskId, TaskEvent.BudgetExceeded(breach))
-                            return@collect
+            try {
+                generate(settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus).collect { chunk ->
+                    when (chunk) {
+                        is GenerationChunk.Messages -> {
+                            finalMessages = chunk.messages
+                            if (!progressed) {
+                                // First child event: Starting -> Running.
+                                store.applyEvent(taskId, TaskEvent.ChildProgressed)
+                                progressed = true
+                            }
+                            // Fold the child's CUMULATIVE usage (steps from assistant turns, tokens
+                            // from the message usage counters, elapsed from the monotonic clock) and
+                            // STOP the run on the first cap breach. A bare `return@collect` only
+                            // skips one chunk and lets the child keep producing chunks / running
+                            // tools past the cap (review finding #3); throwing the sentinel out of
+                            // collect cancels the upstream child flow's coroutine so it actually
+                            // stops, then is absorbed just below.
+                            val breach = store.recordUsage(taskId, usageOf(chunk.messages, startedAt), budget)
+                            if (breach != null) {
+                                store.applyEvent(taskId, TaskEvent.BudgetExceeded(breach))
+                                throw BudgetStop
+                            }
                         }
                     }
                 }
+            } catch (_: BudgetStop) {
+                // The breach already fired TaskEvent.BudgetExceeded and the collection unwound,
+                // cancelling the child flow. Fall through to extract the partial summary below.
             }
             // If a budget breach already terminated the run, a FinalResult on the absorbing
             // BudgetExhausted terminal is a reducer no-op — but extracting text is still correct as
