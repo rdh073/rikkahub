@@ -192,11 +192,24 @@ val dataSourceModule = module {
 
     // Summary-only task-run persistence (SPEC.md M2/M4, decision #1). The repository folds every
     // event through the pure TaskStateReducer so the stored state can never disagree with
-    // TASK_STATE_LEGAL; it satisfies the narrow TaskRunStore seam TaskCoordinator depends on.
-    single<me.rerere.rikkahub.data.ai.task.TaskRunStore> {
+    // TASK_STATE_LEGAL. Bound as its CONCRETE type so startup recovery + retention (lifecycle
+    // operations the coordinator never drives, hence NOT on the narrow TaskRunStore seam) are
+    // resolvable; the TaskRunStore binding the coordinator depends on points at the SAME instance.
+    single {
         TaskRunRepository(
             dao = get(),
             transactions = RoomBoardTransactionRunner(get<AppDatabase>()),
+        )
+    }
+    single<me.rerere.rikkahub.data.ai.task.TaskRunStore> { get<TaskRunRepository>() }
+
+    // Cold-start recovery + retention composition root (SPEC.md M6, Success Criterion #4). Invoked
+    // once from RikkaHubApp.onCreate: marks active task rows Interrupted (no replay) and sweeps
+    // expired terminal runs / completed-deleted board items.
+    single {
+        me.rerere.rikkahub.data.ai.task.TaskRecoveryRunner(
+            taskRuns = get(),
+            board = get(),
         )
     }
 
