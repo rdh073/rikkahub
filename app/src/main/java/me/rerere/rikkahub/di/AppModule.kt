@@ -123,6 +123,7 @@ val appModule = module {
             mcpManager = get(),
             filesManager = get(),
             skillManager = get(),
+            taskBoardRepository = get(),
             automationRegistry = get(),
             automationKillSwitch = get(),
             hookDispatcher = get()

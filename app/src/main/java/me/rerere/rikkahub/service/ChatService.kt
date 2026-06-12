@@ -109,7 +109,11 @@ import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.data.model.sanitizeForUpload
 import me.rerere.rikkahub.data.model.toMessageNode
+import me.rerere.ai.runtime.board.buildBoardTools
+import me.rerere.rikkahub.data.ai.task.BoardPortAdapter
+import me.rerere.rikkahub.data.repository.BoardActor
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.repository.TaskBoardRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.ai.runtime.memory.MEMORY_RECALL_K
 import me.rerere.rikkahub.data.ai.memory.MemoryRecaller
@@ -449,6 +453,9 @@ class ChatService(
     val mcpManager: McpManager,
     private val filesManager: FilesManager,
     private val skillManager: SkillManager,
+    // Per-conversation work-item board (SPEC.md M3/T7). Board tools delegate through this single
+    // repository — the same path the board UI uses (decision #4) — so legality is enforced once.
+    private val taskBoardRepository: TaskBoardRepository,
     // On-device UI automation (#187 v1, read-only). Registry hands out the live, system-instantiated
     // AccessibilityRuntime as a pure backend; the kill-switch dispatches STOP to the active guard(s).
     private val automationRegistry: AutomationRuntimeRegistry,
@@ -1178,6 +1185,23 @@ class ChatService(
                             },
                         )
                     }
+                },
+                // Per-conversation board tools (SPEC.md M3/T7), added to the base pool for BOTH the
+                // main turn and any spawned subagent (decision #5: subagents coordinate over the one
+                // shared board). The port binds THIS conversation's id + the parent actor, so the
+                // tool never sees a conversation id; the repository is the single enforcement point
+                // shared with the board UI (decision #4). The parent turn acts as the user/owner.
+                boardTools = {
+                    buildBoardTools(
+                        BoardPortAdapter(
+                            repository = taskBoardRepository,
+                            conversationId = conversationId,
+                            actor = BoardActor(
+                                handleId = "conversation:$conversationId",
+                                displayName = senderName,
+                            ),
+                        )
+                    )
                 },
             )
 
