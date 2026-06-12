@@ -1,11 +1,13 @@
 package me.rerere.rikkahub.data.ai.task
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.Model
@@ -252,14 +254,39 @@ class TaskCoordinator(
         // parent consistently for every run prevents a lock-acquisition cycle. The parent-mutex
         // registration is released in a finally so its map entry is evicted once the last sibling
         // departs (review finding #3) — even on cancellation or a thrown execute().
+        // Lifecycle closure (review mustFix): the run is already PERSISTED as Queued here, and
+        // slot acquisition below is a suspension point — cancellation or a throw before execute()
+        // begins must still drive the row to a terminal, or it stays active forever (invariant:
+        // every exit from an active state reaches a terminal/resumable state on EVERY exit path).
+        // Terminal writes on the cancellation path run under NonCancellable: the store suspends
+        // (Room), and a suspending write inside an already-cancelled coroutine dies at its first
+        // suspension point. Replays against execute()'s own terminal are absorbed by the reducer.
+        // The flag scopes the closure to the PRE-execute window only: once execute() is entered,
+        // its own handlers persist the terminal, and writing it again here would append a second
+        // CancelRequested to the event log (the cancel-cascade property demands exactly one).
+        var enteredExecute = false
         return try {
             globalSemaphore(budget.globalConcurrency).withPermit {
                 if (parentMutex != null) {
-                    parentMutex.withLock { execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget) }
+                    parentMutex.withLock {
+                        enteredExecute = true
+                        execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget)
+                    }
                 } else {
+                    enteredExecute = true
                     execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget)
                 }
             }
+        } catch (cancellation: CancellationException) {
+            if (!enteredExecute) {
+                withContext(NonCancellable) { store.applyEvent(taskId, TaskEvent.CancelRequested) }
+            }
+            throw cancellation
+        } catch (error: Throwable) {
+            if (!enteredExecute) {
+                store.applyEvent(taskId, TaskEvent.ExecutionFailed(error.message ?: error::class.simpleName.orEmpty()))
+            }
+            throw error
         } finally {
             if (grouped) releaseParentMutex(parentToolCallId)
         }
@@ -302,6 +329,10 @@ class TaskCoordinator(
         check(store.claimResume(taskId)) {
             "task $taskId is not resumable: at most one active handle per task"
         }
+        // Everything past the committed Interrupted -> Resuming edge runs inside the closure:
+        // model resolution can throw and slot acquisition can be cancelled, and both must
+        // restore Interrupted (see resumeWithClosure).
+        return resumeWithClosure(taskId, progressSummary) { markExecuteEntered ->
 
         val modelId = resolveSubagentModel(
             sub = sub.toAssistantConfig(),
@@ -330,8 +361,42 @@ class TaskCoordinator(
         // The run already holds no slot (its handle died); re-acquire one, then drive the engine.
         // From Resuming, the first child event folds Resuming -> Running (an early SlotClaimed is an
         // illegal no-op the reducer absorbs), so execute() is reused unchanged.
-        return globalSemaphore(budget.globalConcurrency).withPermit {
+        globalSemaphore(budget.globalConcurrency).withPermit {
+            markExecuteEntered()
             execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget)
+        }
+
+        }
+    }
+
+    /**
+     * Lifecycle closure for the Resuming window (review mustFix): once claimResume committed
+     * `Interrupted -> Resuming`, ANY pre-execute exit — model-resolution failure, cancellation
+     * while waiting for a slot — must restore `Interrupted` (with the same [progressSummary]) so
+     * the task stays resumable instead of stranding in Resuming and blocking every future resume.
+     * If execute() already reached a real terminal (e.g. user cancel mid-run -> Cancelled), the
+     * replayed ProcessInterrupted is absorbed by the reducer's terminal identity.
+     */
+    private suspend fun resumeWithClosure(
+        taskId: Uuid,
+        progressSummary: String,
+        block: suspend (markExecuteEntered: () -> Unit) -> TaskRunResult,
+    ): TaskRunResult {
+        // Same pre-execute scoping as run(): once execute() is entered its own handlers own the
+        // terminal, and a replayed ProcessInterrupted would pollute the event log.
+        var enteredExecute = false
+        return try {
+            block { enteredExecute = true }
+        } catch (cancellation: CancellationException) {
+            if (!enteredExecute) {
+                withContext(NonCancellable) { store.applyEvent(taskId, TaskEvent.ProcessInterrupted(progressSummary)) }
+            }
+            throw cancellation
+        } catch (error: Throwable) {
+            if (!enteredExecute) {
+                store.applyEvent(taskId, TaskEvent.ProcessInterrupted(progressSummary))
+            }
+            throw error
         }
     }
 
@@ -426,8 +491,10 @@ class TaskCoordinator(
             resultOf(text = result, terminal = terminal, usage = lastUsage, maxSteps = maxSteps)
         } catch (cancellation: CancellationException) {
             // Structured cancellation (parent generation stopped): surface the cancel to the
-            // lifecycle, then rethrow so the coroutine tree tears down correctly.
-            store.applyEvent(taskId, TaskEvent.CancelRequested)
+            // lifecycle, then rethrow so the coroutine tree tears down correctly. NonCancellable
+            // is load-bearing: the store suspends (Room), and without it this terminal write is
+            // itself cancelled at its first suspension point — the run would stay Running forever.
+            withContext(NonCancellable) { store.applyEvent(taskId, TaskEvent.CancelRequested) }
             throw cancellation
         } catch (error: Throwable) {
             // Provider/unexpected error: Failed terminal, surfaced to the parent as a structured
