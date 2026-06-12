@@ -65,10 +65,16 @@ sealed interface TaskState {
  * An allowlisted child tool call waiting for the parent's decision, namespaced
  * `taskId/childToolCallId` on the parent approval surface. [toolName] is whatever name the
  * child's pool carries — this neutral domain names no concrete tool.
+ *
+ * @param argumentsJson the call's raw JSON arguments, carried for the parent-visible pending
+ *   item so the user decides on what the tool would actually do, not just its name. Display
+ *   payload only — never persisted (the pending-approval column stores id + name) and absent
+ *   ("") when a caller has nothing to show.
  */
 data class TaskApprovalRequest(
     val childToolCallId: String,
     val toolName: String,
+    val argumentsJson: String = "",
 )
 
 /** Everything that can happen to a task run; [TaskStateReducer] folds these over [TaskState]. */

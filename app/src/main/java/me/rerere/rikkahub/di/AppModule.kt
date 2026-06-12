@@ -155,6 +155,7 @@ val appModule = module {
             skillManager = get(),
             taskBoardRepository = get(),
             executionHandles = get(),
+            taskRunStore = get(),
             automationRegistry = get(),
             automationKillSwitch = get(),
             hookDispatcher = get()

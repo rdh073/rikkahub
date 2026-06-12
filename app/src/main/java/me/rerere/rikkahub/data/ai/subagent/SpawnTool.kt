@@ -15,11 +15,13 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.runtime.contract.TaskApprovalGate
 import me.rerere.ai.runtime.task.TaskState
 import me.rerere.rikkahub.data.ai.task.ExecutionHandle
 import me.rerere.rikkahub.data.ai.task.ExecutionHandleRegistry
 import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.ai.task.buildTaskEnvelope
+import me.rerere.rikkahub.data.ai.task.gateSubagentTools
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import kotlin.uuid.Uuid
@@ -67,9 +69,14 @@ const val SPAWN_TOOL_NAME: String = "task"
  * @param buildSubagentTools builds the TARGET (sub) assistant's own tool pool from its allowlist
  *   (local + skills + MCP), given the run's live execution handle (so the board tools bind their
  *   claim owner to it). Supplied by the caller (`ChatService`) so this factory stays free of
- *   Android `Context` / managers. The pool is filtered before it reaches the engine: the spawn tool
- *   is stripped by [TaskCoordinator.run] ([filterToolsForSubagent]) and `needsApproval=true` tools
- *   are dropped here, because the approval UI is unreachable mid-subagent (v1 security note).
+ *   Android `Context` / managers. The pool is rewritten before it reaches the engine: the spawn
+ *   tool is stripped by [TaskCoordinator.run] ([filterToolsForSubagent]), and `needsApproval=true`
+ *   tools are GATED through [approvalGateFor] (Gap A) — the child runtime never gates anything
+ *   itself; the gate forwards allowlisted tools to the parent's approval surface and auto-denies
+ *   the rest (maintainer decision #2 — replaces the v1 strip-all behavior).
+ * @param approvalGateFor the child-approval gate for a given sub (production:
+ *   `TaskApprovalRouter` over the sub's explicit `subagentApprovalAllowlist`, default EMPTY =
+ *   forward nothing). Per-sub because the allowlist is per-assistant.
  * @param releaseOrphanedClaims releases EVERY board claim still owned by the given handle id —
  *   bound to `TaskBoardRepository.releaseClaimsOf` at the composition root. Invoked on every
  *   terminal path (success, failure, cancellation) because the handle is dead either way; a claim
@@ -91,6 +98,7 @@ fun buildSpawnTool(
     registry: ExecutionHandleRegistry,
     buildSubagentTools: (sub: Assistant, handle: ExecutionHandle) -> List<Tool>,
     releaseOrphanedClaims: suspend (handleId: String) -> Unit,
+    approvalGateFor: (sub: Assistant) -> TaskApprovalGate,
     processingStatus: MutableStateFlow<String?>,
     progressLabel: (subName: String) -> String,
     parentConversationId: Uuid,
@@ -140,11 +148,21 @@ fun buildSpawnTool(
             parentJob = parentJob,
         )
 
-        // The sub's own tool pool — its board claims owned by the handle — minus tools whose
-        // approval UI is unreachable mid-subagent (v1 security note: a subagent runs only
-        // needsApproval=false tools). The spawn tool is additionally stripped inside
-        // TaskCoordinator.run (recursion guard, TASK_DEPTH_ONE).
-        val subTools = buildSubagentTools(sub, handle).filterNot { it.needsApproval }
+        // The run's identity is minted HERE so the approval gate and the persisted task row agree
+        // on it — the gate's events/summaries land on the same row coordinator.run creates.
+        val taskId = Uuid.random()
+
+        // The sub's own tool pool — its board claims owned by the handle — with approval-gated
+        // tools rewired through the parent's approval gate (Gap A): the child runtime sees only
+        // needsApproval=false tools (its approval UI is unreachable mid-subagent), and the gate
+        // forwards allowlisted calls to the parent while auto-denying the rest (decision #2). The
+        // spawn tool is additionally stripped inside TaskCoordinator.run (recursion guard,
+        // TASK_DEPTH_ONE).
+        val subTools = gateSubagentTools(
+            tools = buildSubagentTools(sub, handle),
+            taskId = taskId,
+            gate = approvalGateFor(sub),
+        )
 
         // Set-then-clear discipline (mirrors OcrTransformer / KnowledgeContextTransformer):
         // restore the prior status on EVERY terminal path so a stale "Running <sub>" label can't
@@ -162,6 +180,7 @@ fun buildSpawnTool(
                 tools = subTools,
                 processingStatus = processingStatus,
                 parentConversationId = parentConversationId,
+                taskId = taskId,
                 // parentToolCallId is intentionally NOT passed: the spawn tool call id is not
                 // reachable inside Tool.execute (its signature is `suspend (JsonElement) -> …`,
                 // engine-wide). Plumbing it would require an ABI change to the shared Tool type and

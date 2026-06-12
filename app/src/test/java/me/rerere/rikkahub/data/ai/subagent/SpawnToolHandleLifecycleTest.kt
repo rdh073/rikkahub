@@ -98,6 +98,14 @@ class SpawnToolHandleLifecycleTest {
             )
         },
         releaseOrphanedClaims = { handleId -> repository.releaseClaimsOf(handleId) },
+        approvalGateFor = {
+                object : me.rerere.ai.runtime.contract.TaskApprovalGate {
+                    override suspend fun await(
+                        taskId: kotlin.uuid.Uuid,
+                        request: me.rerere.ai.runtime.task.TaskApprovalRequest,
+                    ): Boolean = false
+                }
+            },
         processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
         progressLabel = { "running $it" },
         parentConversationId = conversationId,
@@ -180,6 +188,14 @@ class SpawnToolHandleLifecycleTest {
                 subagentBoardTools(fx.repository, conversationId, fx.registry, handle, spawned)
             },
             releaseOrphanedClaims = { handleId -> fx.repository.releaseClaimsOf(handleId) },
+            approvalGateFor = {
+                object : me.rerere.ai.runtime.contract.TaskApprovalGate {
+                    override suspend fun await(
+                        taskId: kotlin.uuid.Uuid,
+                        request: me.rerere.ai.runtime.task.TaskApprovalRequest,
+                    ): Boolean = false
+                }
+            },
             processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
             progressLabel = { "running $it" },
             parentConversationId = conversationId,

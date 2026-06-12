@@ -56,11 +56,15 @@ class TaskApprovalVisiblePropertyTest {
         }
     }
 
-    /** A fake store recording only the auto-deny summary entries (kind + summary), per task. */
+    /** A fake store recording auto-deny summary entries and every lifecycle event, per task. */
     private class RecordingStore : TaskRunStore {
         val summaries = ConcurrentHashMap<Uuid, MutableList<Pair<String, String>>>()
+        val events = ConcurrentHashMap<Uuid, MutableList<TaskEvent>>()
         override suspend fun create(spec: TaskSpec): TaskState = TaskState.Created
-        override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? = null
+        override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? {
+            events.getOrPut(taskId) { mutableListOf() } += event
+            return null
+        }
         override suspend fun claimResume(taskId: Uuid): Boolean = false
         override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? {
             summaries.getOrPut(taskId) { mutableListOf() } += kind to summary
@@ -114,6 +118,51 @@ class TaskApprovalVisiblePropertyTest {
                             recorded.any { (kind, text) ->
                                 kind == TaskApprovalRouter.SUMMARY_KIND_APPROVAL_DENIED && text.contains(toolName)
                             },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a forwarded approval drives the WaitingApproval round-trip on the state machine`() {
+        // The round-trip is exactly ApprovalRequested (Running -> WaitingApproval), ApprovalResolved
+        // (WaitingApproval -> Resuming), ChildProgressed (Resuming -> Running — the child resumes
+        // the moment the gate returns). An auto-deny never blocks the child, so it drives NO
+        // lifecycle events; its only trace is the summary entry.
+        runBlocking {
+            checkAll(200, Arb.list(arbToolName, 1..6), Arb.boolean()) { probes, parentApproves ->
+                val taskId = Uuid.random()
+                val allowlisted = probes.first()
+                val store = RecordingStore()
+                val router = TaskApprovalRouter(
+                    policyFor = { TaskToolPolicy(approvalForwardAllowlist = setOf(allowlisted)) },
+                    surface = FakeSurface { parentApproves },
+                    store = store,
+                )
+
+                probes.forEachIndexed { i, toolName ->
+                    val request = TaskApprovalRequest(childToolCallId = "call-$i", toolName = toolName)
+                    val before = store.events[taskId].orEmpty().size
+                    router.await(taskId, request)
+
+                    val driven = store.events[taskId].orEmpty().drop(before)
+                    if (toolName == allowlisted) {
+                        assertEquals(
+                            "a forwarded approval must drive the full WaitingApproval round-trip",
+                            listOf(
+                                TaskEvent.ApprovalRequested(request),
+                                TaskEvent.ApprovalResolved(parentApproves),
+                                TaskEvent.ChildProgressed,
+                            ),
+                            driven,
+                        )
+                    } else {
+                        assertEquals(
+                            "an auto-deny never blocks the child, so it drives no lifecycle events",
+                            emptyList<TaskEvent>(),
+                            driven,
                         )
                     }
                 }

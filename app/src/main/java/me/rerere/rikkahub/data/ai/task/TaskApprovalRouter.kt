@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai.task
 
 import me.rerere.ai.runtime.contract.TaskApprovalGate
 import me.rerere.ai.runtime.task.TaskApprovalRequest
+import me.rerere.ai.runtime.task.TaskEvent
 import me.rerere.ai.runtime.task.TaskToolPolicy
 import kotlin.uuid.Uuid
 
@@ -65,10 +66,23 @@ class TaskApprovalRouter(
         // Allowlisted: forward to the parent, namespaced taskId/childToolCallId, and suspend until
         // the parent decides. The surface is the existing approval path — no hidden execution while
         // pending, and approve-then-resume is exactly the parent's direct approved execution.
-        return surface.requestApproval(
+        //
+        // The router also drives the task state machine through the round-trip (SPEC.md M4):
+        // ApprovalRequested folds Running -> WaitingApproval BEFORE the suspension, so the persisted
+        // state says exactly why the child is not progressing; ApprovalResolved folds it to
+        // Resuming; ChildProgressed folds Resuming -> Running the moment the gate returns — that
+        // return IS the child resuming (it executes the tool or consumes the denial). Without the
+        // last event the run would strand in Resuming: the coordinator emits ChildProgressed only
+        // once, on the FIRST child chunk, so nothing else takes the run back to Running and the
+        // final FinalResult would be an illegal (ignored) edge from Resuming.
+        store.applyEvent(taskId, TaskEvent.ApprovalRequested(request))
+        val approved = surface.requestApproval(
             namespacedToolCallId = namespacedToolCallId(taskId, request.childToolCallId),
             request = request,
         )
+        store.applyEvent(taskId, TaskEvent.ApprovalResolved(approved))
+        store.applyEvent(taskId, TaskEvent.ChildProgressed)
+        return approved
     }
 
     private fun autoDenyReason(toolName: String): String =
@@ -88,6 +102,19 @@ class TaskApprovalRouter(
          */
         fun namespacedToolCallId(taskId: Uuid, childToolCallId: String): String =
             "$taskId$NAMESPACE_SEPARATOR$childToolCallId"
+
+        /**
+         * Whether a tool-call id arriving at `handleToolApproval` is a forwarded CHILD approval —
+         * i.e. shaped `taskId/childToolCallId` with a parseable task UUID before the separator.
+         * Provider-generated parent ids never carry this shape, so the parent approval path
+         * (cancel-relaunch) and the child path (resolve-in-place, the generation stays live) can
+         * be told apart structurally rather than by bookkeeping.
+         */
+        fun isNamespacedChildApprovalId(toolCallId: String): Boolean {
+            val prefix = toolCallId.substringBefore(NAMESPACE_SEPARATOR, missingDelimiterValue = "")
+            if (prefix.isEmpty()) return false
+            return runCatching { Uuid.parse(prefix) }.isSuccess
+        }
     }
 }
 
