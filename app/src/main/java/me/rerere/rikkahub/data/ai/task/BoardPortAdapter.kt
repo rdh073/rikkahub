@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.task
 
+import me.rerere.ai.runtime.board.WorkItemAction
 import me.rerere.ai.runtime.board.WorkItemStatus
 import me.rerere.ai.runtime.contract.BoardItemSnapshot
 import me.rerere.ai.runtime.contract.BoardMutationResult
@@ -32,6 +33,7 @@ class BoardPortAdapter(
     private val repository: TaskBoardRepository,
     private val conversationId: Uuid,
     private val actor: BoardActor? = null,
+    private val onClaimAccepted: ((Uuid) -> Unit)? = null,
 ) : TaskBoardPort {
 
     override suspend fun create(draft: WorkItemDraft): BoardMutationResult =
@@ -43,6 +45,37 @@ class BoardPortAdapter(
     override suspend fun list(statuses: Set<WorkItemStatus>?): List<BoardItemSnapshot> =
         repository.list(conversationId, statuses)
 
-    override suspend fun update(patch: WorkItemPatch): BoardMutationResult =
-        repository.update(conversationId, patch, actor)
+    override suspend fun update(patch: WorkItemPatch): BoardMutationResult {
+        val result = repository.update(conversationId, patch, actor)
+        // After the repository ACCEPTS a claim (the single enforcement point already decided
+        // SingleOwnerClaim), record it against the owning handle so orphan recovery (M6) can
+        // release every claim a dead handle holds. Only an accepted claim attaches — a rejected
+        // claim or any non-claim action leaves the handle's tracked set untouched.
+        if (patch.action == WorkItemAction.Claim && result is BoardMutationResult.Accepted) {
+            onClaimAccepted?.invoke(result.snapshot.item.id)
+        }
+        return result
+    }
+
+    companion object {
+        /**
+         * Bind the board port to ONE spawned subagent's execution handle (SPEC.md M5/T11,
+         * decision #5): the port targets the PARENT conversation's shared board, but every claim
+         * is owned by [handle] (`ownerHandleId = handle.id`) and tracked back onto the
+         * [registry] so the in-memory handle's `workItemIds` mirror the persisted claims. A
+         * subagent may hold many claims; SingleOwnerClaim per item still holds, enforced in the
+         * repository for every caller alike.
+         */
+        fun forHandle(
+            repository: TaskBoardRepository,
+            conversationId: Uuid,
+            registry: ExecutionHandleRegistry,
+            handle: ExecutionHandle,
+        ): BoardPortAdapter = BoardPortAdapter(
+            repository = repository,
+            conversationId = conversationId,
+            actor = BoardActor(handleId = handle.id, displayName = handle.id),
+            onClaimAccepted = { itemId -> registry.attachWorkItem(handle.id, itemId) },
+        )
+    }
 }
