@@ -46,6 +46,31 @@ class GenerationEntryLifecycleGuardTest {
         )
     }
 
+    /**
+     * Invariant 2 (supersede barrier): every generation job registered via `session.setJob(...)`
+     * must first drain the job it replaces — `runCatching { previousJob?.join() }` — before
+     * touching `session.state` / re-entering handleMessageComplete. sendMessage added this
+     * barrier when the cancel-without-join race was fixed; regenerateAtMessage and
+     * handleToolApproval drifted, so the superseded generation's NonCancellable finalizer could
+     * persist its sanitized snapshot concurrently with the new job's writes (last-writer-wins on
+     * Room + the session StateFlow can resurrect the truncated tail a regenerate just removed).
+     * Pinned as a count pairing so the invariant survives a later extraction of the shared
+     * lifecycle into one place.
+     */
+    @Test
+    fun `every setJob registration is paired with a previous-job join barrier`() {
+        val source = chatServiceSource()
+        val registrations = Regex("""session\.setJob\(job\)""").findAll(source).count()
+        val barriers = Regex("""runCatching \{ previousJob\?\.join\(\) \}""").findAll(source).count()
+
+        assertTrue("ChatService.kt has no setJob registrations; scan is vacuous", registrations > 0)
+        assertTrue(
+            "Every generation entry that registers a job must join the job it cancelled first: " +
+                "$registrations setJob registration(s) vs $barriers join barrier(s)",
+            registrations == barriers
+        )
+    }
+
     /** Extracts the `{ ... }` body following a `catch (...)` header via brace counting. */
     private fun catchBlockBody(source: String, catchIndex: Int): String {
         val open = source.indexOf('{', catchIndex)

@@ -853,10 +853,15 @@ class ChatService(
         regenerateAssistantMsg: Boolean = true
     ) {
         val session = getOrCreateSession(conversationId)
-        session.getJob()?.cancel()
+        val previousJob = session.getJob()
+        previousJob?.cancel()
 
         val job = appScope.launch {
             try {
+                // Same barrier as sendMessage: drain the superseded generation (incl. its
+                // NonCancellable persistence finalizer) before reading session state, so the old
+                // job cannot race this one's writes and resurrect the tail being regenerated.
+                runCatching { previousJob?.join() }
                 val conversation = session.state.value
 
                 if (message.role == MessageRole.USER) {
@@ -900,10 +905,14 @@ class ChatService(
         answer: String? = null,
     ) {
         val session = getOrCreateSession(conversationId)
-        session.getJob()?.cancel()
+        val previousJob = session.getJob()
+        previousJob?.cancel()
 
         val job = appScope.launch {
             try {
+                // Same barrier as sendMessage: drain the superseded generation before reading
+                // session state (see regenerateAtMessage).
+                runCatching { previousJob?.join() }
                 val conversation = session.state.value
                 val newApprovalState = when {
                     answer != null -> ToolApprovalState.Answered(answer)
