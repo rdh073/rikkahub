@@ -26,6 +26,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.repository.RoomBoardTransactionRunner
 import me.rerere.rikkahub.data.repository.TaskBoardRepository
+import me.rerere.rikkahub.data.repository.TaskRunRepository
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
 import me.rerere.rikkahub.data.db.fts.SimpleDictManager
 import me.rerere.rikkahub.data.db.migrations.Migration_6_7
@@ -180,6 +181,20 @@ val dataSourceModule = module {
     // wraps every operation so claims are atomic.
     single {
         TaskBoardRepository(
+            dao = get(),
+            transactions = RoomBoardTransactionRunner(get<AppDatabase>()),
+        )
+    }
+
+    single {
+        get<AppDatabase>().taskRunDao()
+    }
+
+    // Summary-only task-run persistence (SPEC.md M2/M4, decision #1). The repository folds every
+    // event through the pure TaskStateReducer so the stored state can never disagree with
+    // TASK_STATE_LEGAL; it satisfies the narrow TaskRunStore seam TaskCoordinator depends on.
+    single<me.rerere.rikkahub.data.ai.task.TaskRunStore> {
+        TaskRunRepository(
             dao = get(),
             transactions = RoomBoardTransactionRunner(get<AppDatabase>()),
         )

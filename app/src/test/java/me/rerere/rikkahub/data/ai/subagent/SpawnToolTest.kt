@@ -12,6 +12,7 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.runtime.GenerationChunk
+import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import org.junit.Assert.assertEquals
@@ -21,8 +22,9 @@ import org.junit.Test
 import kotlin.uuid.Uuid
 
 /**
- * JVM unit tests for [buildSpawnTool] (issue #201, slice 4). The factory is Android-free, so its
- * `execute` is driven directly with a fake [SubagentRunner].
+ * JVM unit tests for [buildSpawnTool] (issue #201; rewired onto [TaskCoordinator] in SPEC.md M4).
+ * The factory is Android-free, so its `execute` is driven directly with a fake [TaskCoordinator]
+ * (a [TaskCoordinator] over a fake `generate` seam — no Room, no provider).
  *
  * Two regressions pinned here:
  *  - processingStatus is RESTORED on every terminal path (success AND the error() throw on an
@@ -42,8 +44,8 @@ class SpawnToolTest {
     private fun tool(name: String, needsApproval: Boolean = false): Tool =
         Tool(name = name, description = name, needsApproval = needsApproval, execute = { emptyList() })
 
-    /** A runner whose fake engine just returns one assistant text and captures the tool pool. */
-    private fun fakeRunner(capturedTools: MutableList<Tool>): SubagentRunner = SubagentRunner(
+    /** A coordinator whose fake engine just returns one assistant text and captures the tool pool. */
+    private fun fakeCoordinator(capturedTools: MutableList<Tool>): TaskCoordinator = TaskCoordinator(
         generate = { _, _, _, _, tools, _, _ ->
             capturedTools.clear()
             capturedTools.addAll(tools)
@@ -66,7 +68,7 @@ class SpawnToolTest {
         val sub = Assistant(name = "Researcher", chatModelId = subModel.id, spawnable = true)
         val tool = buildSpawnTool(
             spawnableAssistants = listOf(sub),
-            runner = fakeRunner(mutableListOf()),
+            coordinator = fakeCoordinator(mutableListOf()),
             parentModelId = null,
             settings = settingsWith(subModel),
             buildSubagentTools = { emptyList() },
@@ -85,7 +87,7 @@ class SpawnToolTest {
         val sub = Assistant(name = "Researcher", chatModelId = subModel.id, spawnable = true)
         val tool = buildSpawnTool(
             spawnableAssistants = listOf(sub),
-            runner = fakeRunner(mutableListOf()),
+            coordinator = fakeCoordinator(mutableListOf()),
             parentModelId = null,
             settings = settingsWith(subModel),
             buildSubagentTools = { emptyList() },
@@ -109,7 +111,7 @@ class SpawnToolTest {
         val sub = Assistant(name = "Researcher", chatModelId = subModel.id, spawnable = true)
         val tool = buildSpawnTool(
             spawnableAssistants = listOf(sub),
-            runner = fakeRunner(capturedTools),
+            coordinator = fakeCoordinator(capturedTools),
             parentModelId = null,
             settings = settingsWith(subModel),
             buildSubagentTools = {

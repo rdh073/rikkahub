@@ -8,6 +8,7 @@ import me.rerere.ai.runtime.task.TaskEvent
 import me.rerere.ai.runtime.task.TaskSpec
 import me.rerere.ai.runtime.task.TaskState
 import me.rerere.ai.runtime.task.TaskStateReducer
+import me.rerere.rikkahub.data.ai.task.TaskRunStore
 import me.rerere.rikkahub.data.db.dao.TaskRunDAO
 import me.rerere.rikkahub.data.db.entity.TaskRunEntity
 import me.rerere.rikkahub.data.db.entity.TaskRunEventSummary
@@ -37,10 +38,10 @@ class TaskRunRepository(
     private val dao: TaskRunDAO,
     private val transactions: BoardTransactionRunner,
     private val now: () -> Long = System::currentTimeMillis,
-) {
+) : TaskRunStore {
 
     /** Persist a fresh run in [TaskState.Created]; the spawn tool call has not been accepted yet. */
-    suspend fun create(spec: TaskSpec): TaskState = transactions.inTransaction {
+    override suspend fun create(spec: TaskSpec): TaskState = transactions.inTransaction {
         val timestamp = now()
         dao.upsert(
             TaskRunEntity(
@@ -70,7 +71,7 @@ class TaskRunRepository(
      * absorbing the event) the row is left exactly as it was, with no write. This is what keeps
      * the persisted state in lock-step with TASK_STATE_LEGAL.
      */
-    suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? = transactions.inTransaction {
+    override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? = transactions.inTransaction {
         val entity = dao.getById(taskId.toString()) ?: return@inTransaction null
         val current = entity.toTaskState()
         val next = TaskStateReducer.reduce(current, event)
@@ -88,10 +89,10 @@ class TaskRunRepository(
      * ([TaskRunEntity.eventSequence] + 1). Returns the assigned sequence, or null if the run is
      * gone. The monotone cursor lets a redelivered (lower-sequence) event be recognised as stale.
      */
-    suspend fun appendEventSummary(
+    override suspend fun appendEventSummary(
         taskId: Uuid,
         summary: String,
-        kind: String = TaskRunEventSummary.KIND_PROGRESS,
+        kind: String,
     ): Long? = transactions.inTransaction {
         val entity = dao.getById(taskId.toString()) ?: return@inTransaction null
         val sequence = entity.eventSequence + 1
@@ -115,10 +116,10 @@ class TaskRunRepository(
      * [budget], or null. Surfacing the breach lets the coordinator fire [TaskEvent.BudgetExceeded];
      * this method does not itself drive the state machine.
      */
-    suspend fun recordUsage(
+    override suspend fun recordUsage(
         taskId: Uuid,
         reported: TaskBudgetUsage,
-        budget: TaskBudget = TaskBudget(),
+        budget: TaskBudget,
     ): TaskBudgetBreach? = transactions.inTransaction {
         val entity = dao.getById(taskId.toString()) ?: return@inTransaction null
         val merged = entity.toUsage().record(reported)

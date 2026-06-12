@@ -75,7 +75,7 @@ import me.rerere.ai.runtime.contract.ToolAssemblyContext
 import me.rerere.ai.runtime.contract.TurnMode
 import me.rerere.rikkahub.data.ai.runtime.AppToolCatalog
 import me.rerere.rikkahub.data.ai.runtime.toAssistantConfig
-import me.rerere.rikkahub.data.ai.subagent.SubagentRunner
+import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.ai.subagent.buildSpawnTool
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
@@ -446,7 +446,7 @@ class ChatService(
     private val workspaceRepository: WorkspaceRepository,
     private val memoryRecaller: MemoryRecaller,
     private val generationHandler: GenerationHandler,
-    private val subagentRunner: SubagentRunner,
+    private val taskCoordinator: TaskCoordinator,
     private val templateTransformer: TemplateTransformer,
     private val providerManager: ProviderManager,
     private val localTools: LocalTools,
@@ -1157,7 +1157,7 @@ class ChatService(
                     } else {
                         buildSpawnTool(
                             spawnableAssistants = spawnableAssistants,
-                            runner = subagentRunner,
+                            coordinator = taskCoordinator,
                             parentModelId = parentModelId,
                             settings = settings,
                             buildSubagentTools = { sub ->

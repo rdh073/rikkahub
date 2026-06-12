@@ -18,7 +18,7 @@ import me.rerere.rikkahub.data.ai.runtime.AppModelProviderResolver
 import me.rerere.rikkahub.data.ai.runtime.FilesManagerRuntimeFileStore
 import me.rerere.rikkahub.data.ai.runtime.SettingsStoreRuntimeAdapter
 import me.rerere.rikkahub.data.ai.runtime.SystemRuntimeClock
-import me.rerere.rikkahub.data.ai.subagent.SubagentRunner
+import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.service.ChatService
@@ -84,8 +84,14 @@ val appModule = module {
         AILoggingManager()
     }
 
+    // The lifecycle-aware subagent orchestrator (SPEC.md M4), the product replacement for the
+    // retired SubagentRunner. It drives the child through GenerationHandler.generateText (PreToolUse
+    // hook dispatch preserved) and persists the run through the TaskRunStore (TaskRunRepository).
     single {
-        SubagentRunner(generationHandler = get())
+        TaskCoordinator(
+            generationHandler = get(),
+            store = get(),
+        )
     }
 
     // UI automation (#187 v1). The AccessibilityService is instantiated by the Android system, NOT by
@@ -116,7 +122,7 @@ val appModule = module {
             workspaceRepository = get(),
             memoryRecaller = get(),
             generationHandler = get(),
-            subagentRunner = get(),
+            taskCoordinator = get(),
             templateTransformer = get(),
             providerManager = get(),
             localTools = get(),

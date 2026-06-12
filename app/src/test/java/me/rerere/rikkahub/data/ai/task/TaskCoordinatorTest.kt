@@ -1,0 +1,318 @@
+package me.rerere.rikkahub.data.ai.task
+
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.Tool
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.runtime.GenerationChunk
+import me.rerere.ai.runtime.contract.TurnConfig
+import me.rerere.ai.runtime.subagent.resolveSubagentModel
+import me.rerere.ai.runtime.task.TaskBudget
+import me.rerere.ai.runtime.task.TaskBudgetUsage
+import me.rerere.ai.runtime.task.TaskEvent
+import me.rerere.ai.runtime.task.TaskSpec
+import me.rerere.ai.runtime.task.TaskState
+import me.rerere.ai.runtime.task.TaskStateReducer
+import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.runtime.toAssistantConfig
+import me.rerere.rikkahub.data.ai.subagent.SPAWN_TOOL_NAME
+import me.rerere.rikkahub.data.ai.subagent.SubagentGenerate
+import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.model.Assistant
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration
+import kotlin.uuid.Uuid
+
+/**
+ * JVM unit tests for [TaskCoordinator] (SPEC.md M4), driven by a FAKE engine (the [SubagentGenerate]
+ * collaborator) and an in-memory [TaskRunStore] fake — no Context / Provider / network / Room.
+ *
+ * The coordinator is the product replacement for `SubagentRunner`: it must keep that runner's
+ * parity behaviors (memory OFF, model resolution, final-text extraction, spawn-tool strip,
+ * maxSteps) AND additionally persist a task-run row, drive the [TaskStateReducer] to a terminal,
+ * enforce the [TaskBudget] (steps/tokens/wall-time + per-parent 1 / global 2 concurrency), and
+ * never bypass `generateText` (the engine seam is always invoked).
+ */
+class TaskCoordinatorTest {
+
+    private val parentModel = Model(modelId = "parent-model", displayName = "Parent", id = Uuid.random())
+    private val subModel = Model(modelId = "sub-model", displayName = "Sub", id = Uuid.random())
+
+    private fun settingsWith(vararg models: Model): Settings = Settings(
+        chatModelId = Uuid.random(),
+        providers = listOf(ProviderSetting.OpenAI(models = models.toList())),
+    )
+
+    private fun tool(name: String): Tool = Tool(name = name, description = name, execute = { emptyList() })
+
+    private fun assistantMsg(text: String): UIMessage =
+        UIMessage(role = MessageRole.ASSISTANT, parts = listOf(UIMessagePart.Text(text)))
+
+    /** Capture of the engine-seam arguments, for parity assertions against SubagentRunner. */
+    private class Captured {
+        lateinit var assistant: Assistant
+        lateinit var model: Model
+        lateinit var tools: List<Tool>
+        var maxSteps: Int = -1
+        var invoked: Boolean = false
+    }
+
+    private fun capturingGenerate(captured: Captured, emit: List<GenerationChunk>): SubagentGenerate =
+        { _, model, _, assistant, tools, maxSteps, _ ->
+            captured.invoked = true
+            captured.assistant = assistant
+            captured.model = model
+            captured.tools = tools
+            captured.maxSteps = maxSteps
+            flowOf(*emit.toTypedArray())
+        }
+
+    /**
+     * In-memory [TaskRunStore]: folds events through the real reducer (so the test exercises the
+     * SAME legality the repository enforces), records cumulative usage, and exposes the event log
+     * + state for assertions.
+     */
+    private class FakeStore(private val budget: () -> TaskBudget = { TaskBudget() }) : TaskRunStore {
+        val states = ConcurrentHashMap<Uuid, TaskState>()
+        val events = ConcurrentHashMap<Uuid, MutableList<TaskEvent>>()
+        val usage = ConcurrentHashMap<Uuid, TaskBudgetUsage>()
+        val created = mutableListOf<TaskSpec>()
+
+        override suspend fun create(spec: TaskSpec): TaskState {
+            created += spec
+            states[spec.taskId] = TaskState.Created
+            events[spec.taskId] = mutableListOf()
+            usage[spec.taskId] = TaskBudgetUsage()
+            return TaskState.Created
+        }
+
+        override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? {
+            val current = states[taskId] ?: return null
+            events.getValue(taskId) += event
+            val next = TaskStateReducer.reduce(current, event)
+            states[taskId] = next
+            return next
+        }
+
+        override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String): Long? = 0L
+
+        override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget) =
+            usage.compute(taskId) { _, prev -> (prev ?: TaskBudgetUsage()).record(reported) }
+                .let { budget.firstBreach(it!!) }
+    }
+
+    private fun coordinator(
+        generate: SubagentGenerate,
+        store: TaskRunStore = FakeStore(),
+        budget: TaskBudget = TaskBudget(),
+        clock: () -> Duration = { Duration.ZERO },
+    ) = TaskCoordinator(
+        generate = generate,
+        store = store,
+        defaultBudget = budget,
+        monotonicNow = clock,
+    )
+
+    // --- parity with SubagentRunner ------------------------------------------------------------
+
+    @Test
+    fun `child forces memory OFF even when the sub has it ON`() {
+        val captured = Captured()
+        val sub = Assistant(
+            name = "Researcher", chatModelId = subModel.id,
+            enableMemory = true, useGlobalMemory = true, enableRecentChatsReference = true,
+        )
+        val coordinator = coordinator(capturingGenerate(captured, listOf(GenerationChunk.Messages(listOf(assistantMsg("done"))))))
+
+        runBlocking { coordinator.run(sub = sub, prompt = "go", parentModelId = parentModel.id, settings = settingsWith(subModel)) }
+
+        assertTrue("engine seam (generateText) must always be invoked — never bypassed", captured.invoked)
+        assertFalse("child must not write/read parent memory", captured.assistant.enableMemory)
+        assertFalse("child must not inject recent-chats", captured.assistant.enableRecentChatsReference)
+    }
+
+    @Test
+    fun `model resolves via resolveSubagentModel and inherits the parent when sub pins none`() {
+        val captured = Captured()
+        val sub = Assistant(name = "Sub", chatModelId = null)
+        val settings = settingsWith(parentModel)
+        val coordinator = coordinator(capturingGenerate(captured, listOf(GenerationChunk.Messages(listOf(assistantMsg("ok"))))))
+
+        runBlocking { coordinator.run(sub = sub, prompt = "go", parentModelId = parentModel.id, settings = settings) }
+
+        val turn = TurnConfig(defaultModelId = settings.chatModelId, providers = emptyList(), assistants = emptyList())
+        assertEquals(resolveSubagentModel(sub.toAssistantConfig(), parentModel.id, turn), captured.model.id)
+    }
+
+    @Test
+    fun `run returns extractFinalAssistantText of the terminal messages`() {
+        val captured = Captured()
+        val sub = Assistant(name = "Sub", chatModelId = subModel.id)
+        val emit = listOf(
+            GenerationChunk.Messages(listOf(assistantMsg("partial"))),
+            GenerationChunk.Messages(listOf(UIMessage.user("go"), assistantMsg("final answer"))),
+        )
+        val coordinator = coordinator(capturingGenerate(captured, emit))
+
+        val result = runBlocking { coordinator.run(sub = sub, prompt = "go", parentModelId = null, settings = settingsWith(subModel)) }
+
+        assertEquals("final answer", result)
+    }
+
+    @Test
+    fun `run threads the child tool pool to the engine and strips the spawn tool`() {
+        val captured = Captured()
+        val sub = Assistant(name = "Sub", chatModelId = subModel.id)
+        val coordinator = coordinator(capturingGenerate(captured, listOf(GenerationChunk.Messages(listOf(assistantMsg("x"))))))
+
+        runBlocking {
+            coordinator.run(
+                sub = sub, prompt = "go", parentModelId = null, settings = settingsWith(subModel),
+                tools = listOf(tool("mcp__search"), tool(SPAWN_TOOL_NAME), tool("use_skill")),
+            )
+        }
+
+        assertEquals(listOf("mcp__search", "use_skill"), captured.tools.map { it.name })
+    }
+
+    @Test
+    fun `maxSteps defaults to the budget ceiling and is overridable by the sub`() {
+        val captured = Captured()
+        val coordinator = coordinator(capturingGenerate(captured, listOf(GenerationChunk.Messages(listOf(assistantMsg("x"))))))
+
+        runBlocking {
+            coordinator.run(sub = Assistant(name = "Sub", chatModelId = subModel.id, maxSteps = null), prompt = "go", parentModelId = null, settings = settingsWith(subModel))
+        }
+        assertEquals(TaskBudget.DEFAULT_MAX_STEPS, captured.maxSteps)
+
+        val captured2 = Captured()
+        val coordinator2 = coordinator(capturingGenerate(captured2, listOf(GenerationChunk.Messages(listOf(assistantMsg("x"))))))
+        runBlocking {
+            coordinator2.run(sub = Assistant(name = "Sub", chatModelId = subModel.id, maxSteps = 7), prompt = "go", parentModelId = null, settings = settingsWith(subModel))
+        }
+        assertEquals(7, captured2.maxSteps)
+    }
+
+    // --- task-run row + reducer events ---------------------------------------------------------
+
+    @Test
+    fun `a successful run creates a task row and drives the reducer to Succeeded`() {
+        val store = FakeStore()
+        val sub = Assistant(name = "Sub", chatModelId = subModel.id)
+        val coordinator = coordinator(
+            capturingGenerate(Captured(), listOf(GenerationChunk.Messages(listOf(assistantMsg("final answer"))))),
+            store = store,
+        )
+
+        val result = runBlocking { coordinator.run(sub = sub, prompt = "go", parentModelId = null, settings = settingsWith(subModel)) }
+
+        assertEquals(1, store.created.size)
+        val taskId = store.created.single().taskId
+        // The lifecycle reached Succeeded carrying the final answer.
+        assertEquals(TaskState.Succeeded("final answer"), store.states[taskId])
+        assertEquals("final answer", result)
+        // The legal happy-path event sequence was emitted in order (Enqueued -> SlotClaimed ->
+        // ChildProgressed -> FinalResult).
+        val kinds = store.events.getValue(taskId).map { it::class }
+        assertTrue("Enqueued must precede SlotClaimed", kinds.indexOf(TaskEvent.Enqueued::class) < kinds.indexOf(TaskEvent.SlotClaimed::class))
+        assertTrue("a final result must terminate the run", store.events.getValue(taskId).any { it is TaskEvent.FinalResult })
+    }
+
+    @Test
+    fun `a provider failure drives the reducer to Failed and surfaces the error as output`() {
+        val store = FakeStore()
+        val failing: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            flow<GenerationChunk> { throw IllegalStateException("boom") }
+        }
+        val coordinator = coordinator(failing, store = store)
+
+        val result = runBlocking {
+            coordinator.run(sub = Assistant(name = "Sub", chatModelId = subModel.id), prompt = "go", parentModelId = null, settings = settingsWith(subModel))
+        }
+
+        val taskId = store.created.single().taskId
+        assertTrue("a provider failure must terminate as Failed", store.states[taskId] is TaskState.Failed)
+        // The tool output is a structured error string, not a thrown exception (existing tool-error-as-output behavior).
+        assertTrue("the error must surface in the returned output: $result", result.contains("boom"))
+    }
+
+    // --- budget enforcement --------------------------------------------------------------------
+
+    @Test
+    fun `exceeding the step budget drives the reducer to BudgetExhausted`() {
+        val store = FakeStore()
+        // Steps are counted from the assistant turns the child produced; a transcript with more
+        // assistant messages than the step cap is a step-budget breach.
+        val reporting: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            val turns = (1..5).map { assistantMsg("turn $it") }
+            flowOf(GenerationChunk.Messages(turns))
+        }
+        val coordinator = coordinator(reporting, store = store, budget = TaskBudget(maxSteps = 2))
+
+        runBlocking {
+            coordinator.run(sub = Assistant(name = "Sub", chatModelId = subModel.id), prompt = "go", parentModelId = null, settings = settingsWith(subModel))
+        }
+
+        val taskId = store.created.single().taskId
+        assertTrue("a step-cap breach must terminate as BudgetExhausted", store.states[taskId] is TaskState.BudgetExhausted)
+    }
+
+    // --- concurrency gating --------------------------------------------------------------------
+
+    @Test
+    fun `global concurrency 2 caps simultaneous in-flight children and queues the rest`() {
+        val maxConcurrent = AtomicInteger(0)
+        val peak = AtomicInteger(0)
+        // Three gates the test releases one at a time; each child blocks on its gate while "running".
+        val gates = List(3) { CompletableDeferred<Unit>() }
+        val started = List(3) { CompletableDeferred<Unit>() }
+        val counter = AtomicInteger(0)
+
+        val gatedGenerate: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            val idx = counter.getAndIncrement()
+            flow {
+                val live = maxConcurrent.incrementAndGet()
+                peak.updateAndGet { maxOf(it, live) }
+                started[idx].complete(Unit)
+                gates[idx].await()
+                maxConcurrent.decrementAndGet()
+                emit(GenerationChunk.Messages(listOf(assistantMsg("done $idx"))))
+            }
+        }
+        // Global cap 2, per-parent cap is irrelevant here (each run is its own parent toolcall).
+        val coordinator = coordinator(gatedGenerate, budget = TaskBudget(globalConcurrency = 2, perParentConcurrency = 2))
+
+        runBlocking {
+            coroutineScope {
+                val jobs = (0..2).map {
+                    launch {
+                        coordinator.run(sub = Assistant(name = "Sub", chatModelId = subModel.id), prompt = "go$it", parentModelId = null, settings = settingsWith(subModel))
+                    }
+                }
+                // Exactly two children may be live at once; release them so the third can proceed.
+                started[0].await(); started[1].await()
+                assertEquals("only 2 children may run concurrently", 2, peak.get())
+                gates[0].complete(Unit)
+                started[2].await() // the third only starts after a slot frees
+                gates[1].complete(Unit); gates[2].complete(Unit)
+                jobs.forEach { it.join() }
+            }
+        }
+        assertEquals("the global concurrency cap of 2 was never exceeded", 2, peak.get())
+    }
+}

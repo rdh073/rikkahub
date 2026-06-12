@@ -10,6 +10,7 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import kotlin.uuid.Uuid
@@ -29,12 +30,19 @@ const val SPAWN_TOOL_NAME: String = "task"
 
 /**
  * The spawn ("task") [Tool] that lets the parent assistant delegate a self-contained sub-task to a
- * named, `spawnable` [Assistant] and get back just its final text (issue #201, slice 4).
+ * named, `spawnable` [Assistant] (issue #201; rewired onto [TaskCoordinator] in SPEC.md M4).
+ *
+ * The tool's wire surface is UNCHANGED — same reserved name [SPAWN_TOOL_NAME], same `subagent` /
+ * `prompt` args, same `UIMessagePart` output — so existing callers and transcripts keep working.
+ * What changed under it: the child now runs through [TaskCoordinator] instead of `SubagentRunner`,
+ * so the run is a persisted, lifecycle-tracked, budget/concurrency-gated [me.rerere.ai.runtime.task.TaskState]
+ * machine. The final answer still lands in the same `UIMessagePart.Tool` output (the parent's
+ * tool result), while the coordinator emits live lifecycle events for the task renderer (M5).
  *
  * Built ONLY at the parent's per-generation tool buildList (`ChatService`). A subagent reaches the
- * engine via [SubagentRunner] -> `generateText` directly, so its tool pool never goes through that
+ * engine via [TaskCoordinator] -> `generateText` directly, so its tool pool never goes through that
  * buildList and therefore never contains this tool — the recursion guard is structural (depth
- * bounded at 1), not a runtime flag. [SPAWN_TOOL_NAME] is additionally filtered by
+ * bounded at 1, TASK_DEPTH_ONE), not a runtime flag. [SPAWN_TOOL_NAME] is additionally filtered by
  * [filterToolsForSubagent] as a belt-and-suspenders guard against any other source impersonating
  * the name.
  *
@@ -45,14 +53,14 @@ const val SPAWN_TOOL_NAME: String = "task"
  * @param buildSubagentTools builds the TARGET (sub) assistant's own tool pool from its allowlist
  *   (local + skills + MCP). Supplied by the caller (`ChatService`) so this factory stays free of
  *   Android `Context` / managers. The pool is filtered before it reaches the engine: the spawn tool
- *   is stripped by [SubagentRunner.run] ([filterToolsForSubagent]) and `needsApproval=true` tools
+ *   is stripped by [TaskCoordinator.run] ([filterToolsForSubagent]) and `needsApproval=true` tools
  *   are dropped here, because the approval UI is unreachable mid-subagent (v1 security note).
  * @param progressLabel produces the parent-facing processingStatus string for a running subagent
  *   (kept as a lambda so this factory stays free of Android `Context`).
  */
 fun buildSpawnTool(
     spawnableAssistants: List<Assistant>,
-    runner: SubagentRunner,
+    coordinator: TaskCoordinator,
     parentModelId: Uuid?,
     settings: Settings,
     buildSubagentTools: (sub: Assistant) -> List<Tool>,
@@ -94,7 +102,7 @@ fun buildSpawnTool(
 
         // The sub's own tool pool, minus tools whose approval UI is unreachable mid-subagent
         // (v1 security note: a subagent runs only needsApproval=false tools). The spawn tool is
-        // additionally stripped inside SubagentRunner.run (recursion guard).
+        // additionally stripped inside TaskCoordinator.run (recursion guard, TASK_DEPTH_ONE).
         val subTools = buildSubagentTools(sub).filterNot { it.needsApproval }
 
         // Set-then-clear discipline (mirrors OcrTransformer / KnowledgeContextTransformer):
@@ -104,7 +112,7 @@ fun buildSpawnTool(
         val prevStatus = processingStatus.value
         processingStatus.value = progressLabel(sub.name)
         val result = try {
-            runner.run(
+            coordinator.run(
                 sub = sub,
                 prompt = prompt,
                 parentModelId = parentModelId,
