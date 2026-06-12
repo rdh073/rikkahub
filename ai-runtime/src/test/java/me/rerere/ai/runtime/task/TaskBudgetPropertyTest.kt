@@ -45,12 +45,16 @@ class TaskBudgetPropertyTest {
     }
 
     @Test
-    fun `defaults match the approved design - steps 64 depth 1 per-parent 1 global 2 wall 10 of 30 min`() {
+    fun `defaults match the approved design - steps 64 depth 1 per-parent 1 global 1 wall 10 of 30 min`() {
+        // Global concurrency is 1 since the OQ1 resolution: Android 15 caps the cumulative
+        // backgrounded dataSync FGS budget (6h/24h), and a second concurrent SSE stream doubles
+        // radio/wake-lock pressure under that shared budget. Raising it again should be an
+        // adaptive (charging + unmetered) or user decision, not a constant.
         val budget = TaskBudget()
         assertEquals(64, budget.maxSteps)
         assertEquals(1, budget.maxDepth)
         assertEquals(1, budget.perParentConcurrency)
-        assertEquals(2, budget.globalConcurrency)
+        assertEquals(1, budget.globalConcurrency)
         assertEquals(10.minutes, budget.wallTime)
         assertEquals(30.minutes, TaskBudget.HARD_MAX_WALL_TIME)
         assertNull(budget.maxTokens)

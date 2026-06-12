@@ -47,7 +47,7 @@ import kotlin.uuid.Uuid
  * The coordinator is the product replacement for `SubagentRunner`: it must keep that runner's
  * parity behaviors (memory OFF, model resolution, final-text extraction, spawn-tool strip,
  * maxSteps) AND additionally persist a task-run row, drive the [TaskStateReducer] to a terminal,
- * enforce the [TaskBudget] (steps/tokens/wall-time + per-parent 1 / global 2 concurrency), and
+ * enforce the [TaskBudget] (steps/tokens/wall-time + per-parent 1 / global 1 concurrency), and
  * never bypass `generateText` (the engine seam is always invoked).
  */
 class TaskCoordinatorTest {

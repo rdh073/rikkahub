@@ -149,7 +149,7 @@ tool/source (P6 token gate). All Android/Room/Compose/Koin code stays in `:app`.
 - `TaskSpec(taskId, parentConversationId, parentToolCallId, agentTypeId, prompt, depth,
   parentModelId, budget)`.
 - `TaskBudget` defaults: steps `sub.maxSteps ?: 64`, depth hard `1`, per-parent concurrency
-  `1`, global task concurrency `2`, wall-time default `10 min`, hard `30 min`; token usage
+  `1`, global task concurrency `1` (OQ1 resolution), wall-time default `10 min`, hard `30 min`; token usage
   tracked from child usage counters.
 - `AgentTypeSpec(id, assistantId, displayName, description, defaultBudget, toolPolicy)` —
   derived from `spawnable` Assistants (stable id = assistant UUID). `toolPolicy` carries the
@@ -399,17 +399,21 @@ a milestone.)
 9. The prior spec (CI warning burn-down) is archived as DELIVERED; its text lives at
    `git show 3e53fcff:SPEC.md` per "update/extend, don't start over".
 
-## Open Questions
+## Open Questions — RESOLVED (maintainer decisions, 2026-06-13)
 
-1. Is global concurrency 2 acceptable for battery/network on low-end devices, or should v1
-   ship at 1? (Assumption 3 defaults to the design note's 2.)
-2. Should completed board items ever be exportable into chat transcripts as static summaries
-   (Fase-3 OQ2)? v1 assumes no; saying yes later likely reopens the v2 `UIMessagePart`
-   discussion.
-3. Which concrete tools beyond `ask_user` belong on the DEFAULT approval allowlist shipped
-   with the app — or should the default be empty with per-assistant opt-in (v1 assumption)?
-4. Should the board panel be reachable outside an open conversation (e.g. a global "all
-   boards" screen)? v1 assumes per-conversation panel only.
+1. Global task concurrency ships at **1** in v1. Android 15 caps the cumulative backgrounded
+   `dataSync` FGS budget per day and concurrent SSE streams multiply radio/wake-lock pressure;
+   raising it later should come from device state (charging + unmetered) or a user setting
+   feeding `TaskBudget`, not a constant bump.
+2. Board items are **never injected into chat transcripts**. Message parts feed model uploads
+   (`conversation.currentMessages`); if export is wanted later it lives at the export layer as
+   an optional appendix serialized from `TaskBoardRepository.list(conversationId)`.
+3. The default approval allowlist stays **empty** (per-assistant opt-in). "Safe by tool name"
+   is not a property MCP can guarantee. A one-click `ask_user` preset may ship after the
+   child-approval round-trip (known gap #1) is wired.
+4. The board stays **per-conversation**. The next step is a deep-link/open-board route for one
+   conversation; a global all-boards screen needs new indexed queries and non-conversation-scoped
+   actor semantics first.
 
 ## Known gaps — deferred to a follow-up slice (maintainer sign-off required)
 

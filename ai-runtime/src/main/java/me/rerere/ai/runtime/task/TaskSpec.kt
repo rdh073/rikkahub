@@ -74,7 +74,11 @@ data class TaskBudget(
         const val DEFAULT_MAX_STEPS = 64
         const val DEFAULT_MAX_DEPTH = 1
         const val DEFAULT_PER_PARENT_CONCURRENCY = 1
-        const val DEFAULT_GLOBAL_CONCURRENCY = 2
+        // 1 since the OQ1 resolution: Android 15 caps the cumulative backgrounded dataSync FGS
+        // budget per day, and concurrent SSE streams multiply radio/wake-lock pressure under it.
+        // A later increase should come from device state (charging + unmetered) or a user
+        // setting feeding TaskBudget — change this constant only with that mechanism.
+        const val DEFAULT_GLOBAL_CONCURRENCY = 1
         val DEFAULT_WALL_TIME = 10.minutes
         val HARD_MAX_WALL_TIME = 30.minutes
     }
