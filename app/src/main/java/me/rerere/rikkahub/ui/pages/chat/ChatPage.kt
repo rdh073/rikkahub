@@ -229,6 +229,13 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     }
 }
 
+// Submit-guard policy, top-level for JVM unit tests (ChatPageSubmitGuardTest). The
+// no-model toast applies only when the submit requests a model answer: ChatService.sendMessage
+// starts generation solely when answer is true, so the long-press "send without answer" path
+// must keep working with no chat model configured.
+internal fun shouldBlockSubmitForMissingModel(answer: Boolean, hasChatModel: Boolean): Boolean =
+    answer && !hasChatModel
+
 @Composable
 private fun ChatPageContent(
     inputState: ChatInputState,
@@ -257,7 +264,7 @@ private fun ChatPageContent(
 
     // Single submit path for tap and long-press send; only the answer flag differs.
     fun submitInput(answer: Boolean) {
-        if (currentChatModel == null) {
+        if (shouldBlockSubmitForMissingModel(answer = answer, hasChatModel = currentChatModel != null)) {
             toaster.show(selectModelFirstMessage, type = ToastType.Error)
             return
         }
