@@ -249,16 +249,18 @@ class RouteActivity : ComponentActivity() {
         }
         val migrationState by DatabaseMigrationTracker.state.collectAsStateWithLifecycle()
 
-        val startScreen = Screen.Chat(
-            id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
-                Uuid.random().toString()
-            } else {
-                readStringPreference(
-                    "lastConversationId",
+        val startScreen = remember {
+            Screen.Chat(
+                id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
                     Uuid.random().toString()
-                ) ?: Uuid.random().toString()
-            }
-        )
+                } else {
+                    readStringPreference(
+                        "lastConversationId",
+                        Uuid.random().toString()
+                    ) ?: Uuid.random().toString()
+                }
+            )
+        }
 
         val backStack = rememberNavBackStack(startScreen)
         SideEffect { this@RouteActivity.navStack = backStack }
