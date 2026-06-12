@@ -215,14 +215,19 @@ private fun ChatListNormal(
     val density = LocalDensity.current
     val activity = LocalContext.current as? me.rerere.rikkahub.RouteActivity
 
+    // The listener outlives this composition (DisposableEffect(Unit)); read the inputs
+    // through rememberUpdatedState so settings toggles apply without rebuilding the screen.
+    val settingsUpdated by rememberUpdatedState(settings)
+    val innerPaddingUpdated by rememberUpdatedState(innerPadding)
+    val densityUpdated by rememberUpdatedState(density)
     DisposableEffect(Unit) {
         val listener: (Boolean) -> Boolean = { isVolumeUp ->
-            if (settings.displaySetting.enableVolumeKeyScroll) {
-                val bottomPaddingPx = with(density) {
-                    (32.dp + innerPadding.calculateBottomPadding()).toPx()
+            if (settingsUpdated.displaySetting.enableVolumeKeyScroll) {
+                val bottomPaddingPx = with(densityUpdated) {
+                    (32.dp + innerPaddingUpdated.calculateBottomPadding()).toPx()
                 }
                 val scrollAmount = (state.layoutInfo.viewportSize.height - bottomPaddingPx) *
-                    settings.displaySetting.volumeKeyScrollRatio
+                    settingsUpdated.displaySetting.volumeKeyScrollRatio
                 scope.launch { state.scrollBy(if (isVolumeUp) -scrollAmount else scrollAmount) }
                 true
             } else false
