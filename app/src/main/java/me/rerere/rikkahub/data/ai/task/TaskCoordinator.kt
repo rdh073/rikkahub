@@ -301,7 +301,9 @@ class TaskCoordinator(
             }
             throw error
         } finally {
-            if (grouped) releaseParentMutex(parentToolCallId)
+            // The release itself suspends (registry lock); on a cancellation path it must still
+            // run to completion or the ref leaks and the registry entry is never evicted.
+            if (grouped) withContext(NonCancellable) { releaseParentMutex(parentToolCallId) }
         }
     }
 
