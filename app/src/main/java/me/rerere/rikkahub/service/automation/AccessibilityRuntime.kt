@@ -201,6 +201,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
     val foregroundPackage: String?
         get() = rootInActiveWindow?.let { root ->
             val pkg = root.packageName?.toString()
+            @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
             root.recycle()
             pkg
         }
@@ -221,6 +222,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                     foldStructure(root, acc)
                     (root.packageName?.toString() ?: HOST_PACKAGE) to acc.toString().hashCode().toString(16)
                 } finally {
+                    @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
                     root.recycle()
                 }
             } ?: (HOST_PACKAGE to "empty:$seq")
@@ -250,6 +252,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
         try {
             foldStructure(root, acc)
         } finally {
+            @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
             root.recycle()
         }
         return acc.toString().hashCode().toString(16)
@@ -393,6 +396,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                     if (root.packageName?.toString() == HOST_PACKAGE) continue // host excluded (projector P2)
                     walkAndPerform(root, tid, cursor, perform)?.let { return it }
                 } finally {
+                    @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
                     root.recycle()
                 }
             } finally {
@@ -426,6 +430,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
             try {
                 walkAndPerform(child, tid, cursor, perform)?.let { return it }
             } finally {
+                @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
                 child.recycle()
             }
         }
@@ -455,6 +460,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                 try {
                     foldStructure(child, acc)
                 } finally {
+                    @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
                     child.recycle()
                 }
             }
@@ -482,6 +488,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                 root = root.toRawNode(),
             )
         } finally {
+            @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
             root.recycle()
         }
     }
@@ -495,6 +502,7 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
                 try {
                     children.add(child.toRawNode())
                 } finally {
+                    @Suppress("DEPRECATION") // recycle() required below API 33 (no-op above); minSdk 26
                     child.recycle()
                 }
             }
@@ -510,7 +518,9 @@ class AccessibilityRuntime : AccessibilityService(), AutomationBackend {
             editable = isEditable,
             scrollable = isScrollable,
             checkable = isCheckable,
-            checked = isChecked,
+            // getChecked()'s tri-state replacement (API 36) remaps the partial state; the boolean
+            // accessor keeps RawNode's shape identical and works on minSdk 26.
+            checked = @Suppress("DEPRECATION") isChecked,
             password = isPassword,
             children = children,
         )

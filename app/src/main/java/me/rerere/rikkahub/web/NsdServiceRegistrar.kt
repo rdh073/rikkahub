@@ -1,10 +1,12 @@
 package me.rerere.rikkahub.web
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.net.wifi.WifiManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.net.Inet4Address
 import java.net.InetAddress
 import javax.jmdns.JmDNS
 import javax.jmdns.ServiceInfo
@@ -113,23 +115,25 @@ class NsdServiceRegistrar(
 
     private fun getLocalIpAddress(): InetAddress? {
         return try {
-            val wifiManager = context.applicationContext
-                .getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            val wifiInfo = wifiManager?.connectionInfo
-            val ipInt = wifiInfo?.ipAddress ?: return null
-
-            if (ipInt == 0) return null
-
-            val ipBytes = byteArrayOf(
-                (ipInt and 0xff).toByte(),
-                (ipInt shr 8 and 0xff).toByte(),
-                (ipInt shr 16 and 0xff).toByte(),
-                (ipInt shr 24 and 0xff).toByte()
-            )
-            InetAddress.getByAddress(ipBytes)
+            val connectivityManager = context.applicationContext
+                .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return null
+            val linkProperties = connectivityManager
+                .getLinkProperties(connectivityManager.activeNetwork) ?: return null
+            selectIpv4Address(linkProperties.linkAddresses.map { it.address })
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get local IP address", e)
             null
         }
     }
 }
+
+/**
+ * Picks the first IPv4 address peers on the LAN can actually reach: loopback and
+ * link-local (169.254/16) addresses are excluded because JmDNS binds a single address
+ * that must be routable from other devices on the network.
+ */
+internal fun selectIpv4Address(candidates: List<InetAddress>): Inet4Address? =
+    candidates
+        .filterIsInstance<Inet4Address>()
+        .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
