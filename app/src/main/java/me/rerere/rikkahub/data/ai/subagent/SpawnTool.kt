@@ -57,6 +57,12 @@ const val SPAWN_TOOL_NAME: String = "task"
  *   are dropped here, because the approval UI is unreachable mid-subagent (v1 security note).
  * @param progressLabel produces the parent-facing processingStatus string for a running subagent
  *   (kept as a lambda so this factory stays free of Android `Context`).
+ * @param parentConversationId the conversation whose generation owns this spawn. It is threaded
+ *   into [TaskCoordinator.run] so the persisted task row is associated with the REAL conversation
+ *   instead of [TaskCoordinator.run]'s `Uuid.random()` default — per-conversation lookup (the board
+ *   panel, retention's keep-newest-per-conversation, conversation-delete cleanup) all key on this
+ *   column (review finding #2). It is REQUIRED, not defaulted: a default here would silently
+ *   re-introduce the random-conversation orphan the fix removes.
  */
 fun buildSpawnTool(
     spawnableAssistants: List<Assistant>,
@@ -66,6 +72,7 @@ fun buildSpawnTool(
     buildSubagentTools: (sub: Assistant) -> List<Tool>,
     processingStatus: MutableStateFlow<String?>,
     progressLabel: (subName: String) -> String,
+    parentConversationId: Uuid,
 ): Tool = Tool(
     name = SPAWN_TOOL_NAME,
     description = "Delegate a self-contained sub-task to a specialized subagent and return its result.",
@@ -119,6 +126,13 @@ fun buildSpawnTool(
                 settings = settings,
                 tools = subTools,
                 processingStatus = processingStatus,
+                parentConversationId = parentConversationId,
+                // parentToolCallId is intentionally NOT passed: the spawn tool call id is not
+                // reachable inside Tool.execute (its signature is `suspend (JsonElement) -> …`,
+                // engine-wide). Plumbing it would require an ABI change to the shared Tool type and
+                // the spawn-path tool assembly this spec marks Ask-first — tracked as a follow-up
+                // gap (review finding #2, parentToolCallId half). Until then per-parent concurrency
+                // grouping falls back to the global cap, which is still enforced.
             )
         } finally {
             processingStatus.value = prevStatus

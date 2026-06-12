@@ -1183,6 +1183,10 @@ class ChatService(
                             progressLabel = { subName ->
                                 context.getString(R.string.chat_subagent_running, subName)
                             },
+                            // Associate the persisted task row with THIS conversation so the board
+                            // panel / retention / cleanup find it (review finding #2). Same id the
+                            // board port binds below.
+                            parentConversationId = conversationId,
                         )
                     }
                 },

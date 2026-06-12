@@ -45,7 +45,10 @@ class SpawnToolTest {
         Tool(name = name, description = name, needsApproval = needsApproval, execute = { emptyList() })
 
     /** A coordinator whose fake engine just returns one assistant text and captures the tool pool. */
-    private fun fakeCoordinator(capturedTools: MutableList<Tool>): TaskCoordinator = TaskCoordinator(
+    private fun fakeCoordinator(
+        capturedTools: MutableList<Tool>,
+        store: me.rerere.rikkahub.data.ai.task.TaskRunStore = me.rerere.rikkahub.data.ai.task.NoopTaskRunStore,
+    ): TaskCoordinator = TaskCoordinator(
         generate = { _, _, _, _, tools, _, _ ->
             capturedTools.clear()
             capturedTools.addAll(tools)
@@ -55,7 +58,42 @@ class SpawnToolTest {
                 )
             )
         },
+        store = store,
     )
+
+    /** Captures the [me.rerere.ai.runtime.task.TaskSpec] the coordinator persists on create. */
+    private class CapturingStore : me.rerere.rikkahub.data.ai.task.TaskRunStore by me.rerere.rikkahub.data.ai.task.NoopTaskRunStore {
+        var spec: me.rerere.ai.runtime.task.TaskSpec? = null
+        override suspend fun create(spec: me.rerere.ai.runtime.task.TaskSpec): me.rerere.ai.runtime.task.TaskState {
+            this.spec = spec
+            return me.rerere.ai.runtime.task.TaskState.Created
+        }
+    }
+
+    @Test
+    fun `execute threads the parent conversation id through to the persisted task spec`() {
+        // The persisted task row must be associated with the REAL spawning conversation, not a
+        // random UUID — per-conversation lookup (board panel, retention, cleanup) keys on it
+        // (review finding #2).
+        val store = CapturingStore()
+        val status = MutableStateFlow<String?>(null)
+        val sub = Assistant(name = "Researcher", chatModelId = subModel.id, spawnable = true)
+        val conversationId = Uuid.random()
+        val tool = buildSpawnTool(
+            spawnableAssistants = listOf(sub),
+            coordinator = fakeCoordinator(mutableListOf(), store = store),
+            parentModelId = null,
+            settings = settingsWith(subModel),
+            buildSubagentTools = { emptyList() },
+            processingStatus = status,
+            progressLabel = { "Running $it" },
+            parentConversationId = conversationId,
+        )
+
+        runBlocking { tool.execute(spawnArgs("Researcher")) }
+
+        assertEquals(conversationId, store.spec!!.parentConversationId)
+    }
 
     private fun spawnArgs(subagent: String, prompt: String = "go") = buildJsonObject {
         put("subagent", subagent)
@@ -74,6 +112,7 @@ class SpawnToolTest {
             buildSubagentTools = { emptyList() },
             processingStatus = status,
             progressLabel = { "Running $it" },
+            parentConversationId = Uuid.random(),
         )
 
         runBlocking { tool.execute(spawnArgs("Researcher")) }
@@ -93,6 +132,7 @@ class SpawnToolTest {
             buildSubagentTools = { emptyList() },
             processingStatus = status,
             progressLabel = { "Running $it" },
+            parentConversationId = Uuid.random(),
         )
 
         runBlocking {
@@ -119,6 +159,7 @@ class SpawnToolTest {
             },
             processingStatus = status,
             progressLabel = { "Running $it" },
+            parentConversationId = Uuid.random(),
         )
 
         runBlocking { tool.execute(spawnArgs("Researcher")) }
