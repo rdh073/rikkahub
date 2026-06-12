@@ -12,6 +12,7 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.runtime.GenerationChunk
+import me.rerere.rikkahub.data.ai.task.ExecutionHandleRegistry
 import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
@@ -84,7 +85,9 @@ class SpawnToolTest {
             coordinator = fakeCoordinator(mutableListOf(), store = store),
             parentModelId = null,
             settings = settingsWith(subModel),
-            buildSubagentTools = { emptyList() },
+            registry = ExecutionHandleRegistry(),
+            buildSubagentTools = { _, _ -> emptyList() },
+            releaseOrphanedClaims = {},
             processingStatus = status,
             progressLabel = { "Running $it" },
             parentConversationId = conversationId,
@@ -107,7 +110,9 @@ class SpawnToolTest {
             coordinator = fakeCoordinator(mutableListOf()),
             parentModelId = null,
             settings = settingsWith(subModel),
-            buildSubagentTools = { emptyList() },
+            registry = ExecutionHandleRegistry(),
+            buildSubagentTools = { _, _ -> emptyList() },
+            releaseOrphanedClaims = {},
             processingStatus = status,
             progressLabel = { "Running $it" },
             parentConversationId = Uuid.random(),
@@ -135,7 +140,9 @@ class SpawnToolTest {
             coordinator = fakeCoordinator(mutableListOf()),
             parentModelId = null,
             settings = settingsWith(subModel),
-            buildSubagentTools = { emptyList() },
+            registry = ExecutionHandleRegistry(),
+            buildSubagentTools = { _, _ -> emptyList() },
+            releaseOrphanedClaims = {},
             processingStatus = status,
             progressLabel = { "Running $it" },
             parentConversationId = Uuid.random(),
@@ -155,7 +162,9 @@ class SpawnToolTest {
             coordinator = fakeCoordinator(mutableListOf()),
             parentModelId = null,
             settings = settingsWith(subModel),
-            buildSubagentTools = { emptyList() },
+            registry = ExecutionHandleRegistry(),
+            buildSubagentTools = { _, _ -> emptyList() },
+            releaseOrphanedClaims = {},
             processingStatus = status,
             progressLabel = { "Running $it" },
             parentConversationId = Uuid.random(),
@@ -180,9 +189,11 @@ class SpawnToolTest {
             coordinator = fakeCoordinator(capturedTools),
             parentModelId = null,
             settings = settingsWith(subModel),
-            buildSubagentTools = {
+            registry = ExecutionHandleRegistry(),
+            buildSubagentTools = { _, _ ->
                 listOf(tool("mcp__search"), tool("ask_user", needsApproval = true))
             },
+            releaseOrphanedClaims = {},
             processingStatus = status,
             progressLabel = { "Running $it" },
             parentConversationId = Uuid.random(),

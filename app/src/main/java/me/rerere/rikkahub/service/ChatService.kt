@@ -75,6 +75,7 @@ import me.rerere.ai.runtime.contract.ToolAssemblyContext
 import me.rerere.ai.runtime.contract.TurnMode
 import me.rerere.rikkahub.data.ai.runtime.AppToolCatalog
 import me.rerere.rikkahub.data.ai.runtime.toAssistantConfig
+import me.rerere.rikkahub.data.ai.task.ExecutionHandleRegistry
 import me.rerere.rikkahub.data.ai.task.TaskCoordinator
 import me.rerere.rikkahub.data.ai.subagent.buildSpawnTool
 import me.rerere.rikkahub.data.ai.subagent.subagentBoardTools
@@ -457,6 +458,10 @@ class ChatService(
     // Per-conversation work-item board (SPEC.md M3/T7). Board tools delegate through this single
     // repository — the same path the board UI uses (decision #4) — so legality is enforced once.
     private val taskBoardRepository: TaskBoardRepository,
+    // Live subagent execution handles (SPEC.md M4/M6). The spawn path registers one handle per
+    // child; its id is the owner of every board claim the child takes, and the same id is what
+    // orphan release frees when the handle dies.
+    private val executionHandles: ExecutionHandleRegistry,
     // On-device UI automation (#187 v1, read-only). Registry hands out the live, system-instantiated
     // AccessibilityRuntime as a pure backend; the kill-switch dispatches STOP to the active guard(s).
     private val automationRegistry: AutomationRuntimeRegistry,
@@ -1161,7 +1166,8 @@ class ChatService(
                             coordinator = taskCoordinator,
                             parentModelId = parentModelId,
                             settings = settings,
-                            buildSubagentTools = { sub ->
+                            registry = executionHandles,
+                            buildSubagentTools = { sub, handle ->
                                 buildList {
                                     addAll(localTools.getTools(sub.localTools))
                                     if (sub.enabledSkills.isNotEmpty()) {
@@ -1183,17 +1189,23 @@ class ChatService(
                                     // TaskCoordinator.run, never the catalog's TurnMode.Subagent arm,
                                     // so without this a spawned subagent cannot task_list/task_update
                                     // the board the parent and UI share (spec assumption 5 / decision
-                                    // #5). Bound to THIS conversation and owned by a per-subagent
-                                    // actor so its claims are attributable; the repository remains the
-                                    // single enforcement point (decision #4).
+                                    // #5). Bound to THIS conversation and owned by the child's live
+                                    // EXECUTION HANDLE (findings #1/#5) so claims are precisely
+                                    // attributable and orphan release frees a dead handle's claims;
+                                    // the repository remains the single enforcement point (decision #4).
                                     addAll(
                                         subagentBoardTools(
                                             repository = taskBoardRepository,
                                             conversationId = conversationId,
+                                            registry = executionHandles,
+                                            handle = handle,
                                             sub = sub,
                                         )
                                     )
                                 }
+                            },
+                            releaseOrphanedClaims = { handleId ->
+                                taskBoardRepository.releaseClaimsOf(handleId)
                             },
                             processingStatus = session.processingStatus,
                             progressLabel = { subName ->
