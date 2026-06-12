@@ -225,9 +225,6 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     onClearAllErrors = { vm.clearAllErrors() },
                 )
             }
-            BackHandler(drawerState.isOpen) {
-                scope.launch { drawerState.close() }
-            }
         }
     }
 }
