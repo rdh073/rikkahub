@@ -1125,7 +1125,7 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="translator_page_paste">テキストを貼り付け</string>
   <string name="translator_page_copy_result">翻訳結果をコピー</string>
   <string name="translator_page_error">エラー</string>
-  <string name="setting_provider_page_discount">10%オフ</string>
+  <string name="setting_provider_page_discount" formatted="false">10%オフ</string>
   <string name="donate_page_afdian_name">Afdian</string>
   <string name="setting_provider_page_test_non_streaming">非ストリーミング</string>
   <string name="setting_provider_page_test_streaming">ストリーミング</string>

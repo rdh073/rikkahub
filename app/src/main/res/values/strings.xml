@@ -1124,7 +1124,7 @@
   <string name="translator_page_paste">Paste text</string>
   <string name="translator_page_copy_result">Copy translation result</string>
   <string name="translator_page_error">Error</string>
-  <string name="setting_provider_page_discount">10% off</string>
+  <string name="setting_provider_page_discount" formatted="false">10% off</string>
   <string name="donate_page_afdian_name">Afdian</string>
   <string name="setting_provider_page_test_non_streaming">Non-streaming</string>
   <string name="setting_provider_page_test_streaming">Streaming</string>
