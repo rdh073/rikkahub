@@ -85,7 +85,16 @@ class TaskRunRepository(
         active.mapNotNull { entity ->
             val taskId = Uuid.parse(entity.id)
             val current = entity.toTaskState()
-            val summary = entity.decodeEventSummaries()?.lastOrNull()?.summary.orEmpty()
+            // decodeEventSummaries() returns null ONLY for a corrupt blob — distinct from an empty
+            // list (no events yet). Collapsing corruption to "" via .orEmpty() would seed the
+            // resume as if no progress existed, so the child re-runs completed side effects (review
+            // finding #4). Preserve a non-blank marker for corruption so resume injects its
+            // recovery-context block; a genuinely empty history stays "" (a clean fresh re-spawn).
+            val summaries = entity.decodeEventSummaries()
+            val summary = when {
+                summaries == null -> CORRUPT_SUMMARY_MARKER
+                else -> summaries.lastOrNull()?.summary.orEmpty()
+            }
             val next = TaskStateReducer.reduce(current, TaskEvent.ProcessInterrupted(summary))
             if (next == current) {
                 // Defensive no-op guard mirroring [applyEvent]: a row whose state does not fold to
@@ -315,5 +324,14 @@ class TaskRunRepository(
 
         /** Newest terminal runs kept per conversation regardless of age (SPEC.md M6). */
         const val DEFAULT_RETENTION_KEEP_NEWEST: Int = 200
+
+        /**
+         * Seeded as the interrupted-run progress summary when the event-summary blob is corrupt
+         * (decodeEventSummaries() == null). Non-blank on purpose so resume's recovery-context block
+         * fires and the child does NOT treat the run as a clean slate — a corrupt history means
+         * "there was prior progress we cannot read", never "no progress" (review finding #4).
+         */
+        const val CORRUPT_SUMMARY_MARKER: String =
+            "[progress summary unavailable — prior run state could not be read; avoid repeating already-completed work]"
     }
 }

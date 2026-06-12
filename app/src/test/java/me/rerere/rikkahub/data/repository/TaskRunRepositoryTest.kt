@@ -201,6 +201,40 @@ class TaskRunRepositoryTest {
     }
 
     @Test
+    fun corrupt_summary_column_recovers_with_a_non_empty_progress_marker() = runBlocking {
+        // A RUNNING row whose event_summaries blob is corrupt JSON. decodeEventSummaries() returns
+        // null for it by design (corrupt != "no events yet"). Recovery must NOT collapse that null
+        // to "" — an Interrupted run seeded from a falsely-empty summary resumes as if no progress
+        // existed, risking duplicated side effects (review finding #4). The recovered progress
+        // summary must be NON-BLANK so resume injects the recovery-context block.
+        val f = Fixture()
+        val taskId = Uuid.random()
+        f.dao.upsert(
+            TaskRunEntity(
+                id = taskId.toString(),
+                conversationId = Uuid.random().toString(),
+                parentToolCallId = "call_1",
+                agentTypeId = "agent_1",
+                prompt = "do the thing",
+                latestState = TaskRunStateTag.RUNNING.name,
+                eventSummaries = "{not valid json",
+                createdAt = 1L,
+                updatedAt = 1L,
+            )
+        )
+
+        val recovered = f.repository.recoverInterruptedRuns()
+
+        assertEquals(listOf(taskId), recovered)
+        val state = f.repository.get(taskId)
+        assertTrue("a corrupt-summary row must still recover to Interrupted", state is TaskState.Interrupted)
+        assertTrue(
+            "corruption must not be seeded as empty progress",
+            (state as TaskState.Interrupted).progressSummary.isNotBlank(),
+        )
+    }
+
+    @Test
     fun interrupted_run_round_trips_through_the_entity() = runBlocking {
         val f = Fixture()
         val spec = spec()
