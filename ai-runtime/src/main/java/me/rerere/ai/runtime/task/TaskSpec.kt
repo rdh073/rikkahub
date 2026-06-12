@@ -39,7 +39,7 @@ data class TaskSpec(
 
 /**
  * Per-task resource budget. Defaults are the approved design's (SPEC.md, binding): 64 steps,
- * depth hard-bounded at 1, one concurrent task per parent, two globally, 10 min wall time with
+ * depth hard-bounded at 1, one concurrent task per parent, one globally (OQ1 resolution), 10 min wall time with
  * a 30 min hard ceiling no caller may exceed ([effectiveWallTime] clamps).
  *
  * Token usage is tracked from child usage counters but uncapped by default ([maxTokens] null).

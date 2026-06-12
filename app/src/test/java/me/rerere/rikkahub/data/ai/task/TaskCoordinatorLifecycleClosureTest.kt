@@ -194,6 +194,72 @@ class TaskCoordinatorLifecycleClosureTest {
         Unit
     }
 
+    /** A store that PARKS (suspends indefinitely) on one specific event kind, once. */
+    private class GatedStore(private val parkOn: (TaskEvent) -> Boolean) : TaskRunStore {
+        val inner = SuspendingStore()
+        val parked = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private var tripped = false
+
+        val states get() = inner.states
+        fun seed(taskId: Uuid, state: TaskState) = inner.seed(taskId, state)
+
+        override suspend fun create(spec: TaskSpec) = inner.create(spec)
+        override suspend fun applyEvent(taskId: Uuid, event: TaskEvent): TaskState? {
+            if (!tripped && parkOn(event)) {
+                tripped = true
+                parked.complete(Unit)
+                awaitCancellation() // the cancelled write never lands — exactly a cancelled Room call
+            }
+            return inner.applyEvent(taskId, event)
+        }
+
+        override suspend fun claimResume(taskId: Uuid) = inner.claimResume(taskId)
+        override suspend fun appendEventSummary(taskId: Uuid, summary: String, kind: String) =
+            inner.appendEventSummary(taskId, summary, kind)
+        override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget) =
+            inner.recordUsage(taskId, reported, budget)
+    }
+
+    @Test
+    fun `cancellation striking the Enqueued write still terminal-closes the created row`() = runBlocking {
+        val store = GatedStore { it is TaskEvent.Enqueued }
+        val c = coordinator(store)
+        val settings = settingsWith(subModel)
+        val taskId = Uuid.random()
+
+        val job = launch {
+            c.run(sub = sub(), prompt = "task", parentModelId = null, settings = settings, taskId = taskId)
+        }
+        store.parked.await()
+        job.cancel()
+        job.join()
+
+        assertEquals(
+            "a cancellation during the Enqueued write must still drive the Created row to Cancelled",
+            TaskState.Cancelled, store.states[taskId],
+        )
+    }
+
+    @Test
+    fun `cancellation striking the SlotClaimed write still terminal-closes the run`() = runBlocking {
+        val store = GatedStore { it is TaskEvent.SlotClaimed }
+        val c = coordinator(store)
+        val settings = settingsWith(subModel)
+        val taskId = Uuid.random()
+
+        val job = launch {
+            c.run(sub = sub(), prompt = "task", parentModelId = null, settings = settings, taskId = taskId)
+        }
+        store.parked.await()
+        job.cancel()
+        job.join()
+
+        assertEquals(
+            "a cancellation during the SlotClaimed write must still drive the run to Cancelled",
+            TaskState.Cancelled, store.states[taskId],
+        )
+    }
+
     @Test
     fun `cancellation during execute persists Cancelled through a SUSPENDING store`() = runBlocking {
         val store = SuspendingStore()

@@ -232,23 +232,6 @@ class TaskCoordinator(
         // pool unconditionally, regardless of how the caller assembled it.
         val childTools = filterToolsForSubagent(tools, SPAWN_TOOL_NAME)
 
-        store.create(
-            TaskSpec(
-                taskId = taskId,
-                parentConversationId = parentConversationId,
-                parentToolCallId = parentToolCallId,
-                agentTypeId = sub.id.toString(),
-                prompt = prompt,
-                parentModelId = parentModelId,
-                budget = budget,
-            )
-        )
-        // Created -> Queued: the spawn tool call was accepted; the run now waits for a slot.
-        store.applyEvent(taskId, TaskEvent.Enqueued)
-
-        val grouped = parentToolCallId.isNotBlank()
-        val parentMutex = if (grouped) acquireParentMutex(parentToolCallId) else null
-
         // Acquire the global slot first, then (optionally) the per-parent slot. Acquisition is the
         // queue: a child with no free slot suspends here in TaskState.Queued. Ordering global-then-
         // parent consistently for every run prevents a lock-acquisition cycle. The parent-mutex
@@ -264,8 +247,30 @@ class TaskCoordinator(
         // The flag scopes the closure to the PRE-execute window only: once execute() is entered,
         // its own handlers persist the terminal, and writing it again here would append a second
         // CancelRequested to the event log (the cancel-cascade property demands exactly one).
+        // The closure starts BEFORE store.create (review mustFix round 4 #1): create and the
+        // Enqueued write are themselves suspending, and a cancellation striking them must still
+        // terminal-close whatever row exists — a terminal event against a row whose create never
+        // persisted is a null no-op in the store, so the early coverage is safe.
         var enteredExecute = false
+        var grouped = false
         return try {
+            store.create(
+                TaskSpec(
+                    taskId = taskId,
+                    parentConversationId = parentConversationId,
+                    parentToolCallId = parentToolCallId,
+                    agentTypeId = sub.id.toString(),
+                    prompt = prompt,
+                    parentModelId = parentModelId,
+                    budget = budget,
+                )
+            )
+            // Created -> Queued: the spawn tool call was accepted; the run now waits for a slot.
+            store.applyEvent(taskId, TaskEvent.Enqueued)
+
+            grouped = parentToolCallId.isNotBlank()
+            val parentMutex = if (grouped) acquireParentMutex(parentToolCallId) else null
+
             globalSemaphore(budget.globalConcurrency).withPermit {
                 if (parentMutex != null) {
                     parentMutex.withLock {
@@ -426,8 +431,6 @@ class TaskCoordinator(
         processingStatus: MutableStateFlow<String?>,
         budget: TaskBudget,
     ): TaskRunResult {
-        // Queued -> Starting: a concurrency slot is now held.
-        store.applyEvent(taskId, TaskEvent.SlotClaimed)
         val startedAt = monotonicNow()
         var finalMessages: List<UIMessage> = messages
         var progressed = false
@@ -436,6 +439,11 @@ class TaskCoordinator(
         var lastUsage = TaskBudgetUsage()
 
         return try {
+            // Queued -> Starting: a concurrency slot is now held. This SUSPENDING write lives
+            // inside the guarded try (review mustFix round 4 #2): the caller's enteredExecute flag
+            // is already set, so a cancellation striking this write must be terminal-closed HERE —
+            // neither closure outside would catch it.
+            store.applyEvent(taskId, TaskEvent.SlotClaimed)
             try {
                 generate(settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus).collect { chunk ->
                     when (chunk) {
