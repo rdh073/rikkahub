@@ -1627,13 +1627,12 @@ class ChatService(
             return // 新会话且为空时不保存
         }
 
-        val updatedConversation = conversation.copy()
-        updateConversationWithFileCleanup(conversationId, updatedConversation)
+        updateConversationWithFileCleanup(conversationId, conversation)
 
         if (!exists) {
-            conversationRepo.insertConversation(updatedConversation)
+            conversationRepo.insertConversation(conversation)
         } else {
-            conversationRepo.updateConversation(updatedConversation)
+            conversationRepo.updateConversation(conversation)
         }
     }
 
