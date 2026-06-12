@@ -28,9 +28,11 @@ import me.rerere.rikkahub.ui.components.EmojiData
 import me.rerere.rikkahub.ui.components.EmojiUtils
 import me.rerere.common.json.JsonInstant
 import me.rerere.rikkahub.ui.components.ai.chatinput.SoundEffectPlayer
+import me.rerere.rikkahub.ui.pages.chat.board.BoardViewModel
 import me.rerere.rikkahub.utils.lifecycle.UpdateChecker
 import me.rerere.rikkahub.web.WebServerManager
 import me.rerere.tts.provider.TTSManager
+import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
 
 val appModule = module {
@@ -91,6 +93,18 @@ val appModule = module {
         TaskCoordinator(
             generationHandler = get(),
             store = get(),
+        )
+    }
+
+    // The chat-side board panel's view model (SPEC.md M5, decision #4). The conversation id is a
+    // runtime parameter (the panel lives inside one conversation); it WRITES through the same
+    // TaskBoardRepository the board tools use, so a UI edit is validated identically to a tool
+    // edit — no UI-only validation path exists.
+    viewModel { params ->
+        BoardViewModel(
+            id = params.get(),
+            dao = get(),
+            repository = get(),
         )
     }
 
