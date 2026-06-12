@@ -403,6 +403,65 @@ a milestone.)
 4. Should the board panel be reachable outside an open conversation (e.g. a global "all
    boards" screen)? v1 assumes per-conversation panel only.
 
+## Known gaps — deferred to a follow-up slice (maintainer sign-off required)
+
+Two review findings (#1 child-approval round-trip, #5 per-handle board claims) are NOT addressed
+in this branch and require an explicit maintainer scope decision before implementation, because
+each is a multi-hundred-line change through `ChatService`'s async generation + approval-suspend
+machinery and at least one surface this spec flags as **Ask first**. Recording them here (with the
+design) rather than shipping a stub, per "say the scope is too large explicitly; don't decide
+unilaterally to ship a stub".
+
+### Gap A — child-approval round-trip is non-functional (finding #1; affects Success Criterion #3)
+
+`TaskApprovalRouter` and its `TASK_APPROVAL_VISIBLE` property test exist, but the router is never
+wired: `TaskCoordinator` accepts no `TaskApprovalGate`, and the production spawn path strips ALL
+`needsApproval` tools from the child pool (`buildSpawnTool`:
+`buildSubagentTools(sub).filterNot { it.needsApproval }`) AND the catalog repeats the strip
+(`AppToolCatalog`: `recursionGuarded.filterNot { it.needsApproval }`). So no child tool can reach
+the gate in production; `pendingApproval` / `WaitingApproval` are effectively dead at runtime.
+**Success Criterion #3 is therefore NOT met by this branch and must not be claimed met.**
+
+Design for the follow-up slice (state-machine class — design before patch):
+1. Pass allowlisted `needsApproval` child tools THROUGH the child pool instead of stripping them
+   unconditionally — gated by the running `AgentTypeSpec.toolPolicy` allowlist, never a heuristic.
+   This is an **Ask-first** change: it alters the spawn path's tool-filtering contract (boundary
+   "any change to the spawn tool's tool assembly").
+2. Thread a `TaskApprovalGate` into `TaskCoordinator` and have the child turn route an
+   approval-gated tool call through it. The gate's allowlisted branch calls a
+   `ParentApprovalSurface` bound to `ChatService`, which must raise a parent-visible pending
+   `UIMessagePart.Tool` namespaced `taskId/childToolCallId` and suspend until `handleToolApproval`
+   resolves it — i.e. a new suspend point inside the running child collection, structurally a
+   child of the generation job so cancel still cascades. Non-allowlisted tools keep auto-denying
+   with the reason recorded in the summary (already implemented in the router).
+3. The DEFAULT allowlist contents are **Open Question #3** — unresolved; do not ship a non-empty
+   default without the maintainer picking it.
+
+### Gap B — subagent board claims are owned per-conversation, not per-handle (finding #5; decision #5)
+
+`ExecutionHandleRegistry` and `BoardPortAdapter.forHandle` exist and are tested, but the spawn path
+never registers a per-child handle: `ChatService` builds the board port with
+`actor = BoardActor(handleId = "conversation:$conversationId", …)` for the parent turn, and
+`TaskCoordinator` never calls `register` / `forHandle` for a spawned child. So every subagent claim
+is owned by the conversation-level id, and `releaseClaimsOf(handleId)` (orphan recovery) would find
+nothing to release per dead handle. The decision-#5 "orphan recovery releases ALL claims of a dead
+handle" guarantee is therefore not achievable end-to-end yet. (This is why the startup recovery
+runner in this branch deliberately does NOT call `releaseClaimsOf` — see `TaskRecoveryRunner` KDoc.)
+
+Design for the follow-up slice:
+1. In `TaskCoordinator.run`, `register` an `ExecutionHandle` (child of the parent generation job)
+   per spawned child, and build that child's board port via `BoardPortAdapter.forHandle(...)` so
+   `ownerHandleId = handle.id` and accepted claims attach to the handle's `workItemIds`.
+2. Mark the handle `Running`/`Completed`/`Failed`/`Stopped` along the run's terminals; on process
+   death the row's claims are now owned by a real handle id, so the recovery runner can call
+   `releaseClaimsOf(handle.id)` for each handle that did not complete.
+3. This requires `ChatService` to hand `TaskCoordinator` the parent generation `Job` + the
+   `ExecutionHandleRegistry` (a constructor/DI change), and is sequenced with Gap A since both
+   touch the same spawn-execution seam.
+
+Both gaps are real and must be tracked as a follow-up slice; this branch fixes findings #2, #3, #4
+(startup recovery scan + retention sweep + reachable board panel) and explicitly scopes A and B out.
+
 ## Verification (skill gate)
 
 - [x] Six core areas covered (objective, commands, structure, style, testing, boundaries)
