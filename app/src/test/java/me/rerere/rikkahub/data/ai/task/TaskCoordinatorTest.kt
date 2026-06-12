@@ -354,4 +354,74 @@ class TaskCoordinatorTest {
         }
         assertEquals("the global concurrency cap of 2 was never exceeded", 2, peak.get())
     }
+
+    @Test
+    fun `per-parent mutex entries are evicted so the registry stays bounded`() {
+        // Every spawn uses a UNIQUE parentToolCallId — the exact hot-path shape that leaked one
+        // permanent map entry per spawn for the life of the process-singleton coordinator (review
+        // finding #3). After all runs complete the registry must be empty, not N-deep.
+        val coordinator = coordinator(capturingGenerate(Captured(), listOf(GenerationChunk.Messages(listOf(assistantMsg("ok"))))))
+
+        runBlocking {
+            repeat(50) { i ->
+                coordinator.run(
+                    sub = Assistant(name = "Sub", chatModelId = subModel.id),
+                    prompt = "go$i",
+                    parentModelId = null,
+                    settings = settingsWith(subModel),
+                    parentToolCallId = "call-$i",
+                )
+            }
+            assertEquals("every per-parent mutex entry must be evicted once its run completes", 0, coordinator.parentMutexCount())
+        }
+    }
+
+    @Test
+    fun `siblings on the same parent still serialize and the shared entry is evicted after both`() {
+        // Eviction must NOT break per-parent cap = 1: two siblings on the SAME parentToolCallId must
+        // still mutually exclude (share one Mutex), and the single shared entry must be gone only
+        // after BOTH depart.
+        val live = AtomicInteger(0)
+        val peak = AtomicInteger(0)
+        val gates = List(2) { CompletableDeferred<Unit>() }
+        val started = List(2) { CompletableDeferred<Unit>() }
+        val counter = AtomicInteger(0)
+        val gatedGenerate: SubagentGenerate = { _, _, _, _, _, _, _ ->
+            val idx = counter.getAndIncrement()
+            flow {
+                peak.updateAndGet { maxOf(it, live.incrementAndGet()) }
+                started[idx].complete(Unit)
+                gates[idx].await()
+                live.decrementAndGet()
+                emit(GenerationChunk.Messages(listOf(assistantMsg("done $idx"))))
+            }
+        }
+        // Per-parent cap 1, global wide enough that ONLY the per-parent mutex serializes them.
+        val coordinator = coordinator(gatedGenerate, budget = TaskBudget(globalConcurrency = 4, perParentConcurrency = 1))
+
+        runBlocking {
+            coroutineScope {
+                val jobs = (0..1).map {
+                    launch {
+                        coordinator.run(
+                            sub = Assistant(name = "Sub", chatModelId = subModel.id),
+                            prompt = "go$it",
+                            parentModelId = null,
+                            settings = settingsWith(subModel),
+                            parentToolCallId = "shared-call",
+                        )
+                    }
+                }
+                // Only one sibling may be live at a time on the shared parent.
+                started[0].await()
+                assertEquals("the shared parent must hold exactly one live entry", 1, coordinator.parentMutexCount())
+                gates[0].complete(Unit)
+                started[1].await()
+                gates[1].complete(Unit)
+                jobs.forEach { it.join() }
+            }
+            assertEquals("per-parent cap 1 must serialize siblings on the same parent", 1, peak.get())
+            assertEquals("the shared entry is evicted only after both siblings depart", 0, coordinator.parentMutexCount())
+        }
+    }
 }

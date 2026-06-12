@@ -103,11 +103,50 @@ class TaskCoordinator(
     /** Process-wide concurrency gate. Recomputed per cap so a test/override budget is honored. */
     private val globalSemaphores = ConcurrentHashMap<Int, Semaphore>()
 
-    /** Per-parent-tool-call concurrency gate. Keyed by the spawn tool call id. */
-    private val parentMutexes = ConcurrentHashMap<String, Mutex>()
+    /**
+     * Per-parent-tool-call concurrency gate, keyed by the spawn tool call id. Each entry is
+     * reference-counted: every run grouped under the same parentToolCallId shares the one [Mutex],
+     * and the entry is EVICTED once its last user departs ([releaseParentMutex] drops it at refs=0).
+     * Without that eviction the map grew one permanent entry per spawn for the life of the
+     * process-singleton coordinator — an unbounded leak on a hot path (review finding #3).
+     *
+     * [parentRegistryLock] guards only the brief refcount bookkeeping (getOrPut + refs++/--), NOT
+     * the held lock or [execute]; it is a coroutine [Mutex] because acquisition runs suspendably.
+     */
+    private class RefCountedMutex {
+        val mutex = Mutex()
+        var refs = 0
+    }
+
+    private val parentMutexes = HashMap<String, RefCountedMutex>()
+    private val parentRegistryLock = Mutex()
 
     private fun globalSemaphore(permits: Int): Semaphore =
         globalSemaphores.getOrPut(permits) { Semaphore(permits.coerceAtLeast(1)) }
+
+    /**
+     * Acquire (creating if absent) the shared [Mutex] for [parentToolCallId] and register one user.
+     * The matching [releaseParentMutex] MUST run for every successful acquire (use try/finally), or
+     * the entry leaks again.
+     */
+    private suspend fun acquireParentMutex(parentToolCallId: String): Mutex =
+        parentRegistryLock.withLock {
+            parentMutexes.getOrPut(parentToolCallId) { RefCountedMutex() }
+                .also { it.refs++ }
+                .mutex
+        }
+
+    /** Deregister one user of [parentToolCallId]; evict the entry when the last user leaves. */
+    private suspend fun releaseParentMutex(parentToolCallId: String) =
+        parentRegistryLock.withLock {
+            val entry = parentMutexes[parentToolCallId] ?: return@withLock
+            if (--entry.refs <= 0) {
+                parentMutexes.remove(parentToolCallId)
+            }
+        }
+
+    /** Live per-parent mutex entry count. Test-only: pins that eviction keeps the map bounded. */
+    internal suspend fun parentMutexCount(): Int = parentRegistryLock.withLock { parentMutexes.size }
 
     /**
      * Run a sub-task to completion and return its final text (parity with `SubagentRunner.run`).
@@ -170,21 +209,24 @@ class TaskCoordinator(
         // Created -> Queued: the spawn tool call was accepted; the run now waits for a slot.
         store.applyEvent(taskId, TaskEvent.Enqueued)
 
-        val parentMutex = if (parentToolCallId.isNotBlank()) {
-            parentMutexes.getOrPut(parentToolCallId) { Mutex() }
-        } else {
-            null
-        }
+        val grouped = parentToolCallId.isNotBlank()
+        val parentMutex = if (grouped) acquireParentMutex(parentToolCallId) else null
 
         // Acquire the global slot first, then (optionally) the per-parent slot. Acquisition is the
         // queue: a child with no free slot suspends here in TaskState.Queued. Ordering global-then-
-        // parent consistently for every run prevents a lock-acquisition cycle.
-        return globalSemaphore(budget.globalConcurrency).withPermit {
-            if (parentMutex != null) {
-                parentMutex.withLock { execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget) }
-            } else {
-                execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget)
+        // parent consistently for every run prevents a lock-acquisition cycle. The parent-mutex
+        // registration is released in a finally so its map entry is evicted once the last sibling
+        // departs (review finding #3) — even on cancellation or a thrown execute().
+        return try {
+            globalSemaphore(budget.globalConcurrency).withPermit {
+                if (parentMutex != null) {
+                    parentMutex.withLock { execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget) }
+                } else {
+                    execute(taskId, settings, model, messages, ephemeralSub, childTools, maxSteps, processingStatus, budget)
+                }
             }
+        } finally {
+            if (grouped) releaseParentMutex(parentToolCallId)
         }
     }
 
