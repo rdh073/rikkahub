@@ -349,8 +349,7 @@ class ClaudeProvider(
                     }
 
                     ClaudeStreamTerminal.Error -> {
-                        val eventData = json.parseToJsonElement(data).jsonObject
-                        close(resolveStreamError(eventData))
+                        close(resolveStreamError(dataJson))
                         return
                     }
 
