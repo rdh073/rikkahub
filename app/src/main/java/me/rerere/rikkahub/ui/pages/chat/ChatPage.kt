@@ -258,6 +258,26 @@ private fun ChatPageContent(
 
     TTSAutoPlay(vm = vm, setting = setting, conversation = conversation)
 
+    // Single submit path for tap and long-press send; only the answer flag differs.
+    fun submitInput(answer: Boolean) {
+        if (currentChatModel == null) {
+            toaster.show(selectModelFirstMessage, type = ToastType.Error)
+            return
+        }
+        if (inputState.isEditing()) {
+            vm.handleMessageEdit(
+                parts = inputState.getContents(),
+                messageId = inputState.editingMessage!!,
+            )
+        } else {
+            vm.handleMessageSend(content = inputState.getContents(), answer = answer)
+            scope.launch {
+                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+            }
+        }
+        inputState.clearInput()
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.background,
         modifier = Modifier.fillMaxSize()
@@ -298,36 +318,10 @@ private fun ChatPageContent(
                         vm.updateSettings(setting.copy(enableWebSearch = !enableWebSearch))
                     },
                     onSendClick = {
-                        if (currentChatModel == null) {
-                            toaster.show(selectModelFirstMessage, type = ToastType.Error)
-                            return@ChatInput
-                        }
-                        if (inputState.isEditing()) {
-                            vm.handleMessageEdit(
-                                parts = inputState.getContents(),
-                                messageId = inputState.editingMessage!!,
-                            )
-                        } else {
-                            vm.handleMessageSend(inputState.getContents())
-                            scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
-                            }
-                        }
-                        inputState.clearInput()
+                        submitInput(answer = true)
                     },
                     onLongSendClick = {
-                        if (inputState.isEditing()) {
-                            vm.handleMessageEdit(
-                                parts = inputState.getContents(),
-                                messageId = inputState.editingMessage!!,
-                            )
-                        } else {
-                            vm.handleMessageSend(content = inputState.getContents(), answer = false)
-                            scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
-                            }
-                        }
-                        inputState.clearInput()
+                        submitInput(answer = false)
                     },
                     onUpdateChatModel = {
                         vm.setChatModel(assistant = setting.getCurrentAssistant(), model = it)
