@@ -148,6 +148,39 @@ class ScheduleVMTest {
         assertEquals(existing, f.vm.conversationId.value)
     }
 
+    // SC1 regression (SPEC.md M1): a schedule seeded on the conversation a VM is BOUND to must be
+    // visible from that VM. The empty-list bug was a data-scope failure — the drawer navigated to
+    // Screen.Schedule carrying only the assistant id, so ScheduleVM started with
+    // initialConversationId == null and listSchedules()/load() short-circuited to emptyList() while
+    // _conversationId was unbound, hiding schedules created by tools or a prior session. The route now
+    // threads the conversation id (T1); this test pins that the bound id flows through to the listing
+    // path. It fails under the pre-T1 reasoning (a null binding short-circuits to empty) and passes once
+    // the bound id reaches listSchedules().
+    @Test
+    fun bound_conversation_lists_a_schedule_seeded_on_it() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+        // Seed through the SAME repository legality path a tool/prior session would use — scoped to the
+        // conversation the VM is bound to, not via the VM's own create (which would also exercise the
+        // ensure-conversation seam). This isolates the listing/data-scope behavior SC1 is about.
+        val seeded = f.repository.create(
+            existing,
+            ScheduleOwner.USER,
+            f.oneShotDraft().copy(targetAssistantId = f.target.id),
+        ) as? ScheduleMutationResult.Accepted
+        assertNotNull("seeding the bound conversation must be Accepted", seeded)
+
+        val snapshots = f.vm.listSchedules()
+
+        // listSchedules() returns the seeded schedule (not the pre-T1 empty short-circuit)...
+        assertEquals(1, snapshots.size)
+        assertEquals(seeded!!.snapshot.id, snapshots.single().id)
+        assertEquals(f.target.id, snapshots.single().targetAssistantId)
+        // ...and load() publishes it to the StateFlow the screen observes (size 1, not empty).
+        f.vm.load()
+        assertEquals(1, f.vm.schedules.value.size)
+    }
+
     @Test
     fun list_is_scoped_to_the_bound_conversation() = runBlocking {
         val existing = Uuid.random()
