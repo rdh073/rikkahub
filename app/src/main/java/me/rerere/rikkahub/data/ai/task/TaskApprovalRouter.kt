@@ -93,7 +93,7 @@ class TaskApprovalRouter(
         // other child-approval fact (the auto-deny reason) already lives.
         store.appendEventSummary(
             taskId = taskId,
-            summary = resolvedSummary(request.toolName, decision.approved),
+            summary = resolvedSummary(request.toolName, decision),
             kind = SUMMARY_KIND_APPROVAL_RESOLVED,
         )
         return decision
@@ -102,8 +102,21 @@ class TaskApprovalRouter(
     private fun autoDenyReason(toolName: String): String =
         "Child tool \"$toolName\" auto-denied: not on the subagent approval allowlist."
 
-    private fun resolvedSummary(toolName: String, approved: Boolean): String =
-        "Child tool \"$toolName\" ${if (approved) "approved" else "denied"} by the parent."
+    /**
+     * The durable record of the parent's decision. The full payload matters: recovery seeds an
+     * interrupted run from the LAST event summary, and for an [TaskApprovalDecision.Answered]
+     * decision the ANSWER is the child's actual tool result — reducing it to "approved" would
+     * resume a process-death run without the one fact the child was waiting on.
+     */
+    private fun resolvedSummary(toolName: String, decision: TaskApprovalDecision): String = when (decision) {
+        TaskApprovalDecision.Approved ->
+            "Child tool \"$toolName\" approved by the parent."
+        is TaskApprovalDecision.Answered ->
+            "Child tool \"$toolName\" answered by the parent: ${decision.answer}"
+        is TaskApprovalDecision.Denied ->
+            "Child tool \"$toolName\" denied by the parent" +
+                (if (decision.reason.isBlank()) "." else ": ${decision.reason}")
+    }
 
     companion object {
         /** Summary kind recorded when a non-allowlisted child tool auto-denies. */

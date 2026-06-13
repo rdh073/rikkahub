@@ -182,6 +182,38 @@ class TaskApprovalVisiblePropertyTest {
     }
 
     @Test
+    fun `an answered decision's answer survives into the durable summary`() {
+        // Recovery seeds an interrupted run from the LAST event summary; for Answered the answer
+        // IS the child's tool result, so reducing it to "approved" would resume a process-death
+        // run without the one fact the child was waiting on.
+        runBlocking {
+            val taskId = Uuid.random()
+            val store = RecordingStore()
+            val router = TaskApprovalRouter(
+                policyFor = { TaskToolPolicy(approvalForwardAllowlist = setOf("ask_user")) },
+                surface = object : ParentApprovalSurface {
+                    override suspend fun requestApproval(
+                        namespacedToolCallId: String,
+                        request: TaskApprovalRequest,
+                    ): TaskApprovalDecision = TaskApprovalDecision.Answered("ship the green build")
+                },
+                store = store,
+            )
+
+            val decision = router.await(taskId, TaskApprovalRequest("c1", "ask_user"))
+
+            assertEquals(TaskApprovalDecision.Answered("ship the green build"), decision)
+            assertTrue(
+                "the durable summary must carry the answer payload",
+                store.summaries[taskId].orEmpty().any { (kind, text) ->
+                    kind == TaskApprovalRouter.SUMMARY_KIND_APPROVAL_RESOLVED &&
+                        text.contains("ship the green build")
+                },
+            )
+        }
+    }
+
+    @Test
     fun `an empty allowlist forwards nothing`() {
         runBlocking {
             checkAll(200, Arb.list(arbToolName, 1..6)) { probes ->
