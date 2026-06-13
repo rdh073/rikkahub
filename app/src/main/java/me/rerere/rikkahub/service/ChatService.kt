@@ -117,6 +117,7 @@ import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
+import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.data.model.sanitizeForUpload
 import me.rerere.rikkahub.data.model.toMessageNode
@@ -658,6 +659,25 @@ class ChatService(
     fun getProcessingStatusFlow(conversationId: Uuid): StateFlow<String?> {
         val session = sessions[conversationId] ?: return MutableStateFlow(null)
         return session.processingStatus
+    }
+
+    // ---- 自动化按运行授权 (#187 v2) ----
+
+    /**
+     * The package currently in the device foreground, read live from the accessibility runtime — the
+     * single app an in-chat grant can be scoped to. Null when the accessibility service is not
+     * connected. Surfaced here (not the registry) so the chat ViewModel depends only on ChatService.
+     */
+    fun automationForegroundPackage(): String? = automationRegistry.foregroundPackage()
+
+    /**
+     * Record the user's per-run automation scope on the conversation's session. Transient lease state
+     * (lives beside `activeAutomationGuard`, cleared by `clearAutomationLeaseState`), NOT persisted on
+     * the Assistant. The lease derivation consumes it to mint the guard; an empty/absent grant stays
+     * fail-closed (deny-all). Writing it here keeps the private session map encapsulated in ChatService.
+     */
+    fun setPendingAutomationGrant(conversationId: Uuid, grant: AutomationGrant) {
+        getOrCreateSession(conversationId).pendingAutomationGrant = grant
     }
 
     // 不在这里 catch/降级：本流是对一组 in-memory StateFlow（每个 session 的 generationJob，热流、

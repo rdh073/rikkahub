@@ -1264,5 +1264,15 @@
   <string name="assistant_page_automation_ttl_label">有效期限（分鐘）</string>
   <string name="assistant_page_automation_steps_label">最大步數</string>
   <string name="assistant_page_automation_limits_desc">授權在達到此分鐘數或此操作次數（以先到者為準）後過期。為零則全部拒絕。</string>
+  <string name="chat_automation_grant_open">授予自動化權限</string>
+  <string name="chat_automation_grant_title">為本次執行授予自動化權限</string>
+  <string name="chat_automation_grant_desc">授權助手在限定時間內讀取並操作目前應用程式。此授權僅涵蓋前景應用程式，並在本次執行結束時清除。</string>
+  <string name="chat_automation_grant_foreground_label">目前應用程式</string>
+  <string name="chat_automation_grant_no_foreground">未偵測到前景應用程式。請先開啟目標應用程式，然後啟用無障礙服務再授權。</string>
+  <string name="chat_automation_grant_actions_label">允許的操作</string>
+  <string name="chat_automation_grant_ttl_label">有效期限</string>
+  <string name="chat_automation_grant_ttl_minutes">%1$d 分鐘</string>
+  <string name="chat_automation_grant_confirm">授予</string>
+  <string name="chat_automation_grant_cancel">取消</string>
 </resources>
 

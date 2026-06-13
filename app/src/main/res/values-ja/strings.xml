@@ -1266,5 +1266,15 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="assistant_page_automation_ttl_label">有効時間（分）</string>
   <string name="assistant_page_automation_steps_label">最大ステップ数</string>
   <string name="assistant_page_automation_limits_desc">許可はこの分数またはこの操作回数のいずれか早い方で期限切れになります。ゼロの場合はすべて拒否されます。</string>
+  <string name="chat_automation_grant_open">自動化を許可</string>
+  <string name="chat_automation_grant_title">今回の実行に自動化を許可</string>
+  <string name="chat_automation_grant_desc">現在のアプリを一定時間読み取り・操作することをアシスタントに許可します。この許可はフォアグラウンドのアプリのみを対象とし、今回の実行が終了すると解除されます。</string>
+  <string name="chat_automation_grant_foreground_label">現在のアプリ</string>
+  <string name="chat_automation_grant_no_foreground">フォアグラウンドのアプリが検出されません。対象アプリを開き、ユーザー補助サービスを有効にしてから許可してください。</string>
+  <string name="chat_automation_grant_actions_label">許可する操作</string>
+  <string name="chat_automation_grant_ttl_label">有効期限</string>
+  <string name="chat_automation_grant_ttl_minutes">%1$d 分</string>
+  <string name="chat_automation_grant_confirm">許可</string>
+  <string name="chat_automation_grant_cancel">キャンセル</string>
 </resources>
 

@@ -1264,5 +1264,15 @@
   <string name="assistant_page_automation_ttl_label">Time-to-live (minutes)</string>
   <string name="assistant_page_automation_steps_label">Max steps</string>
   <string name="assistant_page_automation_limits_desc">A grant expires after this many minutes or this many actions, whichever comes first. Zero denies everything.</string>
+  <string name="chat_automation_grant_open">Grant automation</string>
+  <string name="chat_automation_grant_title">Grant automation for this run</string>
+  <string name="chat_automation_grant_desc">Authorize the assistant to read and act on the current app for a limited time. The grant covers only the foreground app and is cleared when this run ends.</string>
+  <string name="chat_automation_grant_foreground_label">Current app</string>
+  <string name="chat_automation_grant_no_foreground">No foreground app detected. Open the target app, then enable the accessibility service before granting.</string>
+  <string name="chat_automation_grant_actions_label">Allowed actions</string>
+  <string name="chat_automation_grant_ttl_label">Expires after</string>
+  <string name="chat_automation_grant_ttl_minutes">%1$d min</string>
+  <string name="chat_automation_grant_confirm">Grant</string>
+  <string name="chat_automation_grant_cancel">Cancel</string>
 </resources>
 

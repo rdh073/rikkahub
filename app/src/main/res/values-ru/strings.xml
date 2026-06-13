@@ -1266,5 +1266,15 @@
   <string name="assistant_page_automation_ttl_label">Время жизни (минуты)</string>
   <string name="assistant_page_automation_steps_label">Макс. число шагов</string>
   <string name="assistant_page_automation_limits_desc">Разрешение истекает по достижении этого числа минут или этого числа действий, в зависимости от того, что наступит раньше. Ноль отклоняет всё.</string>
+  <string name="chat_automation_grant_open">Разрешить автоматизацию</string>
+  <string name="chat_automation_grant_title">Разрешить автоматизацию для этого запуска</string>
+  <string name="chat_automation_grant_desc">Разрешите ассистенту читать и управлять текущим приложением в течение ограниченного времени. Разрешение распространяется только на приложение на переднем плане и снимается по завершении этого запуска.</string>
+  <string name="chat_automation_grant_foreground_label">Текущее приложение</string>
+  <string name="chat_automation_grant_no_foreground">Приложение на переднем плане не обнаружено. Откройте нужное приложение, затем включите службу специальных возможностей перед предоставлением разрешения.</string>
+  <string name="chat_automation_grant_actions_label">Разрешённые действия</string>
+  <string name="chat_automation_grant_ttl_label">Истекает через</string>
+  <string name="chat_automation_grant_ttl_minutes">%1$d мин</string>
+  <string name="chat_automation_grant_confirm">Разрешить</string>
+  <string name="chat_automation_grant_cancel">Отмена</string>
 </resources>
 

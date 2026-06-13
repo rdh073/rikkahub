@@ -30,6 +30,9 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.model.AutomationGrant
+import me.rerere.rikkahub.data.model.AutomationSink
+import me.rerere.rikkahub.data.model.AutomationVerb
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
@@ -263,6 +266,20 @@ class ChatVM(
         }
     }
 
+    // Foreground package the assistant would observe/drive if granted (#187 v2). Read live from the
+    // accessibility runtime via ChatService so the in-chat grant sheet can show the user exactly which
+    // app the scope will cover. Null when the accessibility service is not connected.
+    fun automationForegroundPackage(): String? =
+        chatService.automationForegroundPackage()
+
+    // Write the user's per-run automation scope (#187 v2). Transient: it lands on the session's
+    // pendingAutomationGrant (not the persisted Assistant), consumed by the lease derivation and
+    // cleared with the rest of the automation lease lifecycle. Confirming the grant sheet calls this.
+    fun grantAutomation(grant: AutomationGrant) {
+        analytics.logEvent("ai_grant_automation", null)
+        chatService.setPendingAutomationGrant(_conversationId, grant)
+    }
+
     fun saveConversationAsync() {
         launchVm(onError = { reportOperationError(it) }) {
             chatService.saveConversation(_conversationId, conversation.value)
@@ -366,4 +383,36 @@ class ChatVM(
         }
     }
 
+}
+
+/**
+ * Pure confirm-logic of the in-chat per-run automation grant sheet (T10). Builds the transient
+ * [AutomationGrant] the user is authorizing from the live foreground package + their selected verbs,
+ * sinks, TTL and step budget. Top-level so it is JVM-testable without the ViewModel/Android (mirrors
+ * [shouldBlockSubmitForMissingModel] in ChatPage).
+ *
+ * Returns `null` when there is no foreground package to scope to — an in-chat grant is always scoped
+ * to exactly the one app currently on screen, so without it there is nothing to authorize.
+ *
+ * [AutomationSink.SUBMIT] is ALWAYS stripped, regardless of what is passed: submit-class automation
+ * is the stricter, separate opt-in the kernel deliberately withholds, and this UX must never mint it
+ * (Boundaries: "Ask first — adding Sink.SUBMIT"). The kernel's `toCapability` strips SUBMIT again at
+ * the lease seam; stripping here keeps the user-visible grant honest about what it actually authorizes.
+ */
+internal fun buildPerRunGrant(
+    foregroundPackage: String?,
+    verbs: Set<AutomationVerb>,
+    sinks: Set<AutomationSink>,
+    ttlMinutes: Int,
+    maxSteps: Int,
+): AutomationGrant? {
+    val pkg = foregroundPackage?.takeIf { it.isNotBlank() } ?: return null
+    return AutomationGrant(
+        enabled = true,
+        allowedPackages = setOf(pkg),
+        verbs = verbs,
+        sinks = sinks - AutomationSink.SUBMIT,
+        ttlMinutes = ttlMinutes,
+        maxSteps = maxSteps,
+    )
 }
