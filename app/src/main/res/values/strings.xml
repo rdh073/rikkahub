@@ -1232,5 +1232,37 @@
   <string name="assistant_page_local_tools_open_app_desc">Launch an installed app by its package name; returns an error if the app is not installed or cannot be launched</string>
   <string name="assistant_page_local_tools_list_app_title">List Apps</string>
   <string name="assistant_page_local_tools_list_app_desc">List the installed apps that can be launched, returning each package name and label</string>
+  <string name="assistant_detail_automation_desc">Grant a narrow, time-boxed scope for on-device screen automation</string>
+  <string name="assistant_page_automation_title">Automation</string>
+  <string name="assistant_page_automation_enable_title">Enable automation scope</string>
+  <string name="assistant_page_automation_enable_desc">When off, every automation request is denied. Enabling applies the scope below for a limited time per run.</string>
+  <string name="assistant_page_automation_a11y_on_title">Accessibility service connected</string>
+  <string name="assistant_page_automation_a11y_on_desc">On-device automation can read and act on screens within the scope you grant below.</string>
+  <string name="assistant_page_automation_a11y_off_title">Accessibility service off</string>
+  <string name="assistant_page_automation_a11y_off_desc">Enable the accessibility service in system settings; until then no automation can run, regardless of this scope.</string>
+  <string name="assistant_page_automation_verbs_title">Allowed actions</string>
+  <string name="assistant_page_automation_verb_observe">Observe</string>
+  <string name="assistant_page_automation_verb_observe_desc">Read the on-screen layout of an allowed app</string>
+  <string name="assistant_page_automation_verb_tap">Tap</string>
+  <string name="assistant_page_automation_verb_tap_desc">Tap elements in an allowed app</string>
+  <string name="assistant_page_automation_verb_set_text">Set text</string>
+  <string name="assistant_page_automation_verb_set_text_desc">Type into editable fields in an allowed app</string>
+  <string name="assistant_page_automation_verb_scroll">Scroll</string>
+  <string name="assistant_page_automation_verb_scroll_desc">Scroll content in an allowed app</string>
+  <string name="assistant_page_automation_verb_global">Global navigation</string>
+  <string name="assistant_page_automation_verb_global_desc">Perform device-level navigation such as back and home</string>
+  <string name="assistant_page_automation_sinks_title">Allowed input sinks</string>
+  <string name="assistant_page_automation_sink_type_into">Type into fields</string>
+  <string name="assistant_page_automation_sink_global_nav">Global navigation</string>
+  <string name="assistant_page_automation_packages_title">Allowed apps</string>
+  <string name="assistant_page_automation_packages_desc">Only the package names you list here can be observed or acted on. Everything else is denied.</string>
+  <string name="assistant_page_automation_packages_hint">Package name, e.g. com.example.app</string>
+  <string name="assistant_page_automation_packages_add">Add package</string>
+  <string name="assistant_page_automation_packages_remove">Remove package</string>
+  <string name="assistant_page_automation_packages_empty">No apps allowed. Automation is denied until you add at least one package.</string>
+  <string name="assistant_page_automation_limits_title">Lease limits</string>
+  <string name="assistant_page_automation_ttl_label">Time-to-live (minutes)</string>
+  <string name="assistant_page_automation_steps_label">Max steps</string>
+  <string name="assistant_page_automation_limits_desc">A grant expires after this many minutes or this many actions, whichever comes first. Zero denies everything.</string>
 </resources>
 

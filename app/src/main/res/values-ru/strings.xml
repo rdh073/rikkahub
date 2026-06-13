@@ -1234,5 +1234,37 @@
   <string name="assistant_page_local_tools_open_app_desc">Запускает установленное приложение по имени пакета; возвращает ошибку, если приложение не установлено или не может быть запущено</string>
   <string name="assistant_page_local_tools_list_app_title">Список приложений</string>
   <string name="assistant_page_local_tools_list_app_desc">Перечисляет установленные приложения, которые можно запустить, возвращая имя пакета и название каждого</string>
+  <string name="assistant_detail_automation_desc">Предоставьте узкую и ограниченную по времени область для автоматизации экрана на устройстве</string>
+  <string name="assistant_page_automation_title">Автоматизация</string>
+  <string name="assistant_page_automation_enable_title">Включить область автоматизации</string>
+  <string name="assistant_page_automation_enable_desc">Когда выключено, любой запрос автоматизации отклоняется. При включении область ниже применяется на ограниченное время для каждого запуска.</string>
+  <string name="assistant_page_automation_a11y_on_title">Служба специальных возможностей подключена</string>
+  <string name="assistant_page_automation_a11y_on_desc">Автоматизация на устройстве может читать и воздействовать на экраны в пределах предоставленной ниже области.</string>
+  <string name="assistant_page_automation_a11y_off_title">Служба специальных возможностей отключена</string>
+  <string name="assistant_page_automation_a11y_off_desc">Включите службу специальных возможностей в системных настройках; до этого автоматизация не запустится независимо от этой области.</string>
+  <string name="assistant_page_automation_verbs_title">Разрешённые действия</string>
+  <string name="assistant_page_automation_verb_observe">Наблюдение</string>
+  <string name="assistant_page_automation_verb_observe_desc">Считывать раскладку экрана разрешённого приложения</string>
+  <string name="assistant_page_automation_verb_tap">Нажатие</string>
+  <string name="assistant_page_automation_verb_tap_desc">Нажимать на элементы в разрешённом приложении</string>
+  <string name="assistant_page_automation_verb_set_text">Ввод текста</string>
+  <string name="assistant_page_automation_verb_set_text_desc">Вводить текст в редактируемые поля разрешённого приложения</string>
+  <string name="assistant_page_automation_verb_scroll">Прокрутка</string>
+  <string name="assistant_page_automation_verb_scroll_desc">Прокручивать содержимое в разрешённом приложении</string>
+  <string name="assistant_page_automation_verb_global">Глобальная навигация</string>
+  <string name="assistant_page_automation_verb_global_desc">Выполнять навигацию на уровне устройства, например «Назад» и «Домой»</string>
+  <string name="assistant_page_automation_sinks_title">Разрешённые приёмники ввода</string>
+  <string name="assistant_page_automation_sink_type_into">Ввод в поля</string>
+  <string name="assistant_page_automation_sink_global_nav">Глобальная навигация</string>
+  <string name="assistant_page_automation_packages_title">Разрешённые приложения</string>
+  <string name="assistant_page_automation_packages_desc">Наблюдать и воздействовать можно только на перечисленные здесь имена пакетов. Всё остальное отклоняется.</string>
+  <string name="assistant_page_automation_packages_hint">Имя пакета, например com.example.app</string>
+  <string name="assistant_page_automation_packages_add">Добавить пакет</string>
+  <string name="assistant_page_automation_packages_remove">Удалить пакет</string>
+  <string name="assistant_page_automation_packages_empty">Нет разрешённых приложений. Автоматизация отклоняется, пока не добавлен хотя бы один пакет.</string>
+  <string name="assistant_page_automation_limits_title">Ограничения аренды</string>
+  <string name="assistant_page_automation_ttl_label">Время жизни (минуты)</string>
+  <string name="assistant_page_automation_steps_label">Макс. число шагов</string>
+  <string name="assistant_page_automation_limits_desc">Разрешение истекает по достижении этого числа минут или этого числа действий, в зависимости от того, что наступит раньше. Ноль отклоняет всё.</string>
 </resources>
 

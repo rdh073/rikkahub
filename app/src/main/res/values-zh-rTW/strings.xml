@@ -1232,5 +1232,37 @@
   <string name="assistant_page_local_tools_open_app_desc">透過套件名稱啟動已安裝的應用程式；若應用程式未安裝或無法啟動則回傳錯誤</string>
   <string name="assistant_page_local_tools_list_app_title">列出應用程式</string>
   <string name="assistant_page_local_tools_list_app_desc">列出可啟動的已安裝應用程式，回傳每個應用程式的套件名稱和名稱</string>
+  <string name="assistant_detail_automation_desc">為裝置端螢幕自動化授予一個狹窄且有時限的範圍</string>
+  <string name="assistant_page_automation_title">自動化</string>
+  <string name="assistant_page_automation_enable_title">啟用自動化範圍</string>
+  <string name="assistant_page_automation_enable_desc">關閉時，所有自動化請求都會被拒絕。啟用後，每次執行將在限定時間內套用下方的範圍。</string>
+  <string name="assistant_page_automation_a11y_on_title">無障礙服務已連線</string>
+  <string name="assistant_page_automation_a11y_on_desc">裝置端自動化可在你下方授予的範圍內讀取並操作螢幕。</string>
+  <string name="assistant_page_automation_a11y_off_title">無障礙服務已關閉</string>
+  <string name="assistant_page_automation_a11y_off_desc">請在系統設定中啟用無障礙服務；在此之前，無論此範圍如何設定，自動化都無法執行。</string>
+  <string name="assistant_page_automation_verbs_title">允許的操作</string>
+  <string name="assistant_page_automation_verb_observe">觀察</string>
+  <string name="assistant_page_automation_verb_observe_desc">讀取允許應用程式的螢幕版面配置</string>
+  <string name="assistant_page_automation_verb_tap">點擊</string>
+  <string name="assistant_page_automation_verb_tap_desc">點擊允許應用程式中的元素</string>
+  <string name="assistant_page_automation_verb_set_text">設定文字</string>
+  <string name="assistant_page_automation_verb_set_text_desc">在允許應用程式的可編輯欄位中輸入</string>
+  <string name="assistant_page_automation_verb_scroll">捲動</string>
+  <string name="assistant_page_automation_verb_scroll_desc">捲動允許應用程式中的內容</string>
+  <string name="assistant_page_automation_verb_global">全域導覽</string>
+  <string name="assistant_page_automation_verb_global_desc">執行裝置層級導覽，例如返回和主畫面</string>
+  <string name="assistant_page_automation_sinks_title">允許的輸入接收</string>
+  <string name="assistant_page_automation_sink_type_into">輸入到欄位</string>
+  <string name="assistant_page_automation_sink_global_nav">全域導覽</string>
+  <string name="assistant_page_automation_packages_title">允許的應用程式</string>
+  <string name="assistant_page_automation_packages_desc">只有你在此列出的套件名稱才能被觀察或操作，其餘一律拒絕。</string>
+  <string name="assistant_page_automation_packages_hint">套件名稱，例如 com.example.app</string>
+  <string name="assistant_page_automation_packages_add">新增套件</string>
+  <string name="assistant_page_automation_packages_remove">移除套件</string>
+  <string name="assistant_page_automation_packages_empty">未允許任何應用程式。在新增至少一個套件名稱之前，自動化將被拒絕。</string>
+  <string name="assistant_page_automation_limits_title">租約限制</string>
+  <string name="assistant_page_automation_ttl_label">有效期限（分鐘）</string>
+  <string name="assistant_page_automation_steps_label">最大步數</string>
+  <string name="assistant_page_automation_limits_desc">授權在達到此分鐘數或此操作次數（以先到者為準）後過期。為零則全部拒絕。</string>
 </resources>
 
