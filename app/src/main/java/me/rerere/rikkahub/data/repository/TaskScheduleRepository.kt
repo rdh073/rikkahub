@@ -65,41 +65,61 @@ class TaskScheduleRepository(
     private val resolveAssistant: suspend (Uuid) -> Assistant?,
     private val json: Json = Json,
     private val now: () -> Long = System::currentTimeMillis,
+    // WorkManager firing seams (SPEC.md M5 / task T9), injected so the repository stays a pure
+    // persistence concern with no compile-time edge to WorkManager (DIP). They default to no-ops so
+    // JVM repository tests — which fake Room and never touch the transport — construct the repository
+    // unchanged. A create ENQUEUES the schedule's first fire; a delete CANCELS its unique work chain,
+    // each AFTER the transaction commits (never enqueue then roll back).
+    private val onScheduleCreated: (Uuid, Long) -> Unit = { _, _ -> },
+    private val onScheduleDeleted: (Uuid) -> Unit = { },
 ) {
     /**
      * Create one schedule for [conversationId] owned by [owner]. Validates every gate before any
      * write; the first failing gate returns [ScheduleMutationResult.Rejected] and the transaction
-     * touches no row.
+     * touches no row. On acceptance, the schedule's first fire is enqueued via [onScheduleCreated]
+     * AFTER the transaction commits, so a rolled-back create never leaves a phantom pending fire.
      */
     suspend fun create(
         conversationId: Uuid,
         owner: ScheduleOwner,
         draft: ScheduleDraft,
-    ): ScheduleMutationResult = transactions.inTransaction {
+    ): ScheduleMutationResult {
+        val result = transactions.inTransaction { createInTransaction(conversationId, owner, draft) }
+        if (result is ScheduleMutationResult.Accepted) {
+            onScheduleCreated(result.snapshot.id, result.snapshot.nextFireAt)
+        }
+        return result
+    }
+
+    private suspend fun createInTransaction(
+        conversationId: Uuid,
+        owner: ScheduleOwner,
+        draft: ScheduleDraft,
+    ): ScheduleMutationResult {
         if (draft.prompt.length > MAX_PROMPT_CHARS) {
-            return@inTransaction ScheduleMutationResult.Rejected(
+            return ScheduleMutationResult.Rejected(
                 "prompt is too long: ${draft.prompt.length} > $MAX_PROMPT_CHARS"
             )
         }
 
         val target = resolveAssistant(draft.targetAssistantId)
-            ?: return@inTransaction ScheduleMutationResult.Rejected(
+            ?: return ScheduleMutationResult.Rejected(
                 "unknown target assistant: ${draft.targetAssistantId}"
             )
         if (!target.spawnable) {
-            return@inTransaction ScheduleMutationResult.Rejected(
+            return ScheduleMutationResult.Rejected(
                 "target assistant is not spawnable: ${draft.targetAssistantId}"
             )
         }
 
         if (draft.kind == ScheduleKind.RECURRING) {
             val spec = parseRecurrenceSpec(draft.recurrenceSpec)
-                ?: return@inTransaction ScheduleMutationResult.Rejected(
+                ?: return ScheduleMutationResult.Rejected(
                     "recurring schedule requires a valid recurrenceSpec"
                 )
             val intervalMillis = spec.intervalMillis()
             if (intervalMillis < MIN_RECURRENCE_INTERVAL_MILLIS) {
-                return@inTransaction ScheduleMutationResult.Rejected(
+                return ScheduleMutationResult.Rejected(
                     "recurring interval $intervalMillis ms is below the minimum $MIN_RECURRENCE_INTERVAL_MILLIS ms"
                 )
             }
@@ -108,12 +128,12 @@ class TaskScheduleRepository(
         // Caps count only ENABLED schedules; a fired one-shot (disabled) no longer occupies quota.
         val enabledHere = dao.listByConversation(conversationId.toString()).count { it.enabled }
         if (enabledHere >= MAX_ACTIVE_PER_CONVERSATION) {
-            return@inTransaction ScheduleMutationResult.Rejected(
+            return ScheduleMutationResult.Rejected(
                 "per-conversation active schedule cap reached ($MAX_ACTIVE_PER_CONVERSATION)"
             )
         }
         if (dao.countEnabledByOwner(owner.name) >= MAX_ACTIVE_PER_USER) {
-            return@inTransaction ScheduleMutationResult.Rejected(
+            return ScheduleMutationResult.Rejected(
                 "per-${owner.name.lowercase()} active schedule cap reached ($MAX_ACTIVE_PER_USER)"
             )
         }
@@ -136,7 +156,7 @@ class TaskScheduleRepository(
             updatedAt = timestamp,
         )
         dao.insert(entity)
-        ScheduleMutationResult.Accepted(entity.toSnapshot())
+        return ScheduleMutationResult.Accepted(entity.toSnapshot())
     }
 
     /** Schedules on [conversationId], in presentation order (next_fire_at ascending). */
@@ -149,13 +169,21 @@ class TaskScheduleRepository(
      * conversation (or absent entirely) REJECTS — the scope check is what stops an agent (or UI)
      * bound to one conversation from reaching into another's schedules.
      */
-    suspend fun delete(conversationId: Uuid, id: Uuid): ScheduleMutationResult = transactions.inTransaction {
-        val row = dao.getById(id.toString())
-            ?.takeIf { it.conversationId == conversationId.toString() }
-            ?: return@inTransaction ScheduleMutationResult.Rejected("schedule not found: $id")
-        val snapshot = row.toSnapshot()
-        dao.deleteById(id.toString())
-        ScheduleMutationResult.Accepted(snapshot)
+    suspend fun delete(conversationId: Uuid, id: Uuid): ScheduleMutationResult {
+        val result = transactions.inTransaction {
+            val row = dao.getById(id.toString())
+                ?.takeIf { it.conversationId == conversationId.toString() }
+                ?: return@inTransaction ScheduleMutationResult.Rejected("schedule not found: $id")
+            val snapshot = row.toSnapshot()
+            dao.deleteById(id.toString())
+            ScheduleMutationResult.Accepted(snapshot)
+        }
+        // Cancel the deleted schedule's pending fire AFTER the row is gone, so a fire can never be
+        // re-armed for a schedule that no longer exists.
+        if (result is ScheduleMutationResult.Accepted) {
+            onScheduleDeleted(id)
+        }
+        return result
     }
 
     /**
