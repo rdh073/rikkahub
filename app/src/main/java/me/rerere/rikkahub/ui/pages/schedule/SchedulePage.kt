@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.pages.schedule
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,7 +15,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,6 +60,7 @@ import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Minus
 import com.composables.icons.lucide.Plus
 import com.composables.icons.lucide.Trash2
+import com.composables.icons.lucide.TriangleAlert
 import me.rerere.ai.runtime.contract.ScheduleDraft
 import me.rerere.ai.runtime.contract.ScheduleKind
 import me.rerere.ai.runtime.contract.ScheduleMutationResult
@@ -95,7 +99,7 @@ fun SchedulePage(
     vm: ScheduleVM = koinViewModel { parametersOf(targetAssistantId, conversationId) },
 ) {
     val toaster = LocalToaster.current
-    val schedules by vm.schedules.collectAsStateWithLifecycle()
+    val uiState by vm.uiState.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var showCreateDialog by rememberSaveable { mutableStateOf(false) }
     var createError by remember { mutableStateOf<CreateScheduleError?>(null) }
@@ -120,50 +124,46 @@ fun SchedulePage(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = CustomColors.topBarColors.containerColor,
     ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = innerPadding + PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (schedules.isEmpty()) {
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 48.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Icon(
-                            imageVector = Lucide.CalendarClock,
-                            contentDescription = null,
-                            modifier = Modifier.size(48.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            text = "No scheduled tasks yet",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
+        // The four states are rendered distinctly (SPEC.md M6 / SC6) so "loading" is never mistaken for
+        // "empty": a spinner while loading, a CTA-bearing column when genuinely empty, an error line on an
+        // unexpected fault, and the card list when populated. The FAB stays for the populated state; the
+        // empty state additionally hosts a primary in-column Create task button so a first-time user is not
+        // left hunting for the FAB.
+        when (val state = uiState) {
+            is ScheduleUiState.Loading -> ScheduleLoadingState(innerPadding)
 
-            items(schedules, key = { it.id.toString() }) { snapshot ->
-                ScheduleCard(
-                    snapshot = snapshot,
-                    onToggleEnabled = { enabled ->
-                        // Route the toggle through the VM → repository (the single legality path); a
-                        // resume that breaches a freed cap is Rejected. The card has no dialog to host an
-                        // inline error, and the Switch is bound to snapshot.enabled — which only changes
-                        // when the list refreshes on Accept — so a Rejected leaves the switch visually
-                        // reverted and we toast the reason (spec Open Question 3).
-                        vm.setEnabled(snapshot.id, enabled) { result ->
-                            if (result is ScheduleMutationResult.Rejected) toaster.show(result.reason)
-                        }
-                    },
-                    onDelete = { deleteTarget = snapshot },
-                )
+            is ScheduleUiState.Empty -> ScheduleEmptyState(
+                innerPadding = innerPadding,
+                onCreate = { showCreateDialog = true },
+            )
+
+            is ScheduleUiState.Error -> ScheduleErrorState(
+                innerPadding = innerPadding,
+                message = state.message,
+                onRetry = { vm.load() },
+            )
+
+            is ScheduleUiState.Content -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = innerPadding + PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                items(state.schedules, key = { it.id.toString() }) { snapshot ->
+                    ScheduleCard(
+                        snapshot = snapshot,
+                        onToggleEnabled = { enabled ->
+                            // Route the toggle through the VM → repository (the single legality path); a
+                            // resume that breaches a freed cap is Rejected. The card has no dialog to host an
+                            // inline error, and the Switch is bound to snapshot.enabled — which only changes
+                            // when the list refreshes on Accept — so a Rejected leaves the switch visually
+                            // reverted and we toast the reason (spec Open Question 3).
+                            vm.setEnabled(snapshot.id, enabled) { result ->
+                                if (result is ScheduleMutationResult.Rejected) toaster.show(result.reason)
+                            }
+                        },
+                        onDelete = { deleteTarget = snapshot },
+                    )
+                }
             }
         }
     }
@@ -213,6 +213,104 @@ fun SchedulePage(
         onDismiss = { deleteTarget = null },
     ) {
         Text("This scheduled task will be removed and will not fire again.")
+    }
+}
+
+/** Centered spinner shown while [ScheduleUiState.Loading] — distinct from the empty state (SC6). */
+@Composable
+private fun ScheduleLoadingState(innerPadding: PaddingValues) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(innerPadding),
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator()
+    }
+}
+
+/**
+ * The empty state (SPEC.md M6 / SC6): an icon, a one-line explanation, and a PRIMARY in-column
+ * Create task button so a first-time user has an obvious call to action without hunting for the FAB.
+ */
+@Composable
+private fun ScheduleEmptyState(
+    innerPadding: PaddingValues,
+    onCreate: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(innerPadding)
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(
+            imageVector = Lucide.CalendarClock,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = "No scheduled tasks yet",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 12.dp),
+        )
+        Button(
+            onClick = onCreate,
+            modifier = Modifier.padding(top = 20.dp),
+        ) {
+            Icon(Lucide.Plus, contentDescription = null, modifier = Modifier.size(18.dp))
+            Text("Create task", modifier = Modifier.padding(start = 8.dp))
+        }
+    }
+}
+
+/**
+ * The error state (SPEC.md M6 / SC6): shown only on an UNEXPECTED fault while listing (domain failures
+ * are Rejected, never thrown), so the screen surfaces the cause and offers a retry instead of a blank
+ * or misleading empty state.
+ */
+@Composable
+private fun ScheduleErrorState(
+    innerPadding: PaddingValues,
+    message: String,
+    onRetry: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(innerPadding)
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(
+            imageVector = Lucide.TriangleAlert,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.error,
+        )
+        Text(
+            text = "Couldn't load scheduled tasks",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(top = 12.dp),
+        )
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        OutlinedButton(
+            onClick = onRetry,
+            modifier = Modifier.padding(top = 20.dp),
+        ) {
+            Text("Retry")
+        }
     }
 }
 

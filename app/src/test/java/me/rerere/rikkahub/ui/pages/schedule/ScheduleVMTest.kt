@@ -9,6 +9,7 @@ import me.rerere.ai.runtime.contract.ScheduleKind
 import me.rerere.ai.runtime.contract.ScheduleMutationResult
 import me.rerere.ai.runtime.contract.ScheduleOwner
 import me.rerere.ai.runtime.schedule.RecurrenceUnit
+import me.rerere.rikkahub.data.db.entity.TaskScheduleEntity
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.repository.TaskScheduleRepository
 import me.rerere.rikkahub.data.repository.fakes.FakeBoardTransactions
@@ -34,6 +35,14 @@ class ScheduleVMTest {
         private var t = 1_000L
         fun current(): Long = ++t
     }
+
+    /**
+     * The snapshots the screen would render — the [ScheduleUiState.Content] list, or empty for the
+     * Loading/Empty/Error cases. Lets the M1/M2/M5 tests keep asserting on "the published list" now that
+     * the list lives inside the sealed [ScheduleUiState] (SPEC.md M6) instead of a bare StateFlow.
+     */
+    private val ScheduleVM.publishedSchedules: List<me.rerere.ai.runtime.contract.ScheduleSnapshot>
+        get() = (uiState.value as? ScheduleUiState.Content)?.schedules ?: emptyList()
 
     /** Records the conversation-ensure seam so the test can assert it ran (or did not). */
     private class RecordingEnsureConversation(private val produced: Uuid) {
@@ -164,7 +173,7 @@ class ScheduleVMTest {
         // Establish a real, non-empty published list first so "unchanged" is observable: an accepted
         // create populates _schedules with one snapshot scoped to the pre-bound conversation.
         assertTrue(f.vm.createSchedule(f.oneShotDraft()) is ScheduleMutationResult.Accepted)
-        val scheduleBefore = f.vm.schedules.value
+        val scheduleBefore = f.vm.publishedSchedules
         assertEquals(1, scheduleBefore.size)
 
         val result = f.vm.createSchedule(f.rejectedDraft())
@@ -179,7 +188,7 @@ class ScheduleVMTest {
         assertNull("must not roll back a pre-bound conversation", f.rollback.rolledBack)
         assertEquals(existing, f.vm.conversationId.value)
         // The published list is byte-for-byte the pre-rejection list — no spurious refresh/clear.
-        assertEquals(scheduleBefore, f.vm.schedules.value)
+        assertEquals(scheduleBefore, f.vm.publishedSchedules)
     }
 
     // SC1 regression (SPEC.md M1): a schedule seeded on the conversation a VM is BOUND to must be
@@ -212,7 +221,7 @@ class ScheduleVMTest {
         assertEquals(f.target.id, snapshots.single().targetAssistantId)
         // ...and load() publishes it to the StateFlow the screen observes (size 1, not empty).
         f.vm.load()
-        assertEquals(1, f.vm.schedules.value.size)
+        assertEquals(1, f.vm.publishedSchedules.size)
     }
 
     @Test
@@ -311,7 +320,7 @@ class ScheduleVMTest {
         val f = Fixture(boundConversationId = existing)
         val created = f.vm.createSchedule(f.oneShotDraft()) as ScheduleMutationResult.Accepted
         // The created schedule starts enabled and is the published list's single snapshot.
-        assertTrue(f.vm.schedules.value.single().enabled)
+        assertTrue(f.vm.publishedSchedules.single().enabled)
 
         val paused = f.vm.setScheduleEnabled(created.snapshot.id, enabled = false)
 
@@ -320,13 +329,13 @@ class ScheduleVMTest {
         assertTrue("expected Accepted, got $paused", paused is ScheduleMutationResult.Accepted)
         assertEquals(false, f.dao.getById(created.snapshot.id.toString())?.enabled)
         // The published list refreshed, so the screen observes the disabled snapshot.
-        assertEquals(false, f.vm.schedules.value.single().enabled)
+        assertEquals(false, f.vm.publishedSchedules.single().enabled)
 
         // Resuming routes the same way and the refresh re-publishes the enabled snapshot.
         val resumed = f.vm.setScheduleEnabled(created.snapshot.id, enabled = true)
         assertTrue(resumed is ScheduleMutationResult.Accepted)
         assertEquals(true, f.dao.getById(created.snapshot.id.toString())?.enabled)
-        assertEquals(true, f.vm.schedules.value.single().enabled)
+        assertEquals(true, f.vm.publishedSchedules.single().enabled)
     }
 
     // An unbound screen has no conversation to scope a toggle to, so setEnabled must REJECT rather than
@@ -377,5 +386,79 @@ class ScheduleVMTest {
         assertEquals(f.createdConversationId, vm.conversationId.value)
         assertEquals(2, f.dao.listByConversation(f.createdConversationId.toString()).size)
         assertNull("a successful create must never be rolled back", f.rollback.rolledBack)
+    }
+
+    // SC6 (SPEC.md M6 / task T12): the screen must distinguish loading / empty / error / populated,
+    // so "loading" is no longer indistinguishable from "empty". The VM exposes a sealed [ScheduleUiState];
+    // load() publishes Loading first, then resolves to Empty (no rows), Content(list) (rows), or — only on
+    // an UNEXPECTED exception (domain rejections come back as Rejected, not throws) — Error. These tests pin
+    // each transition at the VM seam, the layer CI actually runs (pure JVM unit, no Compose).
+
+    @Test
+    fun ui_state_starts_loading_before_load() {
+        val f = Fixture(boundConversationId = Uuid.random())
+        // The init state is Loading, not a bare empty list — the screen renders a spinner, not the
+        // empty-state CTA, until load() resolves.
+        assertTrue(
+            "expected Loading init, got ${f.vm.uiState.value}",
+            f.vm.uiState.value is ScheduleUiState.Loading,
+        )
+    }
+
+    @Test
+    fun load_with_no_schedules_resolves_to_empty() = runBlocking {
+        val f = Fixture(boundConversationId = Uuid.random())
+
+        f.vm.listSchedules()
+
+        assertTrue(
+            "an empty conversation must resolve to Empty, got ${f.vm.uiState.value}",
+            f.vm.uiState.value is ScheduleUiState.Empty,
+        )
+    }
+
+    @Test
+    fun load_with_schedules_resolves_to_content() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+        f.repository.create(existing, ScheduleOwner.USER, f.oneShotDraft().copy(targetAssistantId = f.target.id))
+
+        f.vm.listSchedules()
+
+        val state = f.vm.uiState.value
+        assertTrue("a populated conversation must resolve to Content, got $state", state is ScheduleUiState.Content)
+        assertEquals(1, (state as ScheduleUiState.Content).schedules.size)
+    }
+
+    // A repository THROW (not a Rejected — domain errors come back as Rejected) is the only path to Error:
+    // an unexpected exception while listing must surface as Error(message), never crash the screen or be
+    // mistaken for Empty. A DAO whose listByConversation throws stands in for an unexpected persistence fault.
+    @Test
+    fun load_with_repository_throw_resolves_to_error() = runBlocking {
+        val existing = Uuid.random()
+        val throwingDao = object : FakeTaskScheduleDAO() {
+            override suspend fun listByConversation(conversationId: String): List<TaskScheduleEntity> =
+                throw IllegalStateException("db unavailable")
+        }
+        val target = Assistant(id = Uuid.random(), name = "agent", spawnable = true)
+        val repository = TaskScheduleRepository(
+            dao = throwingDao,
+            transactions = FakeBoardTransactions(),
+            resolveAssistant = { id -> if (id == target.id) target else null },
+            now = MutableClock()::current,
+        )
+        val vm = ScheduleVM(
+            targetAssistantId = target.id,
+            initialConversationId = existing,
+            repository = repository,
+            ensureConversation = { existing },
+            rollbackConversation = {},
+        )
+
+        vm.listSchedules()
+
+        val state = vm.uiState.value
+        assertTrue("an unexpected throw must resolve to Error, got $state", state is ScheduleUiState.Error)
+        assertTrue("Error must carry a message", (state as ScheduleUiState.Error).message.isNotBlank())
     }
 }
