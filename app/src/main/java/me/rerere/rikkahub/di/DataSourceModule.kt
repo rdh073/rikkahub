@@ -26,6 +26,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.repository.RoomBoardTransactionRunner
 import me.rerere.rikkahub.data.repository.TaskBoardRepository
+import me.rerere.rikkahub.data.repository.TaskScheduleRepository
 import me.rerere.rikkahub.data.repository.TaskRunRepository
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
 import me.rerere.rikkahub.data.db.fts.SimpleDictManager
@@ -183,6 +184,24 @@ val dataSourceModule = module {
         TaskBoardRepository(
             dao = get(),
             transactions = RoomBoardTransactionRunner(get<AppDatabase>()),
+        )
+    }
+
+    single {
+        get<AppDatabase>().taskScheduleDao()
+    }
+
+    // Per-conversation task schedules (SPEC.md M3/M4). The repository is the SINGLE legality path
+    // shared by the schedule tools and the schedule UI, so every gate (target spawnable, caps,
+    // minimum interval, prompt bound, conversation scoping) is enforced once. The spawnable-target
+    // lookup reads the CURRENT settings at resolve time (DIP: the repository never imports the
+    // settings store directly, mirroring TaskCoordinator's injected lookups).
+    single {
+        val settingsStore = get<SettingsStore>()
+        TaskScheduleRepository(
+            dao = get(),
+            transactions = RoomBoardTransactionRunner(get<AppDatabase>()),
+            resolveAssistant = { id -> settingsStore.settingsFlow.value.assistants.find { it.id == id } },
         )
     }
 

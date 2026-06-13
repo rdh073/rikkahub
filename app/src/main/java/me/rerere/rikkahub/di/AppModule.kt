@@ -154,6 +154,7 @@ val appModule = module {
             filesManager = get(),
             skillManager = get(),
             taskBoardRepository = get(),
+            taskScheduleRepository = get(),
             executionHandles = get(),
             taskRunStore = get(),
             automationRegistry = get(),
