@@ -1,0 +1,157 @@
+package me.rerere.rikkahub.ui.pages.schedule
+
+import me.rerere.ai.runtime.contract.ScheduleKind
+import me.rerere.ai.runtime.schedule.RecurrenceUnit
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.util.TimeZone
+
+/**
+ * Pure-validation tests (SPEC.md M4 / task T7, SC3). [ScheduleFormState.validate] mirrors — does NOT
+ * replace — the gates in [me.rerere.rikkahub.data.repository.TaskScheduleRepository]:
+ *
+ *  - prompt non-blank AND length <= 8000 (`MAX_PROMPT_CHARS`),
+ *  - a RECURRING effective interval >= 15 min (`MIN_RECURRENCE_INTERVAL_MILLIS`), so MINUTES requires
+ *    `every >= 15` (`every = 1, MINUTES` is unsubmittable — the 15-min floor),
+ *  - a valid IANA `timeZoneId` (`ZoneId.of`),
+ *  - a valid `HH:mm` `timeOfDay` for DAYS (`LocalTime.parse`).
+ *
+ * An empty error map == submittable; the create button binds to it. The repository stays the single
+ * source of truth — these guards exist so the UI cannot OFFER a value the repository will reject.
+ *
+ * BOUNDARY suite (SC3): the inputs that sit on each gate's edge, where an off-by-one or a missing
+ * guard would let a sub-floor value through.
+ */
+class ScheduleFormStateTest {
+
+    private val now = 1_700_000_000_000L
+    private val defaultZone: String = TimeZone.getDefault().id
+    private val futureFire = now + 60 * 60 * 1000L // now + 1h
+
+    private fun oneShot(prompt: String = "do a thing") = ScheduleFormState(
+        prompt = prompt,
+        kind = ScheduleKind.ONE_SHOT,
+        firstFireAt = futureFire,
+        timeZoneId = defaultZone,
+    )
+
+    private fun recurring(
+        every: Int,
+        unit: RecurrenceUnit,
+        prompt: String = "do a thing",
+        timeOfDay: String? = null,
+        timeZoneId: String = defaultZone,
+    ) = ScheduleFormState(
+        prompt = prompt,
+        kind = ScheduleKind.RECURRING,
+        every = every,
+        unit = unit,
+        firstFireAt = futureFire,
+        timeOfDay = timeOfDay,
+        timeZoneId = timeZoneId,
+    )
+
+    // ---- prompt bound (mirrors MAX_PROMPT_CHARS = 8000) -----------------------------------------
+
+    @Test
+    fun `blank prompt is invalid`() {
+        val errors = oneShot(prompt = "   ").validate(now)
+        assertTrue("blank prompt must flag PROMPT: $errors", errors.containsKey(ScheduleField.PROMPT))
+    }
+
+    @Test
+    fun `prompt length 8000 is valid`() {
+        val errors = oneShot(prompt = "a".repeat(8000)).validate(now)
+        assertFalse("prompt of exactly 8000 chars must NOT flag PROMPT: $errors", errors.containsKey(ScheduleField.PROMPT))
+    }
+
+    @Test
+    fun `prompt length 8001 is invalid`() {
+        val errors = oneShot(prompt = "a".repeat(8001)).validate(now)
+        assertTrue("prompt of 8001 chars must flag PROMPT: $errors", errors.containsKey(ScheduleField.PROMPT))
+    }
+
+    // ---- minimum recurring interval (mirrors MIN_RECURRENCE_INTERVAL_MILLIS = 15 min) ------------
+
+    @Test
+    fun `every 1 unit MINUTES is invalid (below the 15-minute floor)`() {
+        val errors = recurring(every = 1, unit = RecurrenceUnit.MINUTES).validate(now)
+        assertTrue("1 minute breaches the 15-min floor: $errors", errors.containsKey(ScheduleField.EVERY))
+    }
+
+    @Test
+    fun `every 14 unit MINUTES is invalid (below the 15-minute floor)`() {
+        val errors = recurring(every = 14, unit = RecurrenceUnit.MINUTES).validate(now)
+        assertTrue("14 minutes breaches the 15-min floor: $errors", errors.containsKey(ScheduleField.EVERY))
+    }
+
+    @Test
+    fun `every 15 unit MINUTES is valid (exactly the 15-minute floor)`() {
+        val errors = recurring(every = 15, unit = RecurrenceUnit.MINUTES).validate(now)
+        assertFalse("15 minutes meets the floor, must be submittable: $errors", errors.containsKey(ScheduleField.EVERY))
+        assertTrue("15-min recurring must be fully submittable: $errors", errors.isEmpty())
+    }
+
+    @Test
+    fun `every 0 is invalid (malformed interval)`() {
+        val errors = recurring(every = 0, unit = RecurrenceUnit.HOURS).validate(now)
+        assertTrue("every < 1 must flag EVERY: $errors", errors.containsKey(ScheduleField.EVERY))
+    }
+
+    @Test
+    fun `every 1 unit HOURS is valid (1h is above the 15-min floor)`() {
+        val errors = recurring(every = 1, unit = RecurrenceUnit.HOURS).validate(now)
+        assertTrue("1 hour recurring must be fully submittable: $errors", errors.isEmpty())
+    }
+
+    // ---- timezone gate (mirrors ZoneId.of) ------------------------------------------------------
+
+    @Test
+    fun `bad timezone is invalid`() {
+        val errors = oneShot().copy(timeZoneId = "Not/AZone").validate(now)
+        assertTrue("unparseable zone must flag TIMEZONE: $errors", errors.containsKey(ScheduleField.TIMEZONE))
+    }
+
+    @Test
+    fun `valid IANA timezone is accepted`() {
+        val errors = oneShot().copy(timeZoneId = "Asia/Jakarta").validate(now)
+        assertFalse("valid zone must NOT flag TIMEZONE: $errors", errors.containsKey(ScheduleField.TIMEZONE))
+    }
+
+    // ---- daily timeOfDay gate (mirrors LocalTime.parse, DAYS only) -------------------------------
+
+    @Test
+    fun `bad timeOfDay for DAYS is invalid`() {
+        val errors = recurring(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "25:99").validate(now)
+        assertTrue("bad HH:mm must flag TIME_OF_DAY: $errors", errors.containsKey(ScheduleField.TIME_OF_DAY))
+    }
+
+    @Test
+    fun `valid timeOfDay for DAYS is accepted`() {
+        val errors = recurring(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00").validate(now)
+        assertTrue("valid daily schedule must be submittable: $errors", errors.isEmpty())
+    }
+
+    @Test
+    fun `null timeOfDay for DAYS is accepted (anchor time is used)`() {
+        val errors = recurring(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = null).validate(now)
+        assertTrue("null timeOfDay is legal for DAYS: $errors", errors.isEmpty())
+    }
+
+    @Test
+    fun `bad timeOfDay is ignored for MINUTES (only DAYS honors it)`() {
+        // Recurrence.kt:34 — timeOfDay anchors DAYS fires only; MINUTES/HOURS ignore it, so the UI
+        // must not block submission on a stale timeOfDay left over from a DAYS selection.
+        val errors = recurring(every = 30, unit = RecurrenceUnit.MINUTES, timeOfDay = "25:99").validate(now)
+        assertFalse("MINUTES must not honor timeOfDay: $errors", errors.containsKey(ScheduleField.TIME_OF_DAY))
+    }
+
+    // ---- submittability ------------------------------------------------------------------------
+
+    @Test
+    fun `a well-formed one-shot is submittable`() {
+        assertTrue("a valid one-shot must yield no errors", oneShot().validate(now).isEmpty())
+    }
+}
