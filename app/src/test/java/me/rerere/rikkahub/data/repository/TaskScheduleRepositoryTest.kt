@@ -41,11 +41,18 @@ class TaskScheduleRepositoryTest {
             spawnable.id to spawnable,
             notSpawnable.id to notSpawnable,
         )
+
+        /** Records each firing-seam call so a test can assert a fire was (or was NOT) armed/cancelled. */
+        val enqueued = mutableListOf<Pair<Uuid, Long>>()
+        val cancelled = mutableListOf<Uuid>()
+
         val repository = TaskScheduleRepository(
             dao = dao,
             transactions = FakeBoardTransactions(),
             resolveAssistant = { id -> registry[id] },
             now = MutableClock()::current,
+            onScheduleCreated = { id, fireAt -> enqueued += id to fireAt },
+            onScheduleDeleted = { id -> cancelled += id },
         )
     }
 
@@ -308,6 +315,147 @@ class TaskScheduleRepositoryTest {
         val f = Fixture()
         val result = f.repository.delete(Uuid.random(), Uuid.random())
         assertTrue(result is ScheduleMutationResult.Rejected)
+    }
+
+    // --- setEnabled pause/resume (SPEC.md M5 / task T10) -----------------------------------------
+
+    @Test
+    fun pause_disables_the_row_and_cancels_its_pending_fire() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        // Discard the create-path enqueue bookkeeping; we assert only the seams the pause itself fires.
+        f.enqueued.clear()
+        f.cancelled.clear()
+
+        val result = f.repository.setEnabled(conversationId, created.snapshot.id, enabled = false)
+
+        assertTrue("expected Accepted, got $result", result is ScheduleMutationResult.Accepted)
+        assertTrue("pause must disable the row", !f.dao.getById(created.snapshot.id.toString())!!.enabled)
+        // pause cancels the WorkManager fire via onScheduleDeleted (the same cancel seam delete uses).
+        assertEquals(listOf(created.snapshot.id), f.cancelled)
+        assertTrue("pause must not enqueue a fire", f.enqueued.isEmpty())
+    }
+
+    @Test
+    fun resume_within_cap_re_enables_and_re_arms_the_fire() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        f.repository.setEnabled(conversationId, created.snapshot.id, enabled = false)
+        f.enqueued.clear()
+        f.cancelled.clear()
+
+        val result = f.repository.setEnabled(conversationId, created.snapshot.id, enabled = true)
+
+        assertTrue("expected Accepted, got $result", result is ScheduleMutationResult.Accepted)
+        val row = f.dao.getById(created.snapshot.id.toString())!!
+        assertTrue("resume must re-enable the row", row.enabled)
+        // resume re-arms the next fire via onScheduleCreated (same enqueue seam create uses), at the
+        // schedule's nextFireAt.
+        assertEquals(listOf(created.snapshot.id to row.nextFireAt), f.enqueued)
+        assertTrue("resume must not cancel", f.cancelled.isEmpty())
+    }
+
+    @Test
+    fun resume_that_would_breach_the_per_conversation_cap_rejects_and_stays_disabled() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        // Create one schedule, then pause it (freeing a quota slot).
+        val paused = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        f.repository.setEnabled(conversationId, paused.snapshot.id, enabled = false)
+        // Fill the per-conversation cap with OTHER enabled schedules; the freed slot is now taken.
+        repeat(TaskScheduleRepository.MAX_ACTIVE_PER_CONVERSATION) {
+            val r = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            assertTrue("cap fill $it should be accepted", r is ScheduleMutationResult.Accepted)
+        }
+        f.enqueued.clear()
+
+        // Resuming the paused row would push enabled count to cap+1 — must reject.
+        val result = f.repository.setEnabled(conversationId, paused.snapshot.id, enabled = true)
+
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+        assertTrue(
+            "a rejected resume must leave the row disabled",
+            !f.dao.getById(paused.snapshot.id.toString())!!.enabled,
+        )
+        assertTrue("a rejected resume must not enqueue a fire", f.enqueued.isEmpty())
+    }
+
+    @Test
+    fun resume_that_would_breach_the_per_owner_cap_rejects_and_stays_disabled() = runBlocking {
+        val f = Fixture()
+        val pausedConversation = Uuid.random()
+        val paused = f.repository.create(pausedConversation, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        f.repository.setEnabled(pausedConversation, paused.snapshot.id, enabled = false)
+        // Fill the per-owner cap with enabled USER schedules spread across conversations so the
+        // per-conversation cap never trips first.
+        var created = 0
+        while (created < TaskScheduleRepository.MAX_ACTIVE_PER_USER) {
+            val c = Uuid.random()
+            repeat(TaskScheduleRepository.MAX_ACTIVE_PER_CONVERSATION) {
+                if (created < TaskScheduleRepository.MAX_ACTIVE_PER_USER) {
+                    val r = f.repository.create(c, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+                    assertTrue(r is ScheduleMutationResult.Accepted)
+                    created++
+                }
+            }
+        }
+        f.enqueued.clear()
+
+        val result = f.repository.setEnabled(pausedConversation, paused.snapshot.id, enabled = true)
+
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+        assertTrue(!f.dao.getById(paused.snapshot.id.toString())!!.enabled)
+        assertTrue(f.enqueued.isEmpty())
+    }
+
+    @Test
+    fun setEnabled_through_a_foreign_conversation_id_rejects() = runBlocking {
+        val f = Fixture()
+        val owningConversation = Uuid.random()
+        val foreignConversation = Uuid.random()
+        val created = f.repository.create(owningConversation, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        f.cancelled.clear()
+        f.enqueued.clear()
+
+        // Toggling through a DIFFERENT conversation must reject and touch nothing — the scope check
+        // is what stops a UI/agent bound to one conversation from pausing another's schedule.
+        val result = f.repository.setEnabled(foreignConversation, created.snapshot.id, enabled = false)
+
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+        assertTrue("foreign toggle must leave the row enabled", f.dao.getById(created.snapshot.id.toString())!!.enabled)
+        assertTrue("foreign toggle must not fire either seam", f.cancelled.isEmpty() && f.enqueued.isEmpty())
+    }
+
+    @Test
+    fun setEnabled_of_an_unknown_id_rejects() = runBlocking {
+        val f = Fixture()
+        val result = f.repository.setEnabled(Uuid.random(), Uuid.random(), enabled = false)
+        assertTrue(result is ScheduleMutationResult.Rejected)
+    }
+
+    @Test
+    fun setEnabled_to_the_same_state_is_idempotent_and_does_not_double_fire_a_seam() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        f.enqueued.clear()
+        f.cancelled.clear()
+
+        // The row is already enabled; enabling again must not re-arm a duplicate fire.
+        val result = f.repository.setEnabled(conversationId, created.snapshot.id, enabled = true)
+
+        assertTrue("expected Accepted, got $result", result is ScheduleMutationResult.Accepted)
+        assertTrue("enabling an already-enabled row must not re-enqueue", f.enqueued.isEmpty())
+        assertTrue(f.cancelled.isEmpty())
+        assertTrue(f.dao.getById(created.snapshot.id.toString())!!.enabled)
     }
 
     // --- claimDue / finishRun (atomic, SPEC.md M3 / task T5) -------------------------------------
