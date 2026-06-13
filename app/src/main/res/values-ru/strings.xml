@@ -1230,5 +1230,9 @@
   <string name="workspace_rootfs_progress_installed">Установка завершена</string>
   <string name="workspace_rootfs_install_failed">Не удалось установить Rootfs</string>
   <string name="chat_board_open">Доска задач</string>
+  <string name="assistant_page_local_tools_open_app_title">Открыть приложение</string>
+  <string name="assistant_page_local_tools_open_app_desc">Запускает установленное приложение по имени пакета; возвращает ошибку, если приложение не установлено или не может быть запущено</string>
+  <string name="assistant_page_local_tools_list_app_title">Список приложений</string>
+  <string name="assistant_page_local_tools_list_app_desc">Перечисляет установленные приложения, которые можно запустить, возвращая имя пакета и название каждого</string>
 </resources>
 

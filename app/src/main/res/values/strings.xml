@@ -1228,5 +1228,9 @@
   <string name="workspace_rootfs_progress_extracting">Extracting %1$d items</string>
   <string name="workspace_rootfs_progress_installed">Installation complete</string>
   <string name="workspace_rootfs_install_failed">Rootfs install failed</string>
+  <string name="assistant_page_local_tools_open_app_title">Open App</string>
+  <string name="assistant_page_local_tools_open_app_desc">Launch an installed app by its package name; returns an error if the app is not installed or cannot be launched</string>
+  <string name="assistant_page_local_tools_list_app_title">List Apps</string>
+  <string name="assistant_page_local_tools_list_app_desc">List the installed apps that can be launched, returning each package name and label</string>
 </resources>
 

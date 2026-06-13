@@ -1228,5 +1228,9 @@
   <string name="workspace_rootfs_progress_installed">安裝完成</string>
   <string name="workspace_rootfs_install_failed">Rootfs 安裝失敗</string>
   <string name="chat_board_open">任務看板</string>
+  <string name="assistant_page_local_tools_open_app_title">開啟應用程式</string>
+  <string name="assistant_page_local_tools_open_app_desc">透過套件名稱啟動已安裝的應用程式；若應用程式未安裝或無法啟動則回傳錯誤</string>
+  <string name="assistant_page_local_tools_list_app_title">列出應用程式</string>
+  <string name="assistant_page_local_tools_list_app_desc">列出可啟動的已安裝應用程式，回傳每個應用程式的套件名稱和名稱</string>
 </resources>
 
