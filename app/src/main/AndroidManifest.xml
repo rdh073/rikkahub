@@ -33,6 +33,15 @@
     <intent>
       <action android:name="android.intent.action.TTS_SERVICE" />
     </intent>
+    <!--
+      Package-visibility filter (Android 11+/API 30) for the app-launch tools. list_app enumerates and
+      open_app resolves only LAUNCHER-class apps; this <intent> is the narrow, Play-policy-safe
+      alternative to QUERY_ALL_PACKAGES (which must NOT be requested on the play flavor).
+    -->
+    <intent>
+      <action android:name="android.intent.action.MAIN" />
+      <category android:name="android.intent.category.LAUNCHER" />
+    </intent>
   </queries>
 
   <application
