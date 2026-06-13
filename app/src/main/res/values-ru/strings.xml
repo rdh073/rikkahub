@@ -1276,5 +1276,12 @@
   <string name="chat_automation_grant_ttl_minutes">%1$d мин</string>
   <string name="chat_automation_grant_confirm">Разрешить</string>
   <string name="chat_automation_grant_cancel">Отмена</string>
+  <string name="assistant_page_automation_guardrail_title">Ограждение инструментов</string>
+  <string name="assistant_page_automation_guardrail_enable_title">Защита опасных инструментов</string>
+  <string name="assistant_page_automation_guardrail_enable_desc">Проверять инструменты устройства и автоматизации (открытие приложения, список приложений, чтение/нажатие/ввод/прокрутка/навигация по экрану) перед каждым вызовом.</string>
+  <string name="assistant_page_automation_guardrail_mode_ask">Спросить</string>
+  <string name="assistant_page_automation_guardrail_mode_deny">Запретить</string>
+  <string name="assistant_page_automation_guardrail_mode_ask_desc">Каждый вызов приостанавливается и ждёт вашего подтверждения перед выполнением.</string>
+  <string name="assistant_page_automation_guardrail_mode_deny_desc">Каждый вызов блокируется сразу; ассистент не может использовать эти инструменты.</string>
 </resources>
 

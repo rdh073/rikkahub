@@ -1264,6 +1264,13 @@
   <string name="assistant_page_automation_ttl_label">Time-to-live (minutes)</string>
   <string name="assistant_page_automation_steps_label">Max steps</string>
   <string name="assistant_page_automation_limits_desc">A grant expires after this many minutes or this many actions, whichever comes first. Zero denies everything.</string>
+  <string name="assistant_page_automation_guardrail_title">Tool guardrail</string>
+  <string name="assistant_page_automation_guardrail_enable_title">Guard high-risk tools</string>
+  <string name="assistant_page_automation_guardrail_enable_desc">Gate the device and automation tools (open app, list apps, screen read/tap/type/scroll/navigate) before each call.</string>
+  <string name="assistant_page_automation_guardrail_mode_ask">Ask</string>
+  <string name="assistant_page_automation_guardrail_mode_deny">Deny</string>
+  <string name="assistant_page_automation_guardrail_mode_ask_desc">Each call is held for your confirmation before it runs.</string>
+  <string name="assistant_page_automation_guardrail_mode_deny_desc">Each call is blocked outright; the assistant cannot use these tools.</string>
   <string name="chat_automation_grant_open">Grant automation</string>
   <string name="chat_automation_grant_title">Grant automation for this run</string>
   <string name="chat_automation_grant_desc">Authorize the assistant to read and act on the current app for a limited time. The grant covers only the foreground app and is cleared when this run ends.</string>

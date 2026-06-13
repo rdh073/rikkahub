@@ -43,7 +43,17 @@ import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.AlertCircle
 import me.rerere.hugeicons.stroke.CheckmarkCircle01
 import me.rerere.hugeicons.stroke.Delete01
+import me.rerere.ai.runtime.hooks.GuardrailMode
+import me.rerere.ai.runtime.hooks.HookConfig
+import me.rerere.ai.runtime.hooks.HookEvent
+import me.rerere.ai.runtime.hooks.HookHandler
+import me.rerere.ai.runtime.hooks.HookMatcher
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.ai.tools.UI_GLOBAL_TOOL_NAME
+import me.rerere.rikkahub.data.ai.tools.UI_OBSERVE_TOOL_NAME
+import me.rerere.rikkahub.data.ai.tools.UI_SCROLL_TOOL_NAME
+import me.rerere.rikkahub.data.ai.tools.UI_SET_TEXT_TOOL_NAME
+import me.rerere.rikkahub.data.ai.tools.UI_TAP_TOOL_NAME
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.AutomationSink
@@ -114,6 +124,84 @@ internal fun AutomationGrant.withRemovedPackage(pkg: String): AutomationGrant =
 internal fun parsePositiveIntOrNull(raw: String): Int? = raw.trim().toIntOrNull()?.takeIf { it >= 0 }
 
 // ---------------------------------------------------------------------------------------------
+// PreToolUse guardrail over the high-risk device/automation tools (M5).
+//
+// The guardrail is a MANAGED PreToolUse hook entry, not a new hook event: the existing
+// `applyPreToolUseHooks` gate already maps a `Deny`/`Ask` decision onto a fresh tool call before it
+// runs. The toggle ensures/removes ONE matcher whose `matcher` regex covers the high-risk tool names
+// and whose handler is the deterministic `HookHandler.Static` (no LLM round-trip). The matcher is
+// identified by its exact regex pattern so ensure/remove are idempotent and never disturb the user's
+// own authored hooks.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The high-risk device/automation tools the guardrail gates: the two app-launch tools plus every
+ * accessibility verb. These are the tools that touch other apps' screens or launch apps — the ones a
+ * user wants a per-call confirmation (or an outright block) over.
+ */
+internal val HIGH_RISK_TOOL_NAMES: List<String> = listOf(
+    "open_app",
+    "list_app",
+    UI_OBSERVE_TOOL_NAME,
+    UI_SCROLL_TOOL_NAME,
+    UI_GLOBAL_TOOL_NAME,
+    UI_SET_TEXT_TOOL_NAME,
+    UI_TAP_TOOL_NAME,
+)
+
+/**
+ * The anchored alternation the managed guardrail matcher carries. `matches()` treats a non-null
+ * matcher as exact-name OR full-regex match, so an anchored alternation matches exactly the high-risk
+ * names and nothing else. This exact string is the matcher's identity — `withoutGuardrail` removes the
+ * entry by matching it, so the managed entry round-trips without a separate marker field.
+ */
+internal val HIGH_RISK_GUARDRAIL_MATCHER: String =
+    HIGH_RISK_TOOL_NAMES.joinToString(prefix = "^(", separator = "|", postfix = ")$")
+
+private fun HookMatcher.isManagedGuardrail(): Boolean =
+    matcher == HIGH_RISK_GUARDRAIL_MATCHER &&
+        handlers.size == 1 &&
+        handlers.single() is HookHandler.Static
+
+/** The guardrail's current mode, or null when no managed guardrail entry is present (disabled). */
+internal fun HookConfig.guardrailMode(): GuardrailMode? =
+    hooks[HookEvent.PreToolUse].orEmpty()
+        .firstOrNull { it.isManagedGuardrail() }
+        ?.handlers
+        ?.filterIsInstance<HookHandler.Static>()
+        ?.firstOrNull()
+        ?.mode
+
+/**
+ * Ensure exactly one managed guardrail matcher over the high-risk tools at [mode]. Idempotent:
+ * re-applying replaces the prior managed entry (so flipping Deny<->Ask never stacks duplicates) and
+ * leaves every user-authored hook untouched. Enabling a managed guardrail grants trust — the user IS
+ * the author of this toggle — which is also required for the dispatcher to actually run it.
+ */
+internal fun HookConfig.withGuardrail(mode: GuardrailMode): HookConfig {
+    val entry = HookMatcher(
+        matcher = HIGH_RISK_GUARDRAIL_MATCHER,
+        handlers = listOf(HookHandler.Static(mode = mode)),
+    )
+    val preserved = hooks[HookEvent.PreToolUse].orEmpty().filterNot { it.isManagedGuardrail() }
+    return copy(
+        hooks = hooks + (HookEvent.PreToolUse to (preserved + entry)),
+        trusted = true,
+    )
+}
+
+/** Remove the managed guardrail entry, leaving every user-authored hook untouched. */
+internal fun HookConfig.withoutGuardrail(): HookConfig {
+    val remaining = hooks[HookEvent.PreToolUse].orEmpty().filterNot { it.isManagedGuardrail() }
+    val nextHooks = if (remaining.isEmpty()) {
+        hooks - HookEvent.PreToolUse
+    } else {
+        hooks + (HookEvent.PreToolUse to remaining)
+    }
+    return copy(hooks = nextHooks)
+}
+
+// ---------------------------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------------------------
 
@@ -144,8 +232,10 @@ fun AssistantAutomationPage(id: String) {
         AutomationScopeContent(
             modifier = Modifier.padding(innerPadding),
             grant = assistant.automationGrant,
+            hooks = assistant.hooks,
             a11yEnabled = a11yEnabled,
             onUpdate = { vm.update(assistant.copy(automationGrant = it)) },
+            onUpdateHooks = { vm.update(assistant.copy(hooks = it)) },
         )
     }
 }
@@ -154,8 +244,10 @@ fun AssistantAutomationPage(id: String) {
 private fun AutomationScopeContent(
     modifier: Modifier = Modifier,
     grant: AutomationGrant,
+    hooks: HookConfig,
     a11yEnabled: Boolean,
     onUpdate: (AutomationGrant) -> Unit,
+    onUpdateHooks: (HookConfig) -> Unit,
 ) {
     Column(
         modifier = modifier
@@ -191,6 +283,71 @@ private fun AutomationScopeContent(
         AllowedPackagesEditor(grant = grant, onUpdate = onUpdate)
 
         LeaseLimitsEditor(grant = grant, onUpdate = onUpdate)
+
+        GuardrailEditor(hooks = hooks, onUpdate = onUpdateHooks)
+    }
+}
+
+/**
+ * The PreToolUse guardrail toggle. Enabling it ensures a managed deny/ask matcher over the high-risk
+ * device/automation tools (`open_app`, `list_app`, `ui_*`); the mode picker selects whether a matching
+ * call is held for confirmation (Ask, the conservative default) or blocked outright (Deny). The gate
+ * is the existing `applyPreToolUseHooks` fire-point — no new hook event.
+ */
+@Composable
+private fun GuardrailEditor(hooks: HookConfig, onUpdate: (HookConfig) -> Unit) {
+    val mode = hooks.guardrailMode()
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.assistant_page_automation_guardrail_title),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        CardGroup {
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_automation_guardrail_enable_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_automation_guardrail_enable_desc))
+                },
+                trailingContent = {
+                    Switch(
+                        checked = mode != null,
+                        onCheckedChange = { enabled ->
+                            onUpdate(
+                                if (enabled) hooks.withGuardrail(GuardrailMode.ASK) else hooks.withoutGuardrail()
+                            )
+                        },
+                    )
+                },
+            )
+        }
+        if (mode != null) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = mode == GuardrailMode.ASK,
+                    onClick = { onUpdate(hooks.withGuardrail(GuardrailMode.ASK)) },
+                    label = { Text(stringResource(R.string.assistant_page_automation_guardrail_mode_ask)) },
+                )
+                FilterChip(
+                    selected = mode == GuardrailMode.DENY,
+                    onClick = { onUpdate(hooks.withGuardrail(GuardrailMode.DENY)) },
+                    label = { Text(stringResource(R.string.assistant_page_automation_guardrail_mode_deny)) },
+                )
+            }
+            Text(
+                text = stringResource(
+                    if (mode == GuardrailMode.ASK) {
+                        R.string.assistant_page_automation_guardrail_mode_ask_desc
+                    } else {
+                        R.string.assistant_page_automation_guardrail_mode_deny_desc
+                    }
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

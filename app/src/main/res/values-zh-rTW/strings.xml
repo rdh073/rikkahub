@@ -1274,5 +1274,12 @@
   <string name="chat_automation_grant_ttl_minutes">%1$d 分鐘</string>
   <string name="chat_automation_grant_confirm">授予</string>
   <string name="chat_automation_grant_cancel">取消</string>
+  <string name="assistant_page_automation_guardrail_title">工具防護</string>
+  <string name="assistant_page_automation_guardrail_enable_title">防護高風險工具</string>
+  <string name="assistant_page_automation_guardrail_enable_desc">在每次呼叫前對裝置與自動化工具（開啟應用程式、列出應用程式、螢幕讀取/點擊/輸入/捲動/導覽）進行攔截。</string>
+  <string name="assistant_page_automation_guardrail_mode_ask">詢問</string>
+  <string name="assistant_page_automation_guardrail_mode_deny">拒絕</string>
+  <string name="assistant_page_automation_guardrail_mode_ask_desc">每次呼叫都會先暫停，等待你確認後才執行。</string>
+  <string name="assistant_page_automation_guardrail_mode_deny_desc">每次呼叫都會被直接阻擋；助理無法使用這些工具。</string>
 </resources>
 

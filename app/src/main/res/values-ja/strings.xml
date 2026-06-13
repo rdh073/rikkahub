@@ -1276,5 +1276,12 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="chat_automation_grant_ttl_minutes">%1$d 分</string>
   <string name="chat_automation_grant_confirm">許可</string>
   <string name="chat_automation_grant_cancel">キャンセル</string>
+  <string name="assistant_page_automation_guardrail_title">ツールガードレール</string>
+  <string name="assistant_page_automation_guardrail_enable_title">高リスクツールを保護</string>
+  <string name="assistant_page_automation_guardrail_enable_desc">デバイス・自動化ツール（アプリの起動、アプリ一覧、画面の読み取り/タップ/入力/スクロール/ナビゲーション）を各呼び出しの前にゲートします。</string>
+  <string name="assistant_page_automation_guardrail_mode_ask">確認</string>
+  <string name="assistant_page_automation_guardrail_mode_deny">拒否</string>
+  <string name="assistant_page_automation_guardrail_mode_ask_desc">各呼び出しは実行前に保留され、あなたの確認を待ちます。</string>
+  <string name="assistant_page_automation_guardrail_mode_deny_desc">各呼び出しは直接ブロックされ、アシスタントはこれらのツールを使用できません。</string>
 </resources>
 
