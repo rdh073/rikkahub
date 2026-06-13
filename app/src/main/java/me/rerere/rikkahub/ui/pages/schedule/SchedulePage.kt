@@ -30,6 +30,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
@@ -151,6 +152,16 @@ fun SchedulePage(
             items(schedules, key = { it.id.toString() }) { snapshot ->
                 ScheduleCard(
                     snapshot = snapshot,
+                    onToggleEnabled = { enabled ->
+                        // Route the toggle through the VM → repository (the single legality path); a
+                        // resume that breaches a freed cap is Rejected. The card has no dialog to host an
+                        // inline error, and the Switch is bound to snapshot.enabled — which only changes
+                        // when the list refreshes on Accept — so a Rejected leaves the switch visually
+                        // reverted and we toast the reason (spec Open Question 3).
+                        vm.setEnabled(snapshot.id, enabled) { result ->
+                            if (result is ScheduleMutationResult.Rejected) toaster.show(result.reason)
+                        }
+                    },
                     onDelete = { deleteTarget = snapshot },
                 )
             }
@@ -208,6 +219,7 @@ fun SchedulePage(
 @Composable
 private fun ScheduleCard(
     snapshot: ScheduleSnapshot,
+    onToggleEnabled: (Boolean) -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(
@@ -243,7 +255,20 @@ private fun ScheduleCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Text(
+                    text = scheduleRunState(snapshot),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
+            // The Switch is bound to snapshot.enabled — the repository-backed source of truth — so a
+            // Rejected resume (which never refreshes the list) leaves it visually reverted; only an
+            // Accepted toggle moves it (M5 / task T11). It is the ONLY pause/resume affordance: no
+            // direct flag flip, every toggle re-checks caps and arms/cancels the fire in the repository.
+            Switch(
+                checked = snapshot.enabled,
+                onCheckedChange = onToggleEnabled,
+            )
             IconButton(onClick = onDelete) {
                 Icon(
                     imageVector = Lucide.Trash2,
@@ -253,6 +278,21 @@ private fun ScheduleCard(
             }
         }
     }
+}
+
+/**
+ * The card's run-state line (SPEC.md M5 / task T11), read straight from the snapshot the repository
+ * publishes: a live fire (`runningTaskRunId != null`) reads "Running now"; otherwise the last fire
+ * (`lastFiredAt`) or, if it has never fired, "Not run yet". This is display-only — the firing truth
+ * lives in the repository's claim path, never recomputed here.
+ */
+private fun scheduleRunState(snapshot: ScheduleSnapshot): String {
+    if (snapshot.runningTaskRunId != null) return "Running now"
+    val lastFiredAt = snapshot.lastFiredAt ?: return "Not run yet"
+    val df = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).apply {
+        timeZone = runCatching { TimeZone.getTimeZone(snapshot.timeZoneId) }.getOrDefault(TimeZone.getDefault())
+    }
+    return "Last run ${df.format(Date(lastFiredAt))}"
 }
 
 private fun scheduleSubtitle(snapshot: ScheduleSnapshot): String {

@@ -109,6 +109,22 @@ class ScheduleVM(
         return result
     }
 
+    /**
+     * Pause ([enabled] = false) or resume ([enabled] = true) a schedule through the shared repository
+     * path (SPEC.md M5 / task T11), scoped to the bound conversation. The repository is the SINGLE
+     * legality path — it re-checks the caps on resume and arms/cancels the WorkManager fire — so the VM
+     * never flips `enabled` directly. On acceptance the list is re-published so the card observes the new
+     * run-state; a [ScheduleMutationResult.Rejected] (e.g. a cap-breach resume) is returned for the card
+     * to surface (it has no dialog, so the screen reverts the switch and toasts the reason).
+     */
+    suspend fun setScheduleEnabled(id: Uuid, enabled: Boolean): ScheduleMutationResult {
+        val conversationId = _conversationId.value
+            ?: return ScheduleMutationResult.Rejected("no conversation bound")
+        val result = repository.setEnabled(conversationId, id, enabled)
+        if (result is ScheduleMutationResult.Accepted) refresh(conversationId)
+        return result
+    }
+
     private suspend fun refresh(conversationId: Uuid) {
         _schedules.value = repository.list(conversationId)
     }
@@ -121,6 +137,10 @@ class ScheduleVM(
 
     fun delete(id: Uuid, onResult: (ScheduleMutationResult) -> Unit = {}) {
         viewModelScope.launch { onResult(deleteSchedule(id)) }
+    }
+
+    fun setEnabled(id: Uuid, enabled: Boolean, onResult: (ScheduleMutationResult) -> Unit = {}) {
+        viewModelScope.launch { onResult(setScheduleEnabled(id, enabled)) }
     }
 
     fun load() {

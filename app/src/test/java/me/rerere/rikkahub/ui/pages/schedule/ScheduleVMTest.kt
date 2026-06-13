@@ -300,6 +300,46 @@ class ScheduleVMTest {
         }
     }
 
+    // SC5 (SPEC.md M5 / task T11): the card's pause/resume Switch flips `enabled` ONLY through the
+    // repository's setEnabled — the single legality path — and a successful toggle refreshes the
+    // published list so the card re-renders the new run-state. This pins the VM seam: setEnabled routes
+    // the toggle to repository.setEnabled (scoped to the bound conversation) and re-lists on Accepted, so
+    // the StateFlow the screen observes carries the post-toggle enabled value (never a stale flag).
+    @Test
+    fun set_enabled_routes_through_repository_and_refreshes() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+        val created = f.vm.createSchedule(f.oneShotDraft()) as ScheduleMutationResult.Accepted
+        // The created schedule starts enabled and is the published list's single snapshot.
+        assertTrue(f.vm.schedules.value.single().enabled)
+
+        val paused = f.vm.setScheduleEnabled(created.snapshot.id, enabled = false)
+
+        // The toggle was judged by the repository (Accepted), and the DAO row — the single source of
+        // truth — now carries the new flag (proving the write went through the repository, not a shortcut).
+        assertTrue("expected Accepted, got $paused", paused is ScheduleMutationResult.Accepted)
+        assertEquals(false, f.dao.getById(created.snapshot.id.toString())?.enabled)
+        // The published list refreshed, so the screen observes the disabled snapshot.
+        assertEquals(false, f.vm.schedules.value.single().enabled)
+
+        // Resuming routes the same way and the refresh re-publishes the enabled snapshot.
+        val resumed = f.vm.setScheduleEnabled(created.snapshot.id, enabled = true)
+        assertTrue(resumed is ScheduleMutationResult.Accepted)
+        assertEquals(true, f.dao.getById(created.snapshot.id.toString())?.enabled)
+        assertEquals(true, f.vm.schedules.value.single().enabled)
+    }
+
+    // An unbound screen has no conversation to scope a toggle to, so setEnabled must REJECT rather than
+    // reach into a random/foreign conversation — mirroring deleteSchedule's "no conversation bound" guard.
+    @Test
+    fun set_enabled_on_unbound_screen_rejects() = runBlocking {
+        val f = Fixture(boundConversationId = null)
+
+        val result = f.vm.setScheduleEnabled(Uuid.random(), enabled = false)
+
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+    }
+
     @Test
     fun concurrent_unbound_creates_materialize_exactly_one_conversation() = runBlocking {
         val f = Fixture(boundConversationId = null)
