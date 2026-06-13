@@ -1171,13 +1171,27 @@ class ChatService(
                     namespacedToolCallId: String,
                     request: me.rerere.ai.runtime.task.TaskApprovalRequest,
                 ): Boolean {
-                    val visible = injectChildApprovalPart(
-                        conversation = getOrCreateSession(conversationId).state.value,
-                        namespacedToolCallId = namespacedToolCallId,
-                        toolName = request.toolName,
-                        argumentsJson = request.argumentsJson,
-                    ) ?: return false
-                    saveConversation(conversationId, visible)
+                    // Register BEFORE making the request visible (review mustFix #1): the moment
+                    // the part is on screen a decision can arrive, and a resolve that finds no
+                    // waiter is dropped — the child would then suspend forever on a decision the
+                    // user already made. An early resolve now completes the registered deferred
+                    // and await returns immediately.
+                    pendingChildApprovals.register(namespacedToolCallId)
+                    val visible = try {
+                        injectChildApprovalPart(
+                            conversation = getOrCreateSession(conversationId).state.value,
+                            namespacedToolCallId = namespacedToolCallId,
+                            toolName = request.toolName,
+                            argumentsJson = request.argumentsJson,
+                        )?.also { saveConversation(conversationId, it) }
+                    } catch (error: Throwable) {
+                        pendingChildApprovals.abandon(namespacedToolCallId)
+                        throw error
+                    }
+                    if (visible == null) {
+                        pendingChildApprovals.abandon(namespacedToolCallId)
+                        return false
+                    }
                     return pendingChildApprovals.await(namespacedToolCallId)
                 }
             }

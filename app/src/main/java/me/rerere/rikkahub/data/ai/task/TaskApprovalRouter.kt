@@ -82,15 +82,32 @@ class TaskApprovalRouter(
         )
         store.applyEvent(taskId, TaskEvent.ApprovalResolved(approved))
         store.applyEvent(taskId, TaskEvent.ChildProgressed)
+        // The DURABLE audit record of the decision (review mustFix #2). The parent-visible
+        // pending part is a live-transcript projection only: the parent runtime's post-execution
+        // snapshot does not contain it, so the next publish replaces the message and the part
+        // vanishes (by design — a child tool call never joins the parent transcript, decision
+        // #1). What must survive is the decision itself, and the task summary is where every
+        // other child-approval fact (the auto-deny reason) already lives.
+        store.appendEventSummary(
+            taskId = taskId,
+            summary = resolvedSummary(request.toolName, approved),
+            kind = SUMMARY_KIND_APPROVAL_RESOLVED,
+        )
         return approved
     }
 
     private fun autoDenyReason(toolName: String): String =
         "Child tool \"$toolName\" auto-denied: not on the subagent approval allowlist."
 
+    private fun resolvedSummary(toolName: String, approved: Boolean): String =
+        "Child tool \"$toolName\" ${if (approved) "approved" else "denied"} by the parent."
+
     companion object {
         /** Summary kind recorded when a non-allowlisted child tool auto-denies. */
         const val SUMMARY_KIND_APPROVAL_DENIED: String = "approval_denied"
+
+        /** Summary kind recording the parent's decision on a FORWARDED child approval. */
+        const val SUMMARY_KIND_APPROVAL_RESOLVED: String = "approval_resolved"
 
         /** Namespaced id under which a forwarded child approval is keyed on the parent surface. */
         const val NAMESPACE_SEPARATOR: String = "/"

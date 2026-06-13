@@ -158,6 +158,16 @@ class TaskApprovalVisiblePropertyTest {
                             ),
                             driven,
                         )
+                        // The decision's DURABLE audit record: the transcript part is a live
+                        // projection the next publish replaces, so the summary must carry it.
+                        assertTrue(
+                            "a resolved approval must be recorded in the task summary: $toolName",
+                            store.summaries[taskId].orEmpty().any { (kind, text) ->
+                                kind == TaskApprovalRouter.SUMMARY_KIND_APPROVAL_RESOLVED &&
+                                    text.contains(toolName) &&
+                                    text.contains(if (parentApproves) "approved" else "denied")
+                            },
+                        )
                     } else {
                         assertEquals(
                             "an auto-deny never blocks the child, so it drives no lifecycle events",

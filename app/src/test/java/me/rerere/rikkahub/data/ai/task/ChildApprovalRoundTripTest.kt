@@ -1,12 +1,11 @@
 package me.rerere.rikkahub.data.ai.task
 
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.MessageRole
@@ -124,8 +123,8 @@ class ChildApprovalRoundTripTest {
     @Test
     fun `await suspends until resolve delivers the decision`(): Unit = runBlocking {
         val pending = PendingChildApprovals()
+        pending.register("task/call-1")
         val decision = async(Dispatchers.Default) { pending.await("task/call-1") }
-        while (!pending.isPending("task/call-1")) yield()
 
         assertTrue("a live waiter must be resumed", pending.resolve("task/call-1", approved = true))
         assertTrue("the waiter receives the parent's decision", decision.await())
@@ -133,17 +132,38 @@ class ChildApprovalRoundTripTest {
     }
 
     @Test
+    fun `a decision arriving between register and await is not lost`(): Unit = runBlocking {
+        // The mustFix race: the pending part is user-visible the moment it is saved, so the
+        // decision can land BEFORE the surface reaches await. Registration first means that
+        // early decision completes the deferred and await returns immediately — it must never
+        // be dropped, stranding the child on a decision the user already made.
+        val pending = PendingChildApprovals()
+        pending.register("task/early")
+        assertTrue("an early decision must find the registered entry", pending.resolve("task/early", approved = true))
+        assertTrue("await must return the already-delivered decision", pending.await("task/early"))
+        assertFalse(pending.isPending("task/early"))
+    }
+
+    @Test
+    fun `abandon drops a registered entry that will never be awaited`() {
+        val pending = PendingChildApprovals()
+        pending.register("task/never-visible")
+        pending.abandon("task/never-visible")
+        assertFalse(pending.isPending("task/never-visible"))
+        assertFalse("a decision after abandon is a no-op", pending.resolve("task/never-visible", true))
+    }
+
+    @Test
     fun `resolving an unknown or dead id is a recorded no-op`(): Unit = runBlocking {
         val pending = PendingChildApprovals()
         assertFalse("no waiter -> false, never an invented approval", pending.resolve("task/ghost", true))
 
-        val gate = CompletableDeferred<Unit>()
-        val waiter = launch(Dispatchers.Default) {
-            gate.complete(Unit)
+        pending.register("task/cancelled")
+        // UNDISPATCHED: the waiter runs to its first suspension (the deferred await) before
+        // launch returns, so the cancellation below deterministically strikes a LIVE waiter.
+        val waiter = launch(start = CoroutineStart.UNDISPATCHED) {
             pending.await("task/cancelled")
         }
-        gate.await()
-        while (!pending.isPending("task/cancelled")) yield()
         waiter.cancelAndJoin()
 
         assertFalse("cancellation must clean the entry up", pending.isPending("task/cancelled"))

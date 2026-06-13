@@ -18,20 +18,42 @@ class PendingChildApprovals {
     private val pending = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
 
     /**
-     * Register [namespacedToolCallId] as pending and suspend until [resolve] supplies the
-     * parent's decision. The entry is removed on EVERY exit — decision or cancellation — so the
-     * map never accumulates dead waiters.
+     * Register [namespacedToolCallId] as pending. SEPARATE from [await] (review mustFix #1) so
+     * the surface can order register -> make-visible -> await: the moment the pending part is
+     * user-visible a decision can arrive, and a resolve that lands before the deferred existed
+     * would be dropped — leaving the child suspended forever on a decision the user already made.
+     * With registration first, an early [resolve] simply completes the deferred and [await]
+     * returns immediately.
+     */
+    fun register(namespacedToolCallId: String) {
+        check(pending.putIfAbsent(namespacedToolCallId, CompletableDeferred()) == null) {
+            "duplicate pending child approval: $namespacedToolCallId"
+        }
+    }
+
+    /**
+     * Suspend until [resolve] supplies the parent's decision for a previously [register]ed id.
+     * The entry is removed on EVERY exit — decision or cancellation — so the map never
+     * accumulates dead waiters.
      */
     suspend fun await(namespacedToolCallId: String): Boolean {
-        val deferred = CompletableDeferred<Boolean>()
-        check(pending.putIfAbsent(namespacedToolCallId, deferred) == null) {
-            "duplicate pending child approval: $namespacedToolCallId"
+        val deferred = checkNotNull(pending[namespacedToolCallId]) {
+            "await without register: $namespacedToolCallId"
         }
         return try {
             deferred.await()
         } finally {
             pending.remove(namespacedToolCallId)
         }
+    }
+
+    /**
+     * Drop a registered entry whose await will never run (visibility failed before suspension).
+     * A decision already delivered to it is intentionally discarded — the request was never
+     * shown, so there is nothing it could legitimately approve.
+     */
+    fun abandon(namespacedToolCallId: String) {
+        pending.remove(namespacedToolCallId)
     }
 
     /**
