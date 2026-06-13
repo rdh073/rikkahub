@@ -6,6 +6,7 @@ import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.temporal.ChronoUnit
 
 /**
  * Pure recurrence math (SPEC.md M1 / task T2). Zero `:app`/Android deps — JVM-only `java.time`
@@ -109,15 +110,22 @@ object Recurrence {
     private fun nextDailyOccurrence(spec: RecurrenceSpec, firstFireAt: Long, zone: ZoneId, now: Long): Long {
         val anchorZdt = Instant.ofEpochMilli(firstFireAt).atZone(zone)
         val fireTime: LocalTime = spec.timeOfDay?.let { LocalTime.parse(it) } ?: anchorZdt.toLocalTime()
+        val stepDays = spec.every.toLong()
         // First candidate: the anchor's date at the fire time, in zone.
         var candidate: ZonedDateTime = anchorZdt.toLocalDate().atTime(fireTime).atZone(zone)
-        val stepDays = spec.every.toLong()
-        val nowMillis = now
-        // Advance whole `every`-day strides until strictly after now. Bounded: each stride is >= ~23h,
-        // and `now`/`firstFireAt` are bounded epoch millis, so this terminates in at most a few
-        // thousand iterations for any realistic input (no closed-form division because in-zone day
-        // length varies with DST; the step loop is the simplest provably-correct form).
-        while (candidate.toInstant().toEpochMilli() <= nowMillis) {
+        // Closed-form initial jump: skip whole `every`-day strides up to (never past) now's local date
+        // in O(1), so an arbitrarily old `now` — or a forward-skewed/corrupt clock — can never drive an
+        // unbounded per-day loop at claim time. The stride count is computed on local dates; flooring
+        // keeps the jump at or before now's date, and the DST-correcting tail loop below re-resolves the
+        // local fire time so a "daily 09:00" stays at 09:00 across an offset transition.
+        val daysToNow = ChronoUnit.DAYS.between(candidate.toLocalDate(), Instant.ofEpochMilli(now).atZone(zone).toLocalDate())
+        if (daysToNow >= stepDays) {
+            val wholeStrides = daysToNow / stepDays
+            candidate = candidate.toLocalDate().plusDays(wholeStrides * stepDays).atTime(fireTime).atZone(zone)
+        }
+        // Tail correction: at most a couple of strides to land strictly after now (covers the same-day
+        // fire time and any DST boundary the jump landed on).
+        while (candidate.toInstant().toEpochMilli() <= now) {
             candidate = candidate.plusDays(stepDays).toLocalDate().atTime(fireTime).atZone(zone)
         }
         return candidate.toInstant().toEpochMilli()

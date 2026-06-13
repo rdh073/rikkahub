@@ -93,9 +93,13 @@ class RecurrencePropertyTest {
         }
     }
 
-    // ---- METAMORPHIC: coalesce(K windows) == step-one-at-a-time until past now ----
+    // ---- METAMORPHIC: production == an INDEPENDENT naive step-loop oracle (one fire, coalesced) ----
+    // [naiveNextOccurrence] steps ONE interval at a time and never calls [Recurrence], so this pins a
+    // genuine two-implementations-agree relation rather than f(x) == f(x). It has teeth precisely
+    // because the DAYS path jumps in closed form on the production side while the oracle crawls. It also
+    // asserts the coalesce intent: FIRE_ONCE_AND_COALESCE collapses K missed windows to this one value.
     @Test
-    fun `coalescing K missed windows equals stepping to the first future occurrence`() {
+    fun `production next-occurrence equals an independent naive step oracle`() {
         runBlocking {
             checkAll(
                 800,
@@ -105,13 +109,34 @@ class RecurrencePropertyTest {
             ) { every, first, now ->
                 for (unit in RecurrenceUnit.entries) {
                     val spec = RecurrenceSpec(every = every, unit = unit)
-                    val coalesced = Recurrence.nextOccurrenceAfter(spec, first, lastFiredAt = null, utc, now)
-
-                    // Reference oracle: naive forward stepping one interval at a time from the anchor.
-                    val reference = Recurrence.coalesceMissed(spec, first, lastFiredAt = null, utc, now)
-                    assertEquals("coalesce must equal next-occurrence (one fire, not N)", coalesced, reference)
-                    assertTrue(reference > now)
+                    val coalesced = Recurrence.coalesceMissed(spec, first, lastFiredAt = null, utc, now)
+                    val oracle = naiveNextOccurrence(spec, first, utc, now)
+                    assertEquals("$unit/$every: coalesce must match the independent step oracle", oracle, coalesced)
+                    assertTrue("result must be strictly after now", coalesced > now)
                 }
+            }
+        }
+    }
+
+    // ---- METAMORPHIC (DST zone): the DAYS closed-form jump must equal the naive crawl across offset
+    // transitions. The UTC properties above never exercise DST, so the closed-form's "stride on local
+    // dates, re-resolve fire time" claim is verified here over a window that spans spring-forward AND
+    // fall-back in America/New_York. ----
+    @Test
+    fun `daily closed-form jump matches the naive crawl in a DST zone`() {
+        val ny = ZoneId.of("America/New_York")
+        val anchor = java.time.ZonedDateTime.parse("2026-01-01T09:00:00-05:00").toInstant().toEpochMilli()
+        runBlocking {
+            checkAll(
+                500,
+                Arb.int(1..14),                       // every N days
+                Arb.long(0L..(400L * day)),           // now within ~400 days of the anchor
+            ) { every, offset ->
+                val spec = RecurrenceSpec(every = every, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00")
+                val now = anchor + offset
+                val production = Recurrence.nextOccurrenceAfter(spec, anchor, lastFiredAt = null, ny, now)
+                val oracle = naiveNextOccurrence(spec, anchor, ny, now)
+                assertEquals("every=$every offset=$offset: closed-form must equal the naive crawl", oracle, production)
             }
         }
     }
@@ -141,4 +166,31 @@ class RecurrencePropertyTest {
         val expected = java.time.ZonedDateTime.parse("2026-03-10T09:00:00-04:00").toInstant().toEpochMilli()
         assertEquals(expected, next)
     }
+
+    /**
+     * Independent reference oracle for the metamorphic properties: the first occurrence strictly after
+     * [now], computed by naive forward stepping ONE interval at a time from the anchor. It deliberately
+     * does NOT call [Recurrence] and never uses a closed-form jump, so agreement with production is a
+     * real two-implementation cross-check whose whole purpose is to catch a divergence in the DAYS
+     * closed-form.
+     */
+    private fun naiveNextOccurrence(spec: RecurrenceSpec, first: Long, zone: ZoneId, now: Long): Long =
+        when (spec.unit) {
+            RecurrenceUnit.MINUTES, RecurrenceUnit.HOURS -> {
+                val step = if (spec.unit == RecurrenceUnit.MINUTES) spec.every * minute else spec.every * hour
+                var c = first
+                while (c <= now) c += step
+                c
+            }
+            RecurrenceUnit.DAYS -> {
+                val anchorZdt = java.time.Instant.ofEpochMilli(first).atZone(zone)
+                val fireTime = spec.timeOfDay?.let { java.time.LocalTime.parse(it) } ?: anchorZdt.toLocalTime()
+                val stepDays = spec.every.toLong()
+                var candidate = anchorZdt.toLocalDate().atTime(fireTime).atZone(zone)
+                while (candidate.toInstant().toEpochMilli() <= now) {
+                    candidate = candidate.plusDays(stepDays).toLocalDate().atTime(fireTime).atZone(zone)
+                }
+                candidate.toInstant().toEpochMilli()
+            }
+        }
 }
