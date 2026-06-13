@@ -30,6 +30,7 @@ import me.rerere.rikkahub.di.hooksModule
 import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
 import me.rerere.rikkahub.data.ai.task.TaskRecoveryRunner
+import me.rerere.rikkahub.data.ai.schedule.ScheduleRescheduler
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.service.WebServerService
@@ -75,6 +76,9 @@ class RikkaHubApp : Application() {
 
         // recover tasks interrupted by process death + sweep retention (SPEC M6 / SC#4)
         recoverTasks()
+
+        // re-enqueue overdue schedules + clear orphan running markers (SPEC M6 / task T11)
+        rescheduleSchedules()
 
         // Init remote config
         get<FirebaseRemoteConfig>().apply {
@@ -138,6 +142,23 @@ class RikkaHubApp : Application() {
                 get<TaskRecoveryRunner>().runStartupRecovery()
             }.onFailure {
                 Log.e(TAG, "recoverTasks failed", it)
+            }
+        }
+    }
+
+    /**
+     * Startup schedule rescheduler (SPEC.md M6 / task T11): runs immediately after [recoverTasks] so
+     * the recovery pass has already marked killed runs `Interrupted` before the rescheduler decides
+     * which `running_task_run_id` markers are orphans to clear. It re-enqueues every overdue enabled
+     * schedule and clears orphan running markers so a fire killed mid-run never pins its schedule
+     * "running" forever. Off the main thread; failures are logged, never blocking startup.
+     */
+    private fun rescheduleSchedules() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                get<ScheduleRescheduler>().rescheduleOverdue()
+            }.onFailure {
+                Log.e(TAG, "rescheduleSchedules failed", it)
             }
         }
     }

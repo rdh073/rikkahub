@@ -308,6 +308,31 @@ val dataSourceModule = module {
         )
     }
 
+    // Cold-start rescheduler (SPEC.md M6 / task T11). Runs after recoverTasks() in RikkaHubApp: it
+    // re-enqueues every overdue enabled schedule via the ScheduleEnqueuer transport and clears any
+    // ORPHAN running_task_run_id — a marker pointing at a run the recovery pass just folded to
+    // Interrupted (or a run that no longer exists), i.e. a killed fire. The orphan predicate reads
+    // the run state through TaskRunRepository (DIP: injected seam, no compile-time edge here), so a
+    // dead fire never pins its schedule "running" forever and blocks every future claim.
+    single {
+        val repository = get<TaskScheduleRepository>()
+        val taskRuns = get<TaskRunRepository>()
+        val enqueuer = get<ScheduleEnqueuer>()
+        me.rerere.rikkahub.data.ai.schedule.ScheduleRescheduler(
+            listOverdueEnabled = { repository.listOverdueEnabled(System.currentTimeMillis()) },
+            isRunOrphan = { runId ->
+                // Not-running ⇔ the run is gone (missing) or was marked Interrupted by recovery.
+                when (taskRuns.get(runId)) {
+                    null -> true
+                    is me.rerere.ai.runtime.task.TaskState.Interrupted -> true
+                    else -> false
+                }
+            },
+            clearOrphanRunning = { id -> repository.clearOrphanRunning(id) },
+            enqueue = { id, fireAt -> enqueuer.enqueue(id, fireAt) },
+        )
+    }
+
     single {
         KnowledgeStoreFactory(
             providerManager = get(),

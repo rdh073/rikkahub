@@ -253,6 +253,27 @@ class TaskScheduleRepository(
         }
     }
 
+    /**
+     * Clear schedule [scheduleId]'s `running_task_run_id` unconditionally (SPEC.md M6 / task T11):
+     * the startup rescheduler calls this once it has decided the marker is an ORPHAN — a fire whose
+     * run the recovery pass folded to `Interrupted`, or whose run no longer exists. Unlike
+     * [finishRun] there is no `runId` guard, because the deciding caller already knows the in-flight
+     * run is dead and there is no live claimant to protect. Abort-safe: an absent row (the
+     * conversation was deleted) or an already-cleared marker is a no-op. One transaction.
+     */
+    suspend fun clearOrphanRunning(scheduleId: Uuid) {
+        transactions.inTransaction<Unit> {
+            val row = dao.getById(scheduleId.toString()) ?: return@inTransaction
+            if (row.runningTaskRunId == null) return@inTransaction
+            dao.update(row.copy(runningTaskRunId = null, updatedAt = now()))
+        }
+    }
+
+    /** Overdue enabled schedules (`enabled AND next_fire_at <= ` [now]) for the startup rescheduler. */
+    suspend fun listOverdueEnabled(now: Long): List<ScheduleSnapshot> = transactions.inTransaction {
+        dao.listOverdueEnabled(now).map { it.toSnapshot() }
+    }
+
     // --- gate helpers (transaction-internal) ----------------------------------------------------
 
     private fun parseRecurrenceSpec(raw: String?): RecurrenceSpec? {
