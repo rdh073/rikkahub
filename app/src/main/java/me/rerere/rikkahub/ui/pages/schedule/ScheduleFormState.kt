@@ -99,3 +99,22 @@ data class ScheduleFormState(
         private const val MILLIS_PER_DAY = 24 * MILLIS_PER_HOUR
     }
 }
+
+/**
+ * The minimum LEGAL `every` for [unit] (SPEC.md M3 / task T8). The create form's -/+ stepper floors
+ * its value here so it can never produce a sub-floor draft the repository rejects — the stepper's
+ * lower bound and [ScheduleFormState.validate]'s interval gate are derived from the SAME
+ * [TaskScheduleRepository.MIN_RECURRENCE_INTERVAL_MILLIS], so they cannot drift apart. Computed by
+ * dividing the floor by the unit's millis and rounding UP (so MINUTES needs 15; HOURS/DAYS already
+ * clear the 15-minute floor at every = 1).
+ */
+fun minEveryFor(unit: RecurrenceUnit): Int {
+    val unitMillis = when (unit) {
+        RecurrenceUnit.MINUTES -> 60_000L
+        RecurrenceUnit.HOURS -> 60 * 60_000L
+        RecurrenceUnit.DAYS -> 24 * 60 * 60_000L
+    }
+    val floorByInterval =
+        ((TaskScheduleRepository.MIN_RECURRENCE_INTERVAL_MILLIS + unitMillis - 1) / unitMillis).toInt()
+    return maxOf(1, floorByInterval)
+}

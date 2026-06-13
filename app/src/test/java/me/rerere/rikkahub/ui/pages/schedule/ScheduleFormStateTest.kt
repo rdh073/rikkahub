@@ -154,4 +154,38 @@ class ScheduleFormStateTest {
     fun `a well-formed one-shot is submittable`() {
         assertTrue("a valid one-shot must yield no errors", oneShot().validate(now).isEmpty())
     }
+
+    // ---- stepper floor per unit (M3 / task T8) --------------------------------------------------
+    // The create form's -/+ stepper must floor `every` at the minimum LEGAL value for the chosen
+    // unit, so the stepper can never produce a sub-floor draft the repository would reject. MINUTES'
+    // floor is 15 (mirrors MIN_RECURRENCE_INTERVAL_MILLIS = 15 min); HOURS/DAYS floor at 1.
+
+    @Test
+    fun `minimum every for MINUTES is 15 (mirrors the 15-minute interval floor)`() {
+        assertEquals(15, minEveryFor(RecurrenceUnit.MINUTES))
+    }
+
+    @Test
+    fun `minimum every for HOURS is 1`() {
+        assertEquals(1, minEveryFor(RecurrenceUnit.HOURS))
+    }
+
+    @Test
+    fun `minimum every for DAYS is 1`() {
+        assertEquals(1, minEveryFor(RecurrenceUnit.DAYS))
+    }
+
+    @Test
+    fun `the minimum every for each unit is itself submittable for a recurring form`() {
+        // Property: stepping to the floor for any unit yields a value the repository accepts, so the
+        // stepper's lower bound and the validate() interval gate agree (no off-by-one window where
+        // the stepper sits on a value validate() still rejects).
+        for (unit in RecurrenceUnit.entries) {
+            val errors = recurring(every = minEveryFor(unit), unit = unit).validate(now)
+            assertFalse(
+                "every = floor for $unit must not flag EVERY: $errors",
+                errors.containsKey(ScheduleField.EVERY),
+            )
+        }
+    }
 }
