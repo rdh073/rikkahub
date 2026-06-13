@@ -142,6 +142,9 @@ val appModule = module {
                 conversationRepo.insertConversation(conversation)
                 conversation.id
             },
+            rollbackConversation = { id ->
+                conversationRepo.getConversationById(id)?.let { conversationRepo.deleteConversation(it) }
+            },
         )
     }
 

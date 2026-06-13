@@ -40,11 +40,18 @@ class ScheduleVMTest {
         }
     }
 
+    /** Records the rollback seam so the test can assert which conversation id (if any) it deleted. */
+    private class RecordingRollbackConversation {
+        var rolledBack: Uuid? = null
+        val rollback: suspend (Uuid) -> Unit = { id -> rolledBack = id }
+    }
+
     private class Fixture(boundConversationId: Uuid?) {
         val dao = FakeTaskScheduleDAO()
         val target = Assistant(id = Uuid.random(), name = "agent", spawnable = true)
         val createdConversationId = Uuid.random()
         val ensure = RecordingEnsureConversation(createdConversationId)
+        val rollback = RecordingRollbackConversation()
         val repository = TaskScheduleRepository(
             dao = dao,
             transactions = FakeBoardTransactions(),
@@ -56,6 +63,7 @@ class ScheduleVMTest {
             initialConversationId = boundConversationId,
             repository = repository,
             ensureConversation = ensure.ensure,
+            rollbackConversation = rollback.rollback,
         )
 
         // The dialog never supplies a target — Uuid.NIL stands in, and the VM must stamp the
@@ -66,6 +74,12 @@ class ScheduleVMTest {
             kind = ScheduleKind.ONE_SHOT,
             firstFireAt = 10_000L,
             timeZoneId = "UTC",
+        )
+
+        // An over-length prompt trips the cleanest conversation-independent gate
+        // (prompt.length > MAX_PROMPT_CHARS), so the repository rejects the create.
+        fun rejectedDraft() = oneShotDraft().copy(
+            prompt = "x".repeat(TaskScheduleRepository.MAX_PROMPT_CHARS + 1),
         )
     }
 
@@ -101,6 +115,34 @@ class ScheduleVMTest {
         val rows = f.dao.listByConversation(existing.toString())
         assertEquals(1, rows.size)
         assertEquals(existing.toString(), rows.single().conversationId)
+    }
+
+    @Test
+    fun rejected_first_create_rolls_back_the_freshly_created_conversation() = runBlocking {
+        val f = Fixture(boundConversationId = null)
+
+        val result = f.vm.createSchedule(f.rejectedDraft())
+
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+        // The conversation WAS materialized up front (the gate runs only after binding)...
+        assertEquals(f.target.id, f.ensure.calledWithAssistant)
+        // ...and the rejected create rolled that exact conversation back and unbound it.
+        assertEquals(f.createdConversationId, f.rollback.rolledBack)
+        assertNull(f.vm.conversationId.value)
+        assertTrue(f.dao.listByConversation(f.createdConversationId.toString()).isEmpty())
+    }
+
+    @Test
+    fun rejected_create_on_prebound_conversation_does_not_roll_back() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+
+        val result = f.vm.createSchedule(f.rejectedDraft())
+
+        assertTrue(result is ScheduleMutationResult.Rejected)
+        // wasUnbound is false, so a pre-bound parent is never deleted and stays bound.
+        assertNull("must not roll back a pre-bound conversation", f.rollback.rolledBack)
+        assertEquals(existing, f.vm.conversationId.value)
     }
 
     @Test

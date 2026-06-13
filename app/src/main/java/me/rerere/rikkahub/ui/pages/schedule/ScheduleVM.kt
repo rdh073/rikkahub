@@ -37,6 +37,7 @@ class ScheduleVM(
     initialConversationId: Uuid?,
     private val repository: TaskScheduleRepository,
     private val ensureConversation: suspend (assistantId: Uuid) -> Uuid,
+    private val rollbackConversation: suspend (id: Uuid) -> Unit,
 ) : ViewModel() {
 
     private val _conversationId = MutableStateFlow(initialConversationId)
@@ -64,13 +65,23 @@ class ScheduleVM(
      * unset assistant id.
      */
     suspend fun createSchedule(draft: ScheduleDraft): ScheduleMutationResult {
+        val wasUnbound = _conversationId.value == null
         val conversationId = requireConversationId()
         val result = repository.create(
             conversationId,
             ScheduleOwner.USER,
             draft.copy(targetAssistantId = targetAssistantId),
         )
-        if (result is ScheduleMutationResult.Accepted) refresh(conversationId)
+        when (result) {
+            is ScheduleMutationResult.Accepted -> refresh(conversationId)
+            // A create this very call materialized must leave NO orphan when the repository rejects it:
+            // roll the just-created conversation back and unbind it. wasUnbound (not initialConversationId)
+            // gates this so a pre-bound parent is never deleted.
+            is ScheduleMutationResult.Rejected -> if (wasUnbound) {
+                rollbackConversation(conversationId)
+                _conversationId.value = null
+            }
+        }
         return result
     }
 
