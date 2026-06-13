@@ -76,6 +76,7 @@ fun SchedulePage(
     val schedules by vm.schedules.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var showCreateDialog by rememberSaveable { mutableStateOf(false) }
+    var createError by remember { mutableStateOf<CreateScheduleError?>(null) }
     var deleteTarget by remember { mutableStateOf<ScheduleSnapshot?>(null) }
 
     LaunchedEffect(vm) { vm.load() }
@@ -137,13 +138,27 @@ fun SchedulePage(
 
     if (showCreateDialog) {
         CreateScheduleDialog(
-            onDismiss = { showCreateDialog = false },
-            onConfirm = { draft ->
+            error = createError,
+            onDismiss = {
                 showCreateDialog = false
+                createError = null
+            },
+            // The dialog is NOT dismissed here: a create can be Rejected (over-length prompt, sub-floor
+            // interval, bad zone, cap breach), and closing before the result is known destroys the user's
+            // input. The dialog stays open until the result arrives — only an Accepted dismisses it; a
+            // Rejected keeps it open and surfaces the reason inline (M2 / task T3). Rejection is an
+            // EXPECTED domain outcome, so it is shown in the dialog, never toasted.
+            onConfirm = { draft ->
+                createError = null
                 vm.create(draft) { result ->
                     when (result) {
-                        is ScheduleMutationResult.Accepted -> toaster.show("Schedule created")
-                        is ScheduleMutationResult.Rejected -> toaster.show(result.reason)
+                        is ScheduleMutationResult.Accepted -> {
+                            showCreateDialog = false
+                            toaster.show("Schedule created")
+                        }
+
+                        is ScheduleMutationResult.Rejected ->
+                            createError = createScheduleError(result.reason)
                     }
                 }
             },
@@ -233,6 +248,7 @@ private fun scheduleSubtitle(snapshot: ScheduleSnapshot): String {
 
 @Composable
 private fun CreateScheduleDialog(
+    error: CreateScheduleError?,
     onDismiss: () -> Unit,
     onConfirm: (ScheduleDraft) -> Unit,
 ) {
@@ -255,6 +271,10 @@ private fun CreateScheduleDialog(
                     label = { Text("Prompt") },
                     minLines = 3,
                     maxLines = 6,
+                    isError = error?.field == CreateScheduleField.PROMPT,
+                    supportingText = error
+                        ?.takeIf { it.field == CreateScheduleField.PROMPT }
+                        ?.let { { Text(it.message, color = MaterialTheme.colorScheme.error) } },
                 )
                 FormItem(
                     label = { Text("Repeat") },
@@ -279,6 +299,7 @@ private fun CreateScheduleDialog(
                                 onValueChange = { everyText = it.filter(Char::isDigit) },
                                 modifier = Modifier.weight(1f),
                                 singleLine = true,
+                                isError = error?.field == CreateScheduleField.EVERY,
                             )
                             RecurrenceUnit.entries.forEach { candidate ->
                                 FilterChip(
@@ -290,6 +311,18 @@ private fun CreateScheduleDialog(
                         }
                     }
                 }
+                // The interval reason has no single OutlinedTextField slot (the unit lives in chips), and
+                // dialog-level reasons (cap breach, unrecognized) plus the not-yet-field-bound timezone
+                // reason surface on a shared red line so no rejection is silently dropped.
+                error
+                    ?.takeIf { it.field != CreateScheduleField.PROMPT }
+                    ?.let {
+                        Text(
+                            text = it.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
             }
         },
         confirmButton = {
