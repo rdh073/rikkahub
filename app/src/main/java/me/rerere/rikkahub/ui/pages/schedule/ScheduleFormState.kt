@@ -1,10 +1,14 @@
 package me.rerere.rikkahub.ui.pages.schedule
 
+import kotlinx.serialization.json.Json
+import me.rerere.ai.runtime.contract.ScheduleDraft
 import me.rerere.ai.runtime.contract.ScheduleKind
 import me.rerere.rikkahub.data.repository.TaskScheduleRepository
+import me.rerere.ai.runtime.schedule.RecurrenceSpec
 import me.rerere.ai.runtime.schedule.RecurrenceUnit
 import java.time.LocalTime
 import java.time.ZoneId
+import kotlin.uuid.Uuid
 
 /**
  * A form field a mirrored-validation error attaches to (SPEC.md M4 / task T7). The create dialog
@@ -81,6 +85,39 @@ data class ScheduleFormState(
         }
 
         return errors
+    }
+
+    /**
+     * Project this form into the [ScheduleDraft] the dialog hands [ScheduleVM.createSchedule] (SPEC.md
+     * M4 / task T9). This is the SINGLE form→draft mapping: the create dialog and the SC3 invariant
+     * test both call it, so the value the repository judges is exactly the value the test proves
+     * acceptable — there is no second hand-rolled projection that could drift from the validated form.
+     *
+     * - [ScheduleDraft.targetAssistantId] is [Uuid.NIL]; the VM stamps the screen's bound assistant
+     *   before the draft reaches the repository (the UI never aims at a foreign assistant).
+     * - The prompt is trimmed (matching the create gate, which counts the stored prompt's length).
+     * - [recurrenceSpec] is the JSON-encoded [RecurrenceSpec] for RECURRING, null for ONE_SHOT;
+     *   [timeOfDay] is carried only when [unit] is DAYS (it is meaningless off the DAYS path —
+     *   Recurrence.kt:34 — so a stale value from a prior DAYS selection is dropped here, exactly as
+     *   [validate] ignores it).
+     *
+     * @param json the serializer for the recurrence spec; the call site passes the app's [Json].
+     */
+    fun toDraft(json: Json = Json): ScheduleDraft {
+        val spec = if (kind == ScheduleKind.RECURRING) {
+            val anchoredTimeOfDay = timeOfDay.takeIf { unit == RecurrenceUnit.DAYS }
+            json.encodeToString(RecurrenceSpec(every = every, unit = unit, timeOfDay = anchoredTimeOfDay))
+        } else {
+            null
+        }
+        return ScheduleDraft(
+            targetAssistantId = Uuid.NIL,
+            prompt = prompt.trim(),
+            kind = kind,
+            firstFireAt = firstFireAt,
+            timeZoneId = timeZoneId,
+            recurrenceSpec = spec,
+        )
     }
 
     private fun intervalMillis(): Long = when (unit) {

@@ -8,6 +8,7 @@ import me.rerere.ai.runtime.contract.ScheduleDraft
 import me.rerere.ai.runtime.contract.ScheduleKind
 import me.rerere.ai.runtime.contract.ScheduleMutationResult
 import me.rerere.ai.runtime.contract.ScheduleOwner
+import me.rerere.ai.runtime.schedule.RecurrenceUnit
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.repository.TaskScheduleRepository
 import me.rerere.rikkahub.data.repository.fakes.FakeBoardTransactions
@@ -243,6 +244,62 @@ class ScheduleVMTest {
     // observed _conversationId == null across the ensureConversation suspension and each materialized a
     // conversation; a sibling rejection's rollback could then unbind a parent the other create had bound,
     // leaving the accepted schedule unreachable from the screen.
+    // SC3 invariant (SPEC.md M4 / task T9): the UI must never OFFER a draft the repository will reject.
+    // The create button is enabled iff ScheduleFormState.validate(now) is empty; this test pins the dual
+    // guarantee — every form state validate() deems submittable projects (via the SAME toDraft() the
+    // dialog's confirm uses) into a draft the repository ACCEPTS. Were a mirrored gate weaker than its
+    // repository counterpart, some submittable form would yield a Rejected here, breaking the contract.
+    // The drafts span each gate's submittable side: a plain one-shot, MINUTES at the 15-min floor, HOURS
+    // at every=1, DAYS with and without a timeOfDay anchor, a non-default IANA zone, and a prompt at the
+    // exact 8000-char bound — the boundary inputs whose repository acceptance most depends on the mirror
+    // being exact. Each runs on its own conversation so the per-conversation cap never confounds the test.
+    @Test
+    fun every_submittable_form_state_yields_an_accepted_repository_create() = runBlocking {
+        val now = 1_700_000_000_000L
+        val futureFire = now + 60 * 60 * 1000L
+        fun form(
+            prompt: String = "do a thing",
+            kind: ScheduleKind = ScheduleKind.ONE_SHOT,
+            every: Int = 1,
+            unit: RecurrenceUnit = RecurrenceUnit.HOURS,
+            timeOfDay: String? = null,
+            timeZoneId: String = "UTC",
+        ) = ScheduleFormState(
+            prompt = prompt,
+            kind = kind,
+            every = every,
+            unit = unit,
+            firstFireAt = futureFire,
+            timeOfDay = timeOfDay,
+            timeZoneId = timeZoneId,
+        )
+
+        val submittable = listOf(
+            form(),
+            form(kind = ScheduleKind.RECURRING, every = 15, unit = RecurrenceUnit.MINUTES),
+            form(kind = ScheduleKind.RECURRING, every = 1, unit = RecurrenceUnit.HOURS),
+            form(kind = ScheduleKind.RECURRING, every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00"),
+            form(kind = ScheduleKind.RECURRING, every = 2, unit = RecurrenceUnit.DAYS, timeOfDay = null),
+            form(timeZoneId = "Asia/Jakarta"),
+            form(prompt = "a".repeat(TaskScheduleRepository.MAX_PROMPT_CHARS)),
+        )
+
+        for (state in submittable) {
+            assertTrue(
+                "fixture invariant: this form must validate as submittable: ${state.validate(now)}",
+                state.validate(now).isEmpty(),
+            )
+            // Each create runs on its own bound conversation so the per-conversation active cap (20)
+            // cannot reject a later draft for a reason unrelated to the form's own legality.
+            val f = Fixture(boundConversationId = Uuid.random())
+            val result = f.vm.createSchedule(state.toDraft())
+            assertTrue(
+                "a submittable form must be Accepted, got $result for $state",
+                result is ScheduleMutationResult.Accepted,
+            )
+        }
+    }
+
     @Test
     fun concurrent_unbound_creates_materialize_exactly_one_conversation() = runBlocking {
         val f = Fixture(boundConversationId = null)

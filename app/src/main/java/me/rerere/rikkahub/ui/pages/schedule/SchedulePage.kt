@@ -68,7 +68,6 @@ import me.rerere.rikkahub.ui.components.ui.RikkaConfirmDialog
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.ext.plus
 import me.rerere.rikkahub.ui.theme.CustomColors
-import kotlinx.serialization.json.Json
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
 import java.text.DateFormat
@@ -482,20 +481,12 @@ private fun CreateScheduleDialog(
         },
         confirmButton = {
             TextButton(
+                // Create is enabled iff the form mirrors every repository gate cleanly (SC3): an empty
+                // validate() == submittable, so the button cannot offer a draft the repository rejects.
                 enabled = validationErrors.isEmpty(),
-                onClick = {
-                    val spec = previewSpec?.let { Json.encodeToString(it) }
-                    onConfirm(
-                        ScheduleDraft(
-                            targetAssistantId = Uuid.NIL, // bound by the VM to the screen's target assistant
-                            prompt = prompt.trim(),
-                            kind = kind,
-                            firstFireAt = firstFireAt,
-                            timeZoneId = timeZoneId,
-                            recurrenceSpec = spec,
-                        )
-                    )
-                },
+                // The dialog projects its live formState through the SAME toDraft() the SC3 invariant
+                // test exercises — one form→draft mapping, no hand-rolled duplicate that could drift.
+                onClick = { onConfirm(formState.toDraft()) },
             ) {
                 Text("Create")
             }
