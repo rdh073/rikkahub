@@ -217,6 +217,10 @@ class TaskScheduleRepository(
      *
      * A toggle to the state the row already holds is an accepted no-op: no cap re-check, no seam fired
      * (re-arming an already-armed fire would duplicate it; cancelling an already-cancelled one is moot).
+     *
+     * Resuming a one-shot that ALREADY FIRED (`kind == ONE_SHOT && lastFiredAt != null`) is REJECTED:
+     * such a row is terminal — its `nextFireAt` is frozen at the original (past) due time, so re-enabling
+     * it would let [claimDue] re-fire a completed action. A never-fired paused one-shot stays resumable.
      */
     suspend fun setEnabled(
         conversationId: Uuid,
@@ -234,6 +238,16 @@ class TaskScheduleRepository(
             }
 
             if (enabled) {
+                // A fired one-shot is TERMINAL: claimDue flips it disabled and leaves nextFireAt at its
+                // original (now-past) due time, so re-enabling it would let claimDue (next_fire_at <= now)
+                // re-fire the very action that already ran. Reject the resume at this single legality path
+                // rather than re-arming a stale fire. A never-fired paused one-shot (lastFiredAt == null)
+                // is still legitimately resumable — the distinguishing field is lastFiredAt, not kind alone.
+                if (ScheduleKind.valueOf(row.kind) == ScheduleKind.ONE_SHOT && row.lastFiredAt != null) {
+                    return@inTransaction SetEnabledOutcome.Rejected(
+                        "a one-shot that already fired cannot be resumed"
+                    )
+                }
                 // Resume re-checks the SAME caps create enforces — an enable can breach a cap a fired
                 // one-shot freed. The toggled row is still disabled here, so it is not yet in either
                 // enabled count and the `>=` cap comparison admits exactly up to the limit.

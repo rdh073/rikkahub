@@ -441,6 +441,55 @@ class TaskScheduleRepositoryTest {
     }
 
     @Test
+    fun resume_of_a_fired_one_shot_rejects_and_does_not_re_arm() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(
+            conversationId,
+            ScheduleOwner.USER,
+            oneShotDraft(f.spawnable.id, firstFireAt = 10_000L),
+        ) as ScheduleMutationResult.Accepted
+        // Fire the one-shot: claimDue stamps lastFiredAt and flips enabled=false (terminal). Its
+        // nextFireAt stays at the original due time, so a naive resume would let claimDue
+        // (next_fire_at <= now) re-fire the same one-shot, duplicating the user's action.
+        val claim = f.repository.claimDue(created.snapshot.id, now = 20_000L)
+        assertNotNull("the one-shot must fire", claim)
+        f.repository.finishRun(created.snapshot.id, claim!!.runId, Uuid.random())
+        f.enqueued.clear()
+        f.cancelled.clear()
+
+        // Turning a completed one-shot back on must be rejected — it is terminally done.
+        val result = f.repository.setEnabled(conversationId, created.snapshot.id, enabled = true)
+
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+        assertTrue(
+            "a fired one-shot must stay disabled",
+            !f.dao.getById(created.snapshot.id.toString())!!.enabled,
+        )
+        assertTrue("a rejected resume must not re-arm a fire", f.enqueued.isEmpty())
+    }
+
+    @Test
+    fun resume_of_an_unfired_paused_one_shot_is_accepted() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        // Pause BEFORE it ever fires (lastFiredAt stays null): this is a legitimately resumable row,
+        // distinct from a terminal fired one-shot.
+        f.repository.setEnabled(conversationId, created.snapshot.id, enabled = false)
+        f.enqueued.clear()
+        f.cancelled.clear()
+
+        val result = f.repository.setEnabled(conversationId, created.snapshot.id, enabled = true)
+
+        assertTrue("expected Accepted, got $result", result is ScheduleMutationResult.Accepted)
+        val row = f.dao.getById(created.snapshot.id.toString())!!
+        assertTrue("an unfired paused one-shot resumes", row.enabled)
+        assertEquals(listOf(created.snapshot.id to row.nextFireAt), f.enqueued)
+    }
+
+    @Test
     fun setEnabled_to_the_same_state_is_idempotent_and_does_not_double_fire_a_seam() = runBlocking {
         val f = Fixture()
         val conversationId = Uuid.random()
