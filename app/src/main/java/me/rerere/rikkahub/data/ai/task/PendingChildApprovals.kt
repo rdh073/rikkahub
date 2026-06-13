@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.ai.task
 
 import kotlinx.coroutines.CompletableDeferred
+import me.rerere.ai.runtime.task.TaskApprovalDecision
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -15,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class PendingChildApprovals {
 
-    private val pending = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val pending = ConcurrentHashMap<String, CompletableDeferred<TaskApprovalDecision>>()
 
     /**
      * Register [namespacedToolCallId] as pending. SEPARATE from [await] (review mustFix #1) so
@@ -36,7 +37,7 @@ class PendingChildApprovals {
      * The entry is removed on EVERY exit — decision or cancellation — so the map never
      * accumulates dead waiters.
      */
-    suspend fun await(namespacedToolCallId: String): Boolean {
+    suspend fun await(namespacedToolCallId: String): TaskApprovalDecision {
         val deferred = checkNotNull(pending[namespacedToolCallId]) {
             "await without register: $namespacedToolCallId"
         }
@@ -61,8 +62,8 @@ class PendingChildApprovals {
      * waiter was resumed; false when no waiter exists (already resolved, cancelled, or a stale
      * id) — the caller treats that as a cosmetic-only resolution.
      */
-    fun resolve(namespacedToolCallId: String, approved: Boolean): Boolean =
-        pending[namespacedToolCallId]?.complete(approved) ?: false
+    fun resolve(namespacedToolCallId: String, decision: TaskApprovalDecision): Boolean =
+        pending[namespacedToolCallId]?.complete(decision) ?: false
 
     /** Whether a live waiter exists for the id. */
     fun isPending(namespacedToolCallId: String): Boolean = pending.containsKey(namespacedToolCallId)

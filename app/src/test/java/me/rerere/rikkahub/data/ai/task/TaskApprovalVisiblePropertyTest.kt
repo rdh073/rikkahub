@@ -8,6 +8,7 @@ import io.kotest.property.arbitrary.set
 import io.kotest.property.arbitrary.string
 import io.kotest.property.checkAll
 import kotlinx.coroutines.runBlocking
+import me.rerere.ai.runtime.task.TaskApprovalDecision
 import me.rerere.ai.runtime.task.TaskApprovalRequest
 import me.rerere.ai.runtime.task.TaskBudget
 import me.rerere.ai.runtime.task.TaskBudgetBreach
@@ -50,9 +51,9 @@ class TaskApprovalVisiblePropertyTest {
         override suspend fun requestApproval(
             namespacedToolCallId: String,
             request: TaskApprovalRequest,
-        ): Boolean {
+        ): TaskApprovalDecision {
             forwarded += namespacedToolCallId to request
-            return decide(request.toolName)
+            return if (decide(request.toolName)) TaskApprovalDecision.Approved else TaskApprovalDecision.Denied()
         }
     }
 
@@ -106,12 +107,12 @@ class TaskApprovalVisiblePropertyTest {
                             "$taskId/${request.childToolCallId}",
                             match.single().first,
                         )
-                        assertEquals("router decision == parent decision for allowlisted tool", parentApproves, decision)
+                        assertEquals("router decision == parent decision for allowlisted tool", parentApproves, decision.approved)
                     } else {
                         // Auto-denied: never reached the surface, returned false, recorded a reason.
                         assertFalse("a non-allowlisted tool must never reach the parent surface: $toolName",
                             surface.forwarded.any { it.second === request })
-                        assertFalse("a non-allowlisted tool auto-denies (false)", decision)
+                        assertFalse("a non-allowlisted tool auto-denies", decision.approved)
                         val recorded = store.summaries[taskId].orEmpty()
                         assertTrue(
                             "auto-deny must record an approval-denied summary mentioning the tool: $toolName",
@@ -194,7 +195,7 @@ class TaskApprovalVisiblePropertyTest {
 
                 probes.forEachIndexed { i, toolName ->
                     val decision = router.await(taskId, TaskApprovalRequest("call-$i", toolName))
-                    assertFalse("empty allowlist auto-denies every tool: $toolName", decision)
+                    assertFalse("empty allowlist auto-denies every tool: $toolName", decision.approved)
                 }
                 assertTrue("empty allowlist must forward NOTHING to the parent surface", surface.forwarded.isEmpty())
             }
@@ -214,9 +215,9 @@ class TaskApprovalVisiblePropertyTest {
                 override suspend fun requestApproval(
                     namespacedToolCallId: String,
                     request: TaskApprovalRequest,
-                ): Boolean {
+                ): TaskApprovalDecision {
                     surfaceEnteredAt = resumeOrder.getAndIncrement()
-                    return true
+                    return TaskApprovalDecision.Approved
                 }
             }
             val router = TaskApprovalRouter(
@@ -232,7 +233,7 @@ class TaskApprovalVisiblePropertyTest {
             // surface's, never a value invented before the parent was asked.
             assertTrue("router must enter the parent surface before returning a decision",
                 surfaceEnteredAt in 0 until routerReturnedAt)
-            assertTrue("approve-then-resume yields the parent's approval", decision)
+            assertTrue("approve-then-resume yields the parent's approval", decision.approved)
         }
     }
 }

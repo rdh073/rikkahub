@@ -161,6 +161,12 @@ fun buildSpawnTool(
         // tool assembly below can throw, and an exit between register and the old try meant the
         // handle — whose Job is a child of the generation job — was never unregistered, pinning
         // the parent's job in `completing` forever.
+        // A claim-release failure in the finally must never REPLACE the primary outcome (a throw
+        // out of a finally supersedes the in-flight exception — on the cancellation path that
+        // would swallow the CancellationException and break cooperative cancellation). It is
+        // captured here and rethrown ONLY when the run itself completed normally; on an
+        // exceptional/cancelled exit the primary wins and the lease bounds the claims left held.
+        var releaseFailure: Throwable? = null
         val result = try {
             // The sub's own tool pool — its board claims owned by the handle — with approval-gated
             // tools rewired through the parent's approval gate (Gap A): the child runtime sees only
@@ -216,10 +222,14 @@ fun buildSpawnTool(
             // claims the failed release left behind.
             try {
                 withContext(NonCancellable) { releaseOrphanedClaims(handle.id) }
+            } catch (error: Throwable) {
+                releaseFailure = error
             } finally {
                 registry.unregister(handle.id)
             }
         }
+        // Reached only on the normal-completion path: a release failure must not pass silently.
+        releaseFailure?.let { throw it }
         // Emit the structured {task:{...}} envelope (review finding #1) so the live renderer shows
         // the TERMINAL status, budget counters, and interrupted/budget-exhausted identity instead
         // of always falling back to a bare-text "Done". The envelope is JSON in a Text part — the

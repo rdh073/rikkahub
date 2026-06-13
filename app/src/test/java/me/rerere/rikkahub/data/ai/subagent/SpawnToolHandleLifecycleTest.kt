@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.data.ai.subagent
 
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -103,7 +105,8 @@ class SpawnToolHandleLifecycleTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
         processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
@@ -193,7 +196,8 @@ class SpawnToolHandleLifecycleTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
@@ -234,7 +238,8 @@ class SpawnToolHandleLifecycleTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
@@ -285,7 +290,8 @@ class SpawnToolHandleLifecycleTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
@@ -302,5 +308,64 @@ class SpawnToolHandleLifecycleTest {
 
         assertNull("the handle must be unregistered despite the failed release", fx.registry.get(fx.handle!!.id))
         assertTrue("the handle job must be completed despite the failed release", fx.handle!!.job.isCompleted)
+    }
+
+    @Test
+    fun `a release failure during cancellation must not mask the cancellation`(): Unit = runBlocking {
+        // Review mustFix: a throw out of the teardown finally would REPLACE the in-flight
+        // CancellationException, breaking cooperative cancellation. If that happened here, the
+        // launched child would surface an IllegalStateException to this runBlocking scope and
+        // fail the test; with the fix the cancellation wins and cancelAndJoin completes cleanly.
+        val fx = Fixture()
+        val held = fx.seedItem("held")
+        val claimed = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val spawn = buildSpawnTool(
+            spawnableAssistants = listOf(sub),
+            coordinator = TaskCoordinator(
+                generate = { _, _, _, _, tools, _, _ ->
+                    flow {
+                        tools.single { it.name == "task_update" }.execute(buildJsonObject {
+                            put("id", held.toString())
+                            put("action", "claim")
+                        })
+                        claimed.complete(Unit)
+                        kotlinx.coroutines.awaitCancellation()
+                    }
+                },
+            ),
+            parentModelId = null,
+            settings = settings,
+            registry = fx.registry,
+            buildSubagentTools = { spawned, handle ->
+                fx.handle = handle
+                subagentBoardTools(fx.repository, conversationId, fx.registry, handle, spawned)
+            },
+            releaseOrphanedClaims = { throw IllegalStateException("release path exploded mid-cancel") },
+            approvalGateFor = {
+                object : me.rerere.ai.runtime.contract.TaskApprovalGate {
+                    override suspend fun await(
+                        taskId: kotlin.uuid.Uuid,
+                        request: me.rerere.ai.runtime.task.TaskApprovalRequest,
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
+                }
+            },
+            processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
+            progressLabel = { "running $it" },
+            parentConversationId = conversationId,
+        )
+
+        val child = launch(kotlinx.coroutines.Dispatchers.Default) {
+            spawn.execute(buildJsonObject {
+                put("subagent", sub.name)
+                put("prompt", "claim then hang")
+            })
+        }
+        claimed.await()
+        child.cancelAndJoin()
+
+        assertTrue("the child must end CANCELLED, not failed", child.isCancelled)
+        assertNull("the handle is unregistered even on this path", fx.registry.get(fx.handle!!.id))
+        assertTrue(fx.handle!!.job.isCompleted)
     }
 }

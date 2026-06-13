@@ -9,6 +9,7 @@ import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.runtime.GenerationChunk
+import me.rerere.ai.runtime.task.TaskApprovalDecision
 import me.rerere.ai.runtime.task.TaskApprovalRequest
 import me.rerere.ai.runtime.task.TaskBudget
 import me.rerere.ai.runtime.task.TaskBudgetBreach
@@ -70,9 +71,9 @@ class SpawnToolApprovalGatingTest {
         override suspend fun recordUsage(taskId: Uuid, reported: TaskBudgetUsage, budget: TaskBudget): TaskBudgetBreach? = null
     }
 
-    private class RecordingSurface(private val decide: Boolean) : ParentApprovalSurface {
+    private class RecordingSurface(private val decide: TaskApprovalDecision) : ParentApprovalSurface {
         val forwarded = mutableListOf<Pair<String, TaskApprovalRequest>>()
-        override suspend fun requestApproval(namespacedToolCallId: String, request: TaskApprovalRequest): Boolean {
+        override suspend fun requestApproval(namespacedToolCallId: String, request: TaskApprovalRequest): TaskApprovalDecision {
             forwarded += namespacedToolCallId to request
             return decide
         }
@@ -87,7 +88,7 @@ class SpawnToolApprovalGatingTest {
             subagentApprovalAllowlist = listOf("ask_user"),
         )
         val store = RecordingStore()
-        val surface = RecordingSurface(decide = true)
+        val surface = RecordingSurface(TaskApprovalDecision.Approved)
         val executed = ConcurrentHashMap.newKeySet<String>()
         val childOutputs = ConcurrentHashMap<String, String>()
 
@@ -153,7 +154,10 @@ class SpawnToolApprovalGatingTest {
         assertEquals("ask_user ran", childOutputs["ask_user"])
 
         // Non-allowlisted: auto-denied — denial result to the child, reason in the task summary.
-        assertEquals(deniedChildToolResult("mcp__danger"), childOutputs["mcp__danger"])
+        assertTrue(
+            "the child resumes with the denial result, was: " + childOutputs["mcp__danger"],
+            childOutputs["mcp__danger"]!!.contains("was denied and did not run"),
+        )
         assertTrue(
             "the auto-deny reason must land in the task summary",
             store.summaries[taskId].orEmpty().any { (kind, text) ->

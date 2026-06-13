@@ -72,6 +72,9 @@ import me.rerere.automation.cap.Sink
 import me.rerere.automation.cap.TrustClock
 import me.rerere.automation.cap.Verb
 import me.rerere.ai.runtime.contract.ToolAssemblyContext
+import me.rerere.ai.runtime.task.TaskApprovalDecision
+import me.rerere.ai.runtime.task.TaskApprovalRequest
+import me.rerere.ai.runtime.task.TaskToolPolicy
 import me.rerere.ai.runtime.contract.TurnMode
 import me.rerere.rikkahub.data.ai.runtime.AppToolCatalog
 import me.rerere.rikkahub.data.ai.runtime.toAssistantConfig
@@ -995,10 +998,11 @@ class ChatService(
 
     /**
      * Resolve one forwarded child approval (Gap A): write the decision onto the visible pending
-     * part (so the transcript records what was decided), then release the waiting child through
-     * [pendingChildApprovals]. An [answer] counts as approval — the answering UI only exists for
-     * tools the user chose to engage with. The resolve is a no-op for a dead waiter; the part
-     * update still applies, finalizing a stale pending record cosmetically.
+     * part (so the live transcript records what was decided), then release the waiting child
+     * through [pendingChildApprovals] with the FULL decision — an answer travels as
+     * [TaskApprovalDecision.Answered] and becomes the child's tool
+     * result without executing anything (ask_user-class tools). The resolve is a no-op for a
+     * dead waiter; the part update still applies, finalizing a stale pending record cosmetically.
      */
     private suspend fun resolveChildApproval(
         conversationId: Uuid,
@@ -1014,7 +1018,12 @@ class ChatService(
         }
         val session = getOrCreateSession(conversationId)
         saveConversation(conversationId, resolveChildApprovalPart(session.state.value, toolCallId, state))
-        pendingChildApprovals.resolve(toolCallId, approved = answer != null || approved)
+        val decision = when {
+            answer != null -> TaskApprovalDecision.Answered(answer)
+            approved -> TaskApprovalDecision.Approved
+            else -> TaskApprovalDecision.Denied(reason)
+        }
+        pendingChildApprovals.resolve(toolCallId, decision)
     }
 
     // UI automation (#187 v1) per-conversation capability lease (issue #244, god-function split #2b).
@@ -1169,8 +1178,8 @@ class ChatService(
             val childApprovalSurface = object : ParentApprovalSurface {
                 override suspend fun requestApproval(
                     namespacedToolCallId: String,
-                    request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                ): Boolean {
+                    request: TaskApprovalRequest,
+                ): TaskApprovalDecision {
                     // Register BEFORE making the request visible (review mustFix #1): the moment
                     // the part is on screen a decision can arrive, and a resolve that finds no
                     // waiter is dropped — the child would then suspend forever on a decision the
@@ -1190,7 +1199,9 @@ class ChatService(
                     }
                     if (visible == null) {
                         pendingChildApprovals.abandon(namespacedToolCallId)
-                        return false
+                        return TaskApprovalDecision.Denied(
+                            "no visible task step to anchor the approval on"
+                        )
                     }
                     return pendingChildApprovals.await(namespacedToolCallId)
                 }
@@ -1308,7 +1319,7 @@ class ChatService(
                             approvalGateFor = { sub ->
                                 TaskApprovalRouter(
                                     policyFor = {
-                                        me.rerere.ai.runtime.task.TaskToolPolicy(
+                                        TaskToolPolicy(
                                             approvalForwardAllowlist = sub.subagentApprovalAllowlist.toSet()
                                         )
                                     },

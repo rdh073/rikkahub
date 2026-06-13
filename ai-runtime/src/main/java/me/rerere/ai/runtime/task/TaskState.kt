@@ -77,6 +77,29 @@ data class TaskApprovalRequest(
     val argumentsJson: String = "",
 )
 
+/**
+ * The parent's decision on a forwarded child approval. A plain Boolean cannot carry an
+ * answer-style decision (`ask_user`-class tools whose ANSWER is the tool result and whose
+ * `execute` must never run), so the gate returns this instead:
+ *
+ *  - [Approved]: run the real tool with its original arguments.
+ *  - [Answered]: the answer IS the tool result; the tool does not execute — identical to the
+ *    parent runtime's own `Answered` handling.
+ *  - [Denied]: the tool does not execute; the denial (with [Denied.reason]) is the result. Both
+ *    deny shapes resume the child (decision #2).
+ */
+sealed interface TaskApprovalDecision {
+    /** True for every decision that is not a denial (drives [TaskEvent.ApprovalResolved]). */
+    val approved: Boolean
+        get() = this !is Denied
+
+    data object Approved : TaskApprovalDecision
+
+    data class Answered(val answer: String) : TaskApprovalDecision
+
+    data class Denied(val reason: String = "") : TaskApprovalDecision
+}
+
 /** Everything that can happen to a task run; [TaskStateReducer] folds these over [TaskState]. */
 sealed interface TaskEvent {
     /** The spawn tool call was accepted. */

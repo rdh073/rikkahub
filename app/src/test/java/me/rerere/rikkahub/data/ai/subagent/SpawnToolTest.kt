@@ -93,7 +93,8 @@ class SpawnToolTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = status,
@@ -126,7 +127,8 @@ class SpawnToolTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = status,
@@ -164,7 +166,8 @@ class SpawnToolTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = status,
@@ -194,7 +197,8 @@ class SpawnToolTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = status,
@@ -231,7 +235,8 @@ class SpawnToolTest {
                     override suspend fun await(
                         taskId: kotlin.uuid.Uuid,
                         request: me.rerere.ai.runtime.task.TaskApprovalRequest,
-                    ): Boolean = false
+                    ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                        me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
                 }
             },
             processingStatus = status,

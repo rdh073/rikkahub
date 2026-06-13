@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai.task
 
 import me.rerere.ai.core.Tool
 import me.rerere.ai.runtime.contract.TaskApprovalGate
+import me.rerere.ai.runtime.task.TaskApprovalDecision
 import me.rerere.ai.runtime.task.TaskApprovalRequest
 import me.rerere.ai.ui.UIMessagePart
 import kotlin.uuid.Uuid
@@ -41,10 +42,14 @@ fun gateSubagentTools(
                     toolName = tool.name,
                     argumentsJson = args.toString(),
                 )
-                if (gate.await(taskId, request)) {
-                    tool.execute(args)
-                } else {
-                    listOf(UIMessagePart.Text(deniedChildToolResult(tool.name)))
+                when (val decision = gate.await(taskId, request)) {
+                    TaskApprovalDecision.Approved -> tool.execute(args)
+                    // The answer IS the tool result — the real execute never runs, mirroring the
+                    // parent runtime's own Answered handling (ask_user-class tools whose execute
+                    // deliberately throws because the HITL answer replaces it).
+                    is TaskApprovalDecision.Answered -> listOf(UIMessagePart.Text(decision.answer))
+                    is TaskApprovalDecision.Denied ->
+                        listOf(UIMessagePart.Text(deniedChildToolResult(tool.name, decision.reason)))
                 }
             },
         )
@@ -55,6 +60,7 @@ fun gateSubagentTools(
  * The tool result a denied child tool call resumes with. Model-facing (not a UI resource): it
  * must tell the child unambiguously that the call did not run and not to retry it.
  */
-fun deniedChildToolResult(toolName: String): String =
-    "Tool call \"$toolName\" was denied and did not run. Do not retry it; continue without it " +
-        "or state what could not be done."
+fun deniedChildToolResult(toolName: String, reason: String = ""): String =
+    "Tool call \"$toolName\" was denied and did not run" +
+        (if (reason.isBlank()) "" else " (reason: $reason)") +
+        ". Do not retry it; continue without it or state what could not be done."

@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.ai.task
 
 import me.rerere.ai.runtime.contract.TaskApprovalGate
+import me.rerere.ai.runtime.task.TaskApprovalDecision
 import me.rerere.ai.runtime.task.TaskApprovalRequest
 import me.rerere.ai.runtime.task.TaskEvent
 import me.rerere.ai.runtime.task.TaskToolPolicy
@@ -46,22 +47,24 @@ class TaskApprovalRouter(
     /**
      * Decide one child approval request.
      *
-     * @return true when the parent approved an allowlisted tool, false when the parent denied an
-     *   allowlisted tool OR the tool was auto-denied (not on the allowlist). Both false outcomes
-     *   resume the child with the denial as its tool result — neither terminates the task.
+     * @return the parent's [TaskApprovalDecision] for an allowlisted tool, or
+     *   [TaskApprovalDecision.Denied] for a non-allowlisted one (auto-deny). Every outcome
+     *   resumes the child — the decision travels to it as the tool result; nothing here
+     *   terminates the task.
      */
-    override suspend fun await(taskId: Uuid, request: TaskApprovalRequest): Boolean {
+    override suspend fun await(taskId: Uuid, request: TaskApprovalRequest): TaskApprovalDecision {
         val policy = policyFor(taskId)
         if (!policy.forwardsApprovalFor(request.toolName)) {
             // Non-allowlisted: auto-deny WITHOUT touching the parent surface, and record why in the
             // task summary so the denial is visible to the parent (decision #2). No hidden
             // execution: a denied child tool never runs.
+            val reason = autoDenyReason(request.toolName)
             store.appendEventSummary(
                 taskId = taskId,
-                summary = autoDenyReason(request.toolName),
+                summary = reason,
                 kind = SUMMARY_KIND_APPROVAL_DENIED,
             )
-            return false
+            return TaskApprovalDecision.Denied(reason)
         }
         // Allowlisted: forward to the parent, namespaced taskId/childToolCallId, and suspend until
         // the parent decides. The surface is the existing approval path — no hidden execution while
@@ -76,11 +79,11 @@ class TaskApprovalRouter(
         // once, on the FIRST child chunk, so nothing else takes the run back to Running and the
         // final FinalResult would be an illegal (ignored) edge from Resuming.
         store.applyEvent(taskId, TaskEvent.ApprovalRequested(request))
-        val approved = surface.requestApproval(
+        val decision = surface.requestApproval(
             namespacedToolCallId = namespacedToolCallId(taskId, request.childToolCallId),
             request = request,
         )
-        store.applyEvent(taskId, TaskEvent.ApprovalResolved(approved))
+        store.applyEvent(taskId, TaskEvent.ApprovalResolved(decision.approved))
         store.applyEvent(taskId, TaskEvent.ChildProgressed)
         // The DURABLE audit record of the decision (review mustFix #2). The parent-visible
         // pending part is a live-transcript projection only: the parent runtime's post-execution
@@ -90,10 +93,10 @@ class TaskApprovalRouter(
         // other child-approval fact (the auto-deny reason) already lives.
         store.appendEventSummary(
             taskId = taskId,
-            summary = resolvedSummary(request.toolName, approved),
+            summary = resolvedSummary(request.toolName, decision.approved),
             kind = SUMMARY_KIND_APPROVAL_RESOLVED,
         )
-        return approved
+        return decision
     }
 
     private fun autoDenyReason(toolName: String): String =
@@ -147,11 +150,11 @@ class TaskApprovalRouter(
 interface ParentApprovalSurface {
     /**
      * Make [request] parent-visible under [namespacedToolCallId], suspend until the parent
-     * decides, and return that decision (true = approved, false = denied). The router only ever
-     * calls this for an ALLOWLISTED tool.
+     * decides, and return that [TaskApprovalDecision] (approve / answer / deny). The router only
+     * ever calls this for an ALLOWLISTED tool.
      */
     suspend fun requestApproval(
         namespacedToolCallId: String,
         request: TaskApprovalRequest,
-    ): Boolean
+    ): TaskApprovalDecision
 }

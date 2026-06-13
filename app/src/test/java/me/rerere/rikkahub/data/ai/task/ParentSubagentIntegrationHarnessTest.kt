@@ -20,6 +20,7 @@ import me.rerere.ai.runtime.board.WorkItemStatus
 import me.rerere.ai.runtime.contract.BoardMutationResult
 import me.rerere.ai.runtime.contract.TaskApprovalGate
 import me.rerere.ai.runtime.contract.WorkItemDraft
+import me.rerere.ai.runtime.task.TaskApprovalDecision
 import me.rerere.ai.runtime.task.TaskApprovalRequest
 import me.rerere.ai.runtime.task.TaskBudget
 import me.rerere.ai.provider.Model
@@ -68,7 +69,8 @@ class ParentSubagentIntegrationHarnessTest {
     private val sub = Assistant(name = "Worker", chatModelId = subModel.id, spawnable = true)
 
     private val denyAllGate = object : TaskApprovalGate {
-        override suspend fun await(taskId: Uuid, request: TaskApprovalRequest): Boolean = false
+        override suspend fun await(taskId: Uuid, request: TaskApprovalRequest): TaskApprovalDecision =
+            TaskApprovalDecision.Denied()
     }
 
     /** One scripted child turn: the child's prompt plus its (handle-bound) tool pool. */
