@@ -29,7 +29,8 @@ enum class ScheduleField { PROMPT, EVERY, UNIT, TIMEZONE, TIME_OF_DAY }
  * the repository will reject (the create button is enabled iff [validate] is empty). The mirrored
  * gates, keyed to the repository constant each one tracks:
  *
- *  - prompt non-blank AND `length <= ` [TaskScheduleRepository.MAX_PROMPT_CHARS],
+ *  - prompt non-blank AND trimmed `length <= ` [TaskScheduleRepository.MAX_PROMPT_CHARS] (the repo
+ *    counts the stored, trimmed prompt, so this guard counts `prompt.trim().length` to match),
  *  - a RECURRING effective interval `>= ` [TaskScheduleRepository.MIN_RECURRENCE_INTERVAL_MILLIS]
  *    (so MINUTES requires `every >= 15`; `every = 1, MINUTES` is unsubmittable),
  *  - a valid IANA [timeZoneId] (`ZoneId.of`),
@@ -57,12 +58,17 @@ data class ScheduleFormState(
     fun validate(now: Long): Map<ScheduleField, String> {
         val errors = mutableMapOf<ScheduleField, String>()
 
+        // Mirror the value the repository judges: it counts the STORED prompt, which toDraft() trims
+        // (this.toDraft() -> draft.prompt = prompt.trim(); TaskScheduleRepository counts
+        // draft.prompt.length). Guarding the raw length here would reject a whitespace-padded prompt
+        // whose trimmed draft the repository Accepts — the SC3 mirror-drift this enum exists to prevent.
+        val trimmedLength = prompt.trim().length
         when {
             prompt.isBlank() ->
                 errors[ScheduleField.PROMPT] = "Prompt is required"
-            prompt.length > TaskScheduleRepository.MAX_PROMPT_CHARS ->
+            trimmedLength > TaskScheduleRepository.MAX_PROMPT_CHARS ->
                 errors[ScheduleField.PROMPT] =
-                    "Prompt is too long: ${prompt.length} > ${TaskScheduleRepository.MAX_PROMPT_CHARS}"
+                    "Prompt is too long: $trimmedLength > ${TaskScheduleRepository.MAX_PROMPT_CHARS}"
         }
 
         if (!isValidZoneId(timeZoneId)) {

@@ -73,6 +73,31 @@ class ScheduleFormStateTest {
         assertTrue("prompt of 8001 chars must flag PROMPT: $errors", errors.containsKey(ScheduleField.PROMPT))
     }
 
+    @Test
+    fun `prompt whose raw length exceeds the cap but trims under it is submittable (SC3 mirror)`() {
+        // SC3: validate() must judge the SAME value toDraft() submits. The repository gates on the
+        // stored (trimmed) prompt length, so a prompt of <=8000 real chars padded with surrounding
+        // whitespace to a raw length >8000 trims to a draft the repo Accepts — the UI must not reject
+        // it. Guarding raw `prompt.length` here would block a draft the repository would have taken.
+        val padded = "  " + "a".repeat(8000) + "   " // raw length 8005, trims to exactly 8000
+        val errors = oneShot(prompt = padded).validate(now)
+        assertFalse(
+            "a prompt that trims to 8000 must NOT flag PROMPT (repo accepts the trimmed draft): $errors",
+            errors.containsKey(ScheduleField.PROMPT),
+        )
+    }
+
+    @Test
+    fun `prompt whose trimmed length exceeds the cap is invalid`() {
+        // The other edge of the same mirror: trimming must not let an over-cap prompt through. 8001
+        // real chars trims to 8001, which the repository rejects, so validate() must flag it too.
+        val errors = oneShot(prompt = "  " + "a".repeat(8001) + "  ").validate(now)
+        assertTrue(
+            "a prompt that trims to 8001 must flag PROMPT (repo rejects the trimmed draft): $errors",
+            errors.containsKey(ScheduleField.PROMPT),
+        )
+    }
+
     // ---- minimum recurring interval (mirrors MIN_RECURRENCE_INTERVAL_MILLIS = 15 min) ------------
 
     @Test
