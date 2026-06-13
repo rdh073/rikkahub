@@ -135,6 +135,10 @@ fun ChatDrawerContent(
     var conversationToMove by remember { mutableStateOf<Conversation?>(null) }
     val bottomSheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden)
 
+    // 重命名对话状态
+    var conversationToRename by remember { mutableStateOf<Conversation?>(null) }
+    var renameInput by remember { mutableStateOf("") }
+
     // Menu popup 状态
     var showMenuPopup by remember { mutableStateOf(false) }
 
@@ -222,6 +226,10 @@ fun ChatDrawerContent(
                 },
                 onRegenerateTitle = {
                     vm.generateTitle(it, true)
+                },
+                onRename = {
+                    conversationToRename = it
+                    renameInput = it.title
                 },
                 onDelete = {
                     vm.deleteConversation(it)
@@ -411,6 +419,44 @@ fun ChatDrawerContent(
                     onClick = {
                         nicknameEditState.dismiss()
                     }
+                ) {
+                    Text(stringResource(R.string.chat_page_cancel))
+                }
+            }
+        )
+    }
+
+    // 重命名对话框
+    conversationToRename?.let { conversation ->
+        AlertDialog(
+            onDismissRequest = { conversationToRename = null },
+            title = {
+                Text(stringResource(R.string.chat_page_rename))
+            },
+            text = {
+                OutlinedTextField(
+                    value = renameInput,
+                    onValueChange = { renameInput = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text(stringResource(R.string.chat_page_new_message)) }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (renameInput.isNotBlank()) {
+                            vm.renameConversation(conversation, renameInput)
+                        }
+                        conversationToRename = null
+                    }
+                ) {
+                    Text(stringResource(R.string.chat_page_save))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { conversationToRename = null }
                 ) {
                     Text(stringResource(R.string.chat_page_cancel))
                 }

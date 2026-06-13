@@ -295,6 +295,22 @@ class ChatVM(
         }
     }
 
+    fun renameConversation(target: Conversation, newTitle: String) {
+        val title = newTitle.trim()
+        launchVm(onError = { reportOperationError(it) }) {
+            if (target.id == _conversationId) {
+                // CAS-fold the title onto the LATEST live state so a concurrent streaming
+                // publish can't be clobbered (no session.state reassignment), then persist
+                // the folded result.
+                chatService.updateConversationState(_conversationId) { it.copy(title = title) }
+                conversationRepo.updateConversation(conversation.value)
+            } else {
+                val conversationFull = conversationRepo.getConversationById(target.id) ?: return@launchVm
+                conversationRepo.updateConversation(conversationFull.copy(title = title))
+            }
+        }
+    }
+
     fun translateMessage(message: UIMessage, targetLanguage: Locale) {
         chatService.translateMessage(_conversationId, message, targetLanguage)
     }
