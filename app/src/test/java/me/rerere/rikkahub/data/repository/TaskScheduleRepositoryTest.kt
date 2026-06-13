@@ -202,6 +202,42 @@ class TaskScheduleRepositoryTest {
     }
 
     @Test
+    fun create_rejects_a_bad_time_zone_id() = runBlocking {
+        val f = Fixture()
+        // claimDue calls ZoneId.of(row.timeZoneId) at fire time; an unparseable zone must be a
+        // Rejected create, not a DateTimeException thrown on every future fire.
+        val draft = oneShotDraft(f.spawnable.id).copy(timeZoneId = "Not/AZone")
+        val result = f.repository.create(Uuid.random(), ScheduleOwner.USER, draft)
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+    }
+
+    @Test
+    fun create_rejects_a_daily_recurrence_with_a_bad_time_of_day() = runBlocking {
+        val f = Fixture()
+        // Recurrence.nextDailyOccurrence calls LocalTime.parse(spec.timeOfDay); a bad "HH:mm" must
+        // be rejected upfront, not crash the worker every fire.
+        val draft = recurringDraft(f.spawnable.id, every = 1, unit = RecurrenceUnit.DAYS).copy(
+            recurrenceSpec = Json.encodeToString(
+                RecurrenceSpec(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "25:99"),
+            ),
+        )
+        val result = f.repository.create(Uuid.random(), ScheduleOwner.USER, draft)
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+    }
+
+    @Test
+    fun create_accepts_a_daily_recurrence_with_a_valid_time_of_day() = runBlocking {
+        val f = Fixture()
+        val draft = recurringDraft(f.spawnable.id, every = 1, unit = RecurrenceUnit.DAYS).copy(
+            recurrenceSpec = Json.encodeToString(
+                RecurrenceSpec(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00"),
+            ),
+        )
+        val result = f.repository.create(Uuid.random(), ScheduleOwner.USER, draft)
+        assertTrue("expected Accepted, got $result", result is ScheduleMutationResult.Accepted)
+    }
+
+    @Test
     fun create_rejects_an_over_length_prompt() = runBlocking {
         val f = Fixture()
         val tooLong = "a".repeat(TaskScheduleRepository.MAX_PROMPT_CHARS + 1)

@@ -13,6 +13,7 @@ import me.rerere.ai.runtime.schedule.RecurrenceUnit
 import me.rerere.rikkahub.data.db.dao.TaskScheduleDAO
 import me.rerere.rikkahub.data.db.entity.TaskScheduleEntity
 import me.rerere.rikkahub.data.model.Assistant
+import java.time.LocalTime
 import java.time.ZoneId
 import kotlin.uuid.Uuid
 
@@ -112,6 +113,13 @@ class TaskScheduleRepository(
             )
         }
 
+        // The zone is dereferenced at fire time (`ZoneId.of(row.timeZoneId)` in [claimDue]); an
+        // unparseable id must be a Rejected create here, not a DateTimeException thrown on EVERY
+        // future fire after the row is already persisted.
+        if (!isValidZoneId(draft.timeZoneId)) {
+            return ScheduleMutationResult.Rejected("invalid timeZoneId: ${draft.timeZoneId}")
+        }
+
         if (draft.kind == ScheduleKind.RECURRING) {
             val spec = parseRecurrenceSpec(draft.recurrenceSpec)
                 ?: return ScheduleMutationResult.Rejected(
@@ -122,6 +130,12 @@ class TaskScheduleRepository(
                 return ScheduleMutationResult.Rejected(
                     "recurring interval $intervalMillis ms is below the minimum $MIN_RECURRENCE_INTERVAL_MILLIS ms"
                 )
+            }
+            // A DAYS recurrence's optional `timeOfDay` is parsed with `LocalTime.parse` at fire time
+            // (Recurrence.nextDailyOccurrence); a bad "HH:mm" must be rejected upfront, same reason.
+            val timeOfDay = spec.timeOfDay
+            if (spec.unit == RecurrenceUnit.DAYS && timeOfDay != null && !isValidLocalTime(timeOfDay)) {
+                return ScheduleMutationResult.Rejected("invalid daily timeOfDay: $timeOfDay")
             }
         }
 
@@ -282,6 +296,12 @@ class TaskScheduleRepository(
         // stay abort-safe, so a parse failure folds into the same Rejected the gate returns.
         return runCatching { json.decodeFromString<RecurrenceSpec>(raw) }.getOrNull()
     }
+
+    private fun isValidZoneId(id: String): Boolean =
+        runCatching { ZoneId.of(id) }.isSuccess
+
+    private fun isValidLocalTime(value: String): Boolean =
+        runCatching { LocalTime.parse(value) }.isSuccess
 
     private fun RecurrenceSpec.intervalMillis(): Long = when (unit) {
         RecurrenceUnit.MINUTES -> every.toLong() * MILLIS_PER_MINUTE
