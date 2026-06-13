@@ -651,4 +651,38 @@ class TaskScheduleRepositoryTest {
         // No row, no crash — finishRun is abort-safe (a worker may finish after the row was deleted).
         f.repository.finishRun(Uuid.random(), Uuid.random(), Uuid.random())
     }
+
+    // --- nextFireIfStillArmed (worker re-enqueue ground-truth, SPEC.md M5 / task T9) -------------
+
+    @Test
+    fun nextFireIfStillArmed_returns_the_fire_time_for_an_enabled_row() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(
+            conversationId,
+            ScheduleOwner.USER,
+            oneShotDraft(f.spawnable.id, firstFireAt = 42_000L),
+        ) as ScheduleMutationResult.Accepted
+
+        assertEquals(42_000L, f.repository.nextFireIfStillArmed(created.snapshot.id))
+    }
+
+    @Test
+    fun nextFireIfStillArmed_returns_null_for_a_paused_row() = runBlocking {
+        val f = Fixture()
+        val conversationId = Uuid.random()
+        val created = f.repository.create(conversationId, ScheduleOwner.USER, oneShotDraft(f.spawnable.id))
+            as ScheduleMutationResult.Accepted
+        // A pause concurrent with a fire turns the row disabled; the worker must read null here so it
+        // does NOT re-arm and silently undo the pause.
+        f.repository.setEnabled(conversationId, created.snapshot.id, enabled = false)
+
+        assertNull(f.repository.nextFireIfStillArmed(created.snapshot.id))
+    }
+
+    @Test
+    fun nextFireIfStillArmed_returns_null_for_an_unknown_schedule() = runBlocking {
+        val f = Fixture()
+        assertNull(f.repository.nextFireIfStillArmed(Uuid.random()))
+    }
 }

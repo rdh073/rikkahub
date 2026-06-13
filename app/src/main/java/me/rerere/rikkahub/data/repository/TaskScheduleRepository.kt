@@ -385,6 +385,19 @@ class TaskScheduleRepository(
         }
     }
 
+    /**
+     * The CURRENT row's `nextFireAt` iff schedule [scheduleId] is still enabled, else null. The worker's
+     * post-fire re-enqueue (SPEC.md M5 / task T9) consults this instead of its stale post-claim snapshot:
+     * a user can pause the schedule (`enabled = false` + cancel) WHILE a fire is in flight, and re-arming
+     * off the snapshot would silently undo that pause. Reading fresh state here makes the re-enqueue
+     * decision ground-truth — a disabled (paused or one-shot-consumed) row reports null and is not
+     * re-armed; a still-enabled recurring row reports its advanced fire time. One transaction.
+     */
+    suspend fun nextFireIfStillArmed(scheduleId: Uuid): Long? = transactions.inTransaction {
+        val row = dao.getById(scheduleId.toString()) ?: return@inTransaction null
+        if (row.enabled) row.nextFireAt else null
+    }
+
     /** Overdue enabled schedules (`enabled AND next_fire_at <= ` [now]) for the startup rescheduler. */
     suspend fun listOverdueEnabled(now: Long): List<ScheduleSnapshot> = transactions.inTransaction {
         dao.listOverdueEnabled(now).map { it.toSnapshot() }
