@@ -10,14 +10,16 @@ import org.junit.Test
 
 /**
  * T10: the in-chat per-run grant sheet builds a transient [me.rerere.rikkahub.data.model.AutomationGrant]
- * from the foreground package + selected verbs + sinks + TTL. The builder is the pure confirm-logic of
+ * from the foreground package + selected verbs + TTL. The builder is the pure confirm-logic of
  * the bottom sheet (top-level, JVM-testable like [shouldBlockSubmitForMissingModel]); the ViewModel
  * writes its result to `ConversationSession.pendingAutomationGrant`.
  *
- * The load-bearing invariant proven here is SUBMIT exclusion: the sheet may never mint a submit-class
- * grant — submit automation stays the stricter separate opt-in the kernel withholds — so SUBMIT is
- * stripped regardless of what is passed in. A naive "copy the selected sinks through" implementation
- * fails the SUBMIT case.
+ * The load-bearing invariant proven here is sink/verb consistency: a write/navigation verb only
+ * authorizes its action if the matching sink is in the grant's budget (the kernel guard DENYs a
+ * non-null sink absent from the budget). The sheet only exposes verb selection, so the builder must
+ * DERIVE the required sinks from the verbs — never take a caller-supplied sink set that could drift
+ * from (or lie about) the verbs. SET_TEXT ⇒ TYPE_INTO, GLOBAL ⇒ GLOBAL_NAV; SUBMIT is never minted
+ * (submit-class stays the stricter separate opt-in the kernel withholds).
  */
 class PerRunGrantBuilderTest {
 
@@ -26,7 +28,6 @@ class PerRunGrantBuilderTest {
         val grant = buildPerRunGrant(
             foregroundPackage = "com.example.target",
             verbs = setOf(AutomationVerb.OBSERVE, AutomationVerb.TAP),
-            sinks = emptySet(),
             ttlMinutes = 5,
             maxSteps = 50,
         )
@@ -39,11 +40,55 @@ class PerRunGrantBuilderTest {
     }
 
     @Test
-    fun `SUBMIT is stripped from the granted sinks even when selected`() {
+    fun `selecting SET_TEXT derives the TYPE_INTO sink so the write actually authorizes`() {
         val grant = buildPerRunGrant(
             foregroundPackage = "com.example.target",
             verbs = setOf(AutomationVerb.SET_TEXT),
-            sinks = setOf(AutomationSink.TYPE_INTO, AutomationSink.SUBMIT),
+            ttlMinutes = 5,
+            maxSteps = 50,
+        )
+
+        assertTrue(
+            "SET_TEXT requires TYPE_INTO in budget or the kernel guard denies every write",
+            grant!!.sinks.contains(AutomationSink.TYPE_INTO),
+        )
+    }
+
+    @Test
+    fun `selecting GLOBAL derives the GLOBAL_NAV sink so the navigation actually authorizes`() {
+        val grant = buildPerRunGrant(
+            foregroundPackage = "com.example.target",
+            verbs = setOf(AutomationVerb.GLOBAL),
+            ttlMinutes = 5,
+            maxSteps = 50,
+        )
+
+        assertTrue(
+            "GLOBAL requires GLOBAL_NAV in budget or the kernel guard denies every global act",
+            grant!!.sinks.contains(AutomationSink.GLOBAL_NAV),
+        )
+    }
+
+    @Test
+    fun `sink-less verbs derive no sinks`() {
+        val grant = buildPerRunGrant(
+            foregroundPackage = "com.example.target",
+            verbs = setOf(AutomationVerb.OBSERVE, AutomationVerb.TAP, AutomationVerb.SCROLL),
+            ttlMinutes = 5,
+            maxSteps = 50,
+        )
+
+        assertTrue(
+            "OBSERVE/TAP/SCROLL carry no sink — an ordinary tap is verb-gated only",
+            grant!!.sinks.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `SUBMIT is never minted even when TAP is selected`() {
+        val grant = buildPerRunGrant(
+            foregroundPackage = "com.example.target",
+            verbs = setOf(AutomationVerb.TAP, AutomationVerb.SET_TEXT, AutomationVerb.GLOBAL),
             ttlMinutes = 5,
             maxSteps = 50,
         )
@@ -52,7 +97,6 @@ class PerRunGrantBuilderTest {
             "SUBMIT must never reach a per-run grant — it is the stricter separate opt-in",
             grant!!.sinks.contains(AutomationSink.SUBMIT),
         )
-        assertTrue(grant.sinks.contains(AutomationSink.TYPE_INTO))
     }
 
     @Test
@@ -62,7 +106,6 @@ class PerRunGrantBuilderTest {
             buildPerRunGrant(
                 foregroundPackage = null,
                 verbs = setOf(AutomationVerb.OBSERVE),
-                sinks = emptySet(),
                 ttlMinutes = 5,
                 maxSteps = 50,
             ),
@@ -71,7 +114,6 @@ class PerRunGrantBuilderTest {
             buildPerRunGrant(
                 foregroundPackage = "   ",
                 verbs = setOf(AutomationVerb.OBSERVE),
-                sinks = emptySet(),
                 ttlMinutes = 5,
                 maxSteps = 50,
             ),

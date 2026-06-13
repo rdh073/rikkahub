@@ -386,23 +386,42 @@ class ChatVM(
 }
 
 /**
+ * The sinks a selected verb requires in the grant's budget, mirroring the kernel's verb→sink
+ * derivation ([AutomationCore.act]: SET_TEXT⇒TYPE_INTO, GLOBAL⇒GLOBAL_NAV; TAP/OBSERVE/SCROLL carry
+ * no sink — an ordinary tap is verb-gated only and the submit-class SUBMIT is the separate opt-in the
+ * kernel withholds). Pure so [buildPerRunGrant] cannot mint a verb without the sink that authorizes it.
+ *
+ * The kernel guard DENYs a non-null sink absent from the budget (`CapabilityGuard.decide`): a
+ * SET_TEXT/GLOBAL grant with an empty sink budget authorizes the verb but then denies the action,
+ * which is the lie this mapping closes — the sheet exposes only verbs, so the sinks MUST be derived
+ * from them, never taken from a caller that could drift from (or contradict) the verb selection.
+ */
+internal fun requiredSinksForVerbs(verbs: Set<AutomationVerb>): Set<AutomationSink> =
+    buildSet {
+        if (AutomationVerb.SET_TEXT in verbs) add(AutomationSink.TYPE_INTO)
+        if (AutomationVerb.GLOBAL in verbs) add(AutomationSink.GLOBAL_NAV)
+        // TAP's submit-class SUBMIT is intentionally NOT minted here — it is the stricter separate
+        // opt-in the kernel deliberately withholds (the kernel's `toCapability` strips it again).
+    }
+
+/**
  * Pure confirm-logic of the in-chat per-run automation grant sheet (T10). Builds the transient
  * [AutomationGrant] the user is authorizing from the live foreground package + their selected verbs,
- * sinks, TTL and step budget. Top-level so it is JVM-testable without the ViewModel/Android (mirrors
+ * TTL and step budget. The grant's sink budget is DERIVED from the verbs ([requiredSinksForVerbs]),
+ * not caller-supplied, so a write/navigation verb always carries the sink the kernel guard needs to
+ * authorize its action. Top-level so it is JVM-testable without the ViewModel/Android (mirrors
  * [shouldBlockSubmitForMissingModel] in ChatPage).
  *
  * Returns `null` when there is no foreground package to scope to — an in-chat grant is always scoped
  * to exactly the one app currently on screen, so without it there is nothing to authorize.
  *
- * [AutomationSink.SUBMIT] is ALWAYS stripped, regardless of what is passed: submit-class automation
- * is the stricter, separate opt-in the kernel deliberately withholds, and this UX must never mint it
- * (Boundaries: "Ask first — adding Sink.SUBMIT"). The kernel's `toCapability` strips SUBMIT again at
- * the lease seam; stripping here keeps the user-visible grant honest about what it actually authorizes.
+ * [AutomationSink.SUBMIT] is never derived: submit-class automation is the stricter, separate opt-in
+ * the kernel deliberately withholds (Boundaries: "Ask first — adding Sink.SUBMIT"), and this UX must
+ * never mint it. The kernel's `toCapability` strips SUBMIT again at the lease seam regardless.
  */
 internal fun buildPerRunGrant(
     foregroundPackage: String?,
     verbs: Set<AutomationVerb>,
-    sinks: Set<AutomationSink>,
     ttlMinutes: Int,
     maxSteps: Int,
 ): AutomationGrant? {
@@ -411,7 +430,7 @@ internal fun buildPerRunGrant(
         enabled = true,
         allowedPackages = setOf(pkg),
         verbs = verbs,
-        sinks = sinks - AutomationSink.SUBMIT,
+        sinks = requiredSinksForVerbs(verbs),
         ttlMinutes = ttlMinutes,
         maxSteps = maxSteps,
     )

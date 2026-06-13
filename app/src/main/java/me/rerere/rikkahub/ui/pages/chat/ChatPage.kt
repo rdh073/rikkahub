@@ -623,7 +623,6 @@ private fun AutomationGrantSheet(
                         val grant = buildPerRunGrant(
                             foregroundPackage = foregroundPackage,
                             verbs = selectedVerbs,
-                            sinks = emptySet(),
                             ttlMinutes = ttlMinutes,
                             maxSteps = DEFAULT_MAX_STEPS,
                         )
