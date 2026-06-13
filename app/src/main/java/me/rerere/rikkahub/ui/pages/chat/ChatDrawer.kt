@@ -328,49 +328,37 @@ fun ChatDrawerContent(
                                 navController.navigate(Screen.ImageGen)
                             }
                         )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.favorite_page_title)) },
+                            leadingIcon = { Icon(HugeIcons.InLove, null) },
+                            onClick = {
+                                showMenuPopup = false
+                                navController.navigate(Screen.Favorite)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.chat_drawer_statistics)) },
+                            leadingIcon = { Icon(HugeIcons.ChartColumn, null) },
+                            onClick = {
+                                showMenuPopup = false
+                                navController.navigate(Screen.Stats)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Scheduled tasks") },
+                            leadingIcon = { Icon(HugeIcons.AlarmClock, null) },
+                            onClick = {
+                                showMenuPopup = false
+                                navController.navigate(
+                                    Screen.Schedule(
+                                        assistantId = settings.assistantId.toString(),
+                                        conversationId = current.id.toString(),
+                                    )
+                                )
+                            }
+                        )
                     }
                 }
-
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.InLove, stringResource(R.string.favorite_page_title))
-                    },
-                    label = {
-                        Text(stringResource(R.string.favorite_page_title))
-                    },
-                    onClick = {
-                        navController.navigate(Screen.Favorite)
-                    },
-                )
-
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.ChartColumn, stringResource(R.string.chat_drawer_statistics))
-                    },
-                    label = {
-                        Text(stringResource(R.string.chat_drawer_statistics))
-                    },
-                    onClick = {
-                        navController.navigate(Screen.Stats)
-                    },
-                )
-
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.AlarmClock, "Scheduled tasks")
-                    },
-                    label = {
-                        Text("Scheduled tasks")
-                    },
-                    onClick = {
-                        navController.navigate(
-                            Screen.Schedule(
-                                assistantId = settings.assistantId.toString(),
-                                conversationId = current.id.toString(),
-                            )
-                        )
-                    },
-                )
 
                 Spacer(Modifier.weight(1f))
 
