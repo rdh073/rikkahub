@@ -52,6 +52,17 @@ interface TaskScheduleDAO {
     @Query("SELECT * FROM task_schedules WHERE enabled = 1 AND next_fire_at <= :now ORDER BY next_fire_at ASC")
     suspend fun listOverdueEnabled(now: Long): List<TaskScheduleEntity>
 
+    /**
+     * Startup-rescheduler key (SPEC.md M6): every enabled schedule carrying an in-flight marker
+     * (`running_task_run_id IS NOT NULL`). `claimDue` advances a recurring row's `next_fire_at` to
+     * the FUTURE before the run starts, so a row claimed-but-not-finished across a process kill is
+     * NOT overdue — [listOverdueEnabled] never sees it. The rescheduler reads it here too so its
+     * orphan marker is cleared and its next future fire is re-armed, otherwise the schedule silently
+     * stops firing (no pending work + a stale marker that blocks every future claim).
+     */
+    @Query("SELECT * FROM task_schedules WHERE enabled = 1 AND running_task_run_id IS NOT NULL ORDER BY next_fire_at ASC")
+    suspend fun listEnabledRunning(): List<TaskScheduleEntity>
+
     /** Cascade with explicit conversation cleanup (SPEC.md M6); no Room foreign-key cascade exists. */
     @Query("DELETE FROM task_schedules WHERE conversation_id = :conversationId")
     suspend fun deleteByConversationId(conversationId: String): Int

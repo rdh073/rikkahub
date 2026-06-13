@@ -50,11 +50,13 @@ class ScheduleReschedulerTest {
 
     private fun rescheduler(
         overdue: List<ScheduleSnapshot>,
+        running: List<ScheduleSnapshot> = emptyList(),
         orphanRunIds: Set<Uuid> = emptySet(),
         cleared: MutableList<Uuid> = mutableListOf(),
         enqueued: MutableList<Pair<Uuid, Long>> = mutableListOf(),
     ): ScheduleRescheduler = ScheduleRescheduler(
         listOverdueEnabled = { overdue },
+        listEnabledRunning = { running },
         isRunOrphan = { runId -> runId in orphanRunIds },
         clearOrphanRunning = { id -> cleared += id },
         enqueue = { id, fireAt -> enqueued += id to fireAt },
@@ -111,5 +113,53 @@ class ScheduleReschedulerTest {
         rescheduler.rescheduleOverdue()
 
         assertTrue("a live in-flight run must not have its marker cleared", cleared.isEmpty())
+    }
+
+    @Test
+    fun `a recurring schedule claimed but not finished before process death is re-enqueued and un-pinned`() = runBlocking {
+        // The process died after claimDue (which advanced nextFireAt to the FUTURE and set the
+        // running marker) but before the worker re-enqueued the next fire. Such a row is NOT overdue,
+        // so listOverdueEnabled never sees it — without the running-marker pass it would have no
+        // pending WorkManager work AND a stale running marker, and the schedule would silently stop.
+        val orphanRun = Uuid.random()
+        val pinned = snapshot(nextFireAt = 50_000L, runningTaskRunId = orphanRun) // future nextFireAt
+        val cleared = mutableListOf<Uuid>()
+        val enqueued = mutableListOf<Pair<Uuid, Long>>()
+        val rescheduler = rescheduler(
+            overdue = emptyList(),
+            running = listOf(pinned),
+            orphanRunIds = setOf(orphanRun),
+            cleared = cleared,
+            enqueued = enqueued,
+        )
+
+        rescheduler.rescheduleOverdue()
+
+        // The orphan marker is cleared (its fire was killed) and the next future fire is re-armed.
+        assertEquals(listOf(pinned.id), cleared)
+        assertEquals(listOf(pinned.id to 50_000L), enqueued)
+    }
+
+    @Test
+    fun `a schedule that is both overdue and running is reconciled exactly once`() = runBlocking {
+        // A row can appear in both lists (overdue AND carrying a running marker). It must be cleared
+        // and re-enqueued ONCE, never twice — duplicate enqueues are wasteful and a double clear is
+        // pointless.
+        val orphanRun = Uuid.random()
+        val both = snapshot(nextFireAt = 2_000L, runningTaskRunId = orphanRun)
+        val cleared = mutableListOf<Uuid>()
+        val enqueued = mutableListOf<Pair<Uuid, Long>>()
+        val rescheduler = rescheduler(
+            overdue = listOf(both),
+            running = listOf(both),
+            orphanRunIds = setOf(orphanRun),
+            cleared = cleared,
+            enqueued = enqueued,
+        )
+
+        rescheduler.rescheduleOverdue()
+
+        assertEquals(listOf(both.id), cleared)
+        assertEquals(listOf(both.id to 2_000L), enqueued)
     }
 }

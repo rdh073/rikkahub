@@ -320,6 +320,7 @@ val dataSourceModule = module {
         val enqueuer = get<ScheduleEnqueuer>()
         me.rerere.rikkahub.data.ai.schedule.ScheduleRescheduler(
             listOverdueEnabled = { repository.listOverdueEnabled(System.currentTimeMillis()) },
+            listEnabledRunning = { repository.listEnabledRunning() },
             isRunOrphan = { runId ->
                 // Not-running ⇔ the run is gone (missing) or was marked Interrupted by recovery.
                 when (taskRuns.get(runId)) {

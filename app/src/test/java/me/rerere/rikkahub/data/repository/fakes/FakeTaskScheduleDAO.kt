@@ -58,6 +58,12 @@ class FakeTaskScheduleDAO : TaskScheduleDAO {
             .sortedBy { it.nextFireAt }
     }
 
+    override suspend fun listEnabledRunning(): List<TaskScheduleEntity> = synchronized(lock) {
+        schedules.values
+            .filter { it.enabled && it.runningTaskRunId != null }
+            .sortedBy { it.nextFireAt }
+    }
+
     override suspend fun deleteByConversationId(conversationId: String): Int = synchronized(lock) {
         val ids = schedules.values.filter { it.conversationId == conversationId }.map { it.id }
         ids.forEach { schedules.remove(it) }

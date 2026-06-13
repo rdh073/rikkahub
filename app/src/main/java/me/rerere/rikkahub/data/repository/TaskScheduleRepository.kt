@@ -288,6 +288,16 @@ class TaskScheduleRepository(
         dao.listOverdueEnabled(now).map { it.toSnapshot() }
     }
 
+    /**
+     * Enabled schedules carrying an in-flight marker (`running_task_run_id IS NOT NULL`) for the
+     * startup rescheduler. A recurring row claimed-but-not-finished across a process kill has its
+     * `next_fire_at` already advanced to the future, so it is NOT in [listOverdueEnabled]; the
+     * rescheduler reads it here to clear the orphan marker and re-arm its next future fire.
+     */
+    suspend fun listEnabledRunning(): List<ScheduleSnapshot> = transactions.inTransaction {
+        dao.listEnabledRunning().map { it.toSnapshot() }
+    }
+
     // --- gate helpers (transaction-internal) ----------------------------------------------------
 
     private fun parseRecurrenceSpec(raw: String?): RecurrenceSpec? {

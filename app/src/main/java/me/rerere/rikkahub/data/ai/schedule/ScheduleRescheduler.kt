@@ -25,7 +25,18 @@ import kotlin.uuid.Uuid
  *     so the missed window fires on the next opportunity. Recurring missed occurrences coalesce into
  *     ONE fire inside `claimDue` — the rescheduler only re-arms the transport, it does not advance.
  *
+ * The reconciled set is the UNION of two reads, deduped by id:
+ *  - **overdue enabled** (`enabled AND next_fire_at <= now`): a fire missed while the process was dead.
+ *  - **enabled with a running marker** (`enabled AND running_task_run_id IS NOT NULL`): a schedule
+ *    that was CLAIMED but whose worker died before it re-enqueued the next occurrence. `claimDue`
+ *    advances a recurring row's `next_fire_at` to the FUTURE before the run starts, so after a process
+ *    kill such a row is NOT overdue — the overdue read alone never sees it, it has no pending
+ *    WorkManager work, and its stale running marker would block every future claim. Folding it into
+ *    the union re-arms the transport (at its future `next_fire_at`) and clears the orphan marker, so a
+ *    recurring schedule cannot silently stop firing across a claim/finish process death.
+ *
  * @param listOverdueEnabled reads the overdue enabled schedule rows (`enabled AND next_fire_at <= now`).
+ * @param listEnabledRunning reads enabled rows carrying a non-null `running_task_run_id`.
  * @param isRunOrphan true iff the given run id points at an `Interrupted`/missing task run — i.e. a
  *   killed fire, not a live one.
  * @param clearOrphanRunning clears the schedule's `running_task_run_id` (the orphan marker).
@@ -34,26 +45,31 @@ import kotlin.uuid.Uuid
  */
 class ScheduleRescheduler(
     private val listOverdueEnabled: suspend () -> List<me.rerere.ai.runtime.contract.ScheduleSnapshot>,
+    private val listEnabledRunning: suspend () -> List<me.rerere.ai.runtime.contract.ScheduleSnapshot>,
     private val isRunOrphan: suspend (Uuid) -> Boolean,
     private val clearOrphanRunning: suspend (Uuid) -> Unit,
     private val enqueue: (Uuid, Long) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     /**
-     * Reconcile the firing transport with the persisted rows: clear orphan running markers, then
-     * re-enqueue every overdue enabled schedule. Idempotent — a second pass with no new orphan and
-     * no consumed fire re-arms the same unique work (REPLACE) and clears nothing.
+     * Reconcile the firing transport with the persisted rows: for the union (deduped by id) of
+     * overdue-enabled and enabled-with-a-running-marker schedules, clear any orphan running marker
+     * then re-enqueue at the row's `next_fire_at`. Idempotent — a second pass with no new orphan and
+     * no consumed fire re-arms the same unique work (REPLACE) and clears nothing. A row appearing in
+     * both reads is reconciled exactly once.
      */
     suspend fun rescheduleOverdue() {
-        val overdue = listOverdueEnabled()
-        for (schedule in overdue) {
+        val reconciled = LinkedHashMap<Uuid, me.rerere.ai.runtime.contract.ScheduleSnapshot>()
+        for (schedule in listOverdueEnabled()) reconciled.putIfAbsent(schedule.id, schedule)
+        for (schedule in listEnabledRunning()) reconciled.putIfAbsent(schedule.id, schedule)
+        for (schedule in reconciled.values) {
             val runningId = schedule.runningTaskRunId
             if (runningId != null && isRunOrphan(runningId)) {
                 clearOrphanRunning(schedule.id)
             }
             enqueue(schedule.id, schedule.nextFireAt)
         }
-        Log.i(TAG, "rescheduleOverdue: re-enqueued ${overdue.size} overdue enabled schedules")
+        Log.i(TAG, "rescheduleOverdue: re-enqueued ${reconciled.size} schedules")
     }
 
     private companion object {
