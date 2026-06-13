@@ -1157,10 +1157,10 @@
   <string name="chat_subagent_running">Running %1$s</string>
   <string name="chat_board_open">Task board</string>
   <string name="automation_a11y_service_label">RikkaHub UI Automation</string>
-  <string name="automation_a11y_service_description">Lets an enabled assistant observe (read-only) the screen of other apps to help you. It cannot tap, type, or scroll. You can stop it any time from the floating STOP button.</string>
+  <string name="automation_a11y_service_description">Lets an enabled assistant read the screen of other apps and act on it for you: it may tap, type, scroll, and use global navigation (Back/Home/Recents). Actions stay inside the scope you grant. You can stop it any time from the floating STOP button.</string>
   <string name="automation_kill_switch_stop">STOP</string>
   <string name="assistant_page_ui_automation">UI automation (screen control)</string>
-  <string name="assistant_page_ui_automation_desc">Allow this assistant to observe the screen of other apps (read-only). Requires enabling the RikkaHub accessibility service in system settings. Read-only: no tapping or typing.</string>
+  <string name="assistant_page_ui_automation_desc">Allow this assistant to read and act on the screen of other apps: it may tap, type, scroll, and use global navigation (Back/Home/Recents) within the scope you grant. Requires enabling the RikkaHub accessibility service in system settings.</string>
   <string name="assistant_page_gradient_background">Gradient Background</string>
   <string name="assistant_page_gradient_background_desc">Use a dynamic gradient background on the chat page</string>
   <string name="automation_kill_switch_unavailable">Automation could not start: the STOP kill-switch could not be shown. Enable the rikkahub Accessibility service and overlay, then try again.</string>
