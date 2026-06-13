@@ -1,5 +1,8 @@
 package me.rerere.rikkahub.ui.pages.schedule
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import me.rerere.ai.runtime.contract.ScheduleDraft
 import me.rerere.ai.runtime.contract.ScheduleKind
@@ -167,5 +170,49 @@ class ScheduleVMTest {
 
         assertTrue(result is ScheduleMutationResult.Accepted)
         assertNull(f.dao.getById(created.snapshot.id.toString()))
+    }
+
+    // Regression for the concurrent-create race: two fire-and-forget creates from an UNBOUND screen must
+    // materialize EXACTLY ONE parent conversation. Before createSchedule was serialized, both calls
+    // observed _conversationId == null across the ensureConversation suspension and each materialized a
+    // conversation; a sibling rejection's rollback could then unbind a parent the other create had bound,
+    // leaving the accepted schedule unreachable from the screen.
+    @Test
+    fun concurrent_unbound_creates_materialize_exactly_one_conversation() = runBlocking {
+        val f = Fixture(boundConversationId = null)
+        val ensureCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val gate = CompletableDeferred<Unit>()
+        // ensureConversation holds inside its critical section so both creates would race the unbound
+        // check if createSchedule were not serialized.
+        val vm = ScheduleVM(
+            targetAssistantId = f.target.id,
+            initialConversationId = null,
+            repository = f.repository,
+            ensureConversation = { _ ->
+                ensureCalls.incrementAndGet()
+                gate.await()
+                f.createdConversationId
+            },
+            rollbackConversation = f.rollback.rollback,
+        )
+
+        // Unconfined → each launch runs eagerly to its first real suspension at launch time.
+        val a = launch(Dispatchers.Unconfined) { vm.createSchedule(f.oneShotDraft()) }
+        val b = launch(Dispatchers.Unconfined) { vm.createSchedule(f.oneShotDraft()) }
+
+        // Without serialization both calls reach ensureConversation here (count 2 — fails); the mutex
+        // lets only the lock holder through (count 1 — passes).
+        assertEquals("only one create may materialize a conversation under contention", 1, ensureCalls.get())
+
+        gate.complete(Unit)
+        a.join()
+        b.join()
+
+        assertEquals(1, ensureCalls.get())
+        // The second create reused the bound parent; the binding is intact (never nulled by the sibling)
+        // and both schedules landed on the single conversation.
+        assertEquals(f.createdConversationId, vm.conversationId.value)
+        assertEquals(2, f.dao.listByConversation(f.createdConversationId.toString()).size)
+        assertNull("a successful create must never be rolled back", f.rollback.rolledBack)
     }
 }

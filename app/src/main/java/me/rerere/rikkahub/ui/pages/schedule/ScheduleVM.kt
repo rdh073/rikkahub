@@ -6,6 +6,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.rerere.ai.runtime.contract.ScheduleDraft
 import me.rerere.ai.runtime.contract.ScheduleMutationResult
 import me.rerere.ai.runtime.contract.ScheduleOwner
@@ -50,6 +52,12 @@ class ScheduleVM(
     /** The bound conversation's schedules, in presentation order (next-fire ascending). */
     val schedules: StateFlow<List<ScheduleSnapshot>> = _schedules.asStateFlow()
 
+    // Serializes createSchedule so the "is the screen unbound? then materialize ONE parent" decision and
+    // its commit are one critical section. Without it, two fire-and-forget creates from an unbound screen
+    // both observe _conversationId == null across the ensureConversation suspension, each materialize a
+    // conversation, and a sibling rejection's rollback can unbind a parent another create already bound.
+    private val createMutex = Mutex()
+
     /**
      * Resolve the bound conversation, creating one bound to [targetAssistantId] up front if none is
      * bound yet. The created id is cached so a screen that started conversation-less binds exactly
@@ -64,7 +72,7 @@ class ScheduleVM(
      * other than the assistant the screen is bound to, so a UI create can never aim at a foreign or
      * unset assistant id.
      */
-    suspend fun createSchedule(draft: ScheduleDraft): ScheduleMutationResult {
+    suspend fun createSchedule(draft: ScheduleDraft): ScheduleMutationResult = createMutex.withLock {
         val wasUnbound = _conversationId.value == null
         val conversationId = requireConversationId()
         val result = repository.create(
@@ -76,13 +84,14 @@ class ScheduleVM(
             is ScheduleMutationResult.Accepted -> refresh(conversationId)
             // A create this very call materialized must leave NO orphan when the repository rejects it:
             // roll the just-created conversation back and unbind it. wasUnbound (not initialConversationId)
-            // gates this so a pre-bound parent is never deleted.
+            // gates this so a pre-bound parent is never deleted. Serialized by createMutex, wasUnbound is
+            // accurate — a concurrent sibling cannot have bound (or be about to bind) a parent we'd unbind.
             is ScheduleMutationResult.Rejected -> if (wasUnbound) {
                 rollbackConversation(conversationId)
                 _conversationId.value = null
             }
         }
-        return result
+        result
     }
 
     /** List the bound conversation's schedules; an unbound screen has nothing to list yet. */
