@@ -148,6 +148,39 @@ class ScheduleVMTest {
         assertEquals(existing, f.vm.conversationId.value)
     }
 
+    // SC2 (SPEC.md M2): a repository Rejected on create must NOT mutate VM state. The dialog owns its own
+    // field state and decides whether to dismiss; the VM is the legality conduit only, so a rejection at
+    // the VM seam must (a) leave the bound-conversation binding intact for a pre-bound parent, (b) leave
+    // the published _schedules list untouched (no spurious refresh that could blank or reorder cards), and
+    // (c) return the Rejected carrying a non-empty reason for the dialog to render inline. There is no
+    // dialog-close side effect at this seam — createSchedule returns a result, it never signals dismissal.
+    // This pins the "keep dialog open, input intact, show the reason" contract at the VM level, distinct
+    // from the rollback test above (which only asserts the pre-bound parent is not unbound).
+    @Test
+    fun rejected_create_on_prebound_conversation_leaves_vm_state_unchanged() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+        // Establish a real, non-empty published list first so "unchanged" is observable: an accepted
+        // create populates _schedules with one snapshot scoped to the pre-bound conversation.
+        assertTrue(f.vm.createSchedule(f.oneShotDraft()) is ScheduleMutationResult.Accepted)
+        val scheduleBefore = f.vm.schedules.value
+        assertEquals(1, scheduleBefore.size)
+
+        val result = f.vm.createSchedule(f.rejectedDraft())
+
+        // The rejection carries a reason for the dialog to render inline — never a bare flag.
+        assertTrue("expected Rejected, got $result", result is ScheduleMutationResult.Rejected)
+        assertTrue(
+            "Rejected must carry a non-empty reason for inline display",
+            (result as ScheduleMutationResult.Rejected).reason.isNotBlank(),
+        )
+        // The pre-bound parent is NOT unbound on rejection: binding is identical to before.
+        assertNull("must not roll back a pre-bound conversation", f.rollback.rolledBack)
+        assertEquals(existing, f.vm.conversationId.value)
+        // The published list is byte-for-byte the pre-rejection list — no spurious refresh/clear.
+        assertEquals(scheduleBefore, f.vm.schedules.value)
+    }
+
     // SC1 regression (SPEC.md M1): a schedule seeded on the conversation a VM is BOUND to must be
     // visible from that VM. The empty-list bug was a data-scope failure — the drawer navigated to
     // Screen.Schedule carrying only the assistant id, so ScheduleVM started with
