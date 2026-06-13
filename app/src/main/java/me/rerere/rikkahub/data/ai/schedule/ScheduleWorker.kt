@@ -58,20 +58,32 @@ class ScheduleFireRunner(
     suspend fun fire(scheduleId: Uuid): Boolean {
         val claim = claimDue(scheduleId, now()) ?: return false
 
-        val parent = resolveParentConversation(scheduleId)
-        // A missing parent (conversation deleted between enqueue and fire) skips the run, but the
-        // schedule was already marked in-flight by claimDue — so finishRun below MUST still run to
-        // clear it. Use the claim run id as the terminal id when there is no real run to point at;
-        // recording it as last_task_run_id is harmless and the in-flight marker is cleared either way.
-        val terminalRunId = if (parent != null) run(claim, parent) ?: claim.runId else claim.runId
-
-        finishRun(scheduleId, claim.runId, terminalRunId)
-
-        // A recurring schedule that advanced is still enabled in its post-claim snapshot; re-enqueue
-        // the next fire. A one-shot (disabled after its claim) is NOT re-enqueued. The unique name
-        // ("schedule_$id") dedups, so exactly one pending fire ever exists per schedule.
-        if (claim.snapshot.enabled) {
-            enqueue(scheduleId, claim.snapshot.nextFireAt)
+        // Once claimDue has stamped the in-flight marker, releasing it (finishRun) and re-arming a
+        // recurring schedule's next fire (enqueue) MUST happen on EVERY exit path — including when
+        // run() throws (e.g. TaskCoordinator.run aborts before a terminal row when the model is
+        // missing). Without this finally a thrown run skipped finishRun, leaving the schedule pinned
+        // "running" forever; the worker's Result.failure() then hit a retry whose claim was blocked by
+        // that stale marker (null), which the worker mapped to success — swallowing the failure. The
+        // finally clears the marker and re-enqueues the next occurrence, then the exception propagates
+        // so the failure is recorded, not hidden.
+        var terminalRunId = claim.runId
+        try {
+            val parent = resolveParentConversation(scheduleId)
+            // A missing parent (conversation deleted between enqueue and fire) skips the run; the
+            // claim run id stands in as the terminal id (recording it is harmless, the marker is
+            // cleared either way).
+            if (parent != null) {
+                terminalRunId = run(claim, parent) ?: claim.runId
+            }
+        } finally {
+            finishRun(scheduleId, claim.runId, terminalRunId)
+            // A recurring schedule that advanced is still enabled in its post-claim snapshot; re-enqueue
+            // the next fire so a thrown run never loses the recurrence. A one-shot (disabled after its
+            // claim) is NOT re-enqueued. The unique name ("schedule_$id") dedups, so exactly one pending
+            // fire ever exists per schedule.
+            if (claim.snapshot.enabled) {
+                enqueue(scheduleId, claim.snapshot.nextFireAt)
+            }
         }
         return true
     }

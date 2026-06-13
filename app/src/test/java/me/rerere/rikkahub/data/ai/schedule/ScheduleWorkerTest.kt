@@ -145,6 +145,49 @@ class ScheduleWorkerTest {
     }
 
     @Test
+    fun `a throwing run still finishes the claim and re-enqueues a recurring schedule, then rethrows`() = runBlocking {
+        val trace = Trace()
+        val scheduleId = Uuid.random()
+        val parent = Uuid.random()
+        val claim = ScheduleClaim(
+            runId = Uuid.random(),
+            snapshot = snapshot(ScheduleKind.RECURRING, enabled = true, nextFireAt = 9_000L),
+        )
+        val enqueued = mutableListOf<Pair<Uuid, Long>>()
+        // run() throws: without try/finally, finishRun would be skipped and the schedule would stay
+        // pinned "running" forever while the worker's failure is swallowed on the retry's blocked claim.
+        val runner = ScheduleFireRunner(
+            claimDue = { _, _ -> trace.steps += "claim"; claim },
+            resolveParentConversation = { parent },
+            run = { _, _ -> trace.steps += "run"; throw IllegalStateException("model missing") },
+            finishRun = { id, runId, terminal ->
+                trace.steps += "finish"
+                assertEquals(scheduleId, id)
+                assertEquals(claim.runId, runId)
+                // No real terminal run id was produced; the claim run id stands in.
+                assertEquals(claim.runId, terminal)
+            },
+            enqueue = { id, fireAt -> trace.steps += "enqueue"; enqueued += id to fireAt },
+            now = { 5_000L },
+        )
+
+        var thrown: Throwable? = null
+        try {
+            runner.fire(scheduleId)
+        } catch (e: Throwable) {
+            thrown = e
+        }
+
+        // The claim is finished and the recurring schedule re-enqueued EVEN THOUGH run threw, so the
+        // marker is released and the next occurrence is not lost...
+        assertEquals(listOf("claim", "run", "finish", "enqueue"), trace.steps)
+        assertEquals(1, enqueued.size)
+        assertEquals(scheduleId to 9_000L, enqueued.single())
+        // ...and the failure is surfaced (worker maps it to Result.failure()), never swallowed.
+        assertTrue("the run failure must propagate", thrown is IllegalStateException)
+    }
+
+    @Test
     fun `a missing parent conversation skips the run but still clears the in-flight marker`() = runBlocking {
         val trace = Trace()
         val scheduleId = Uuid.random()
