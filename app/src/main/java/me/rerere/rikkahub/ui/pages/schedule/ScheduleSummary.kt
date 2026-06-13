@@ -43,13 +43,25 @@ fun scheduleSummary(
             // lastFiredAt = null per Assumption 6 — the preview shows the next fire from `now`,
             // matching how a freshly created schedule behaves; lastFiredAt does not affect the result.
             val requireSpec = requireNotNull(spec) { "RECURRING schedule requires a RecurrenceSpec" }
-            val nextFire = Recurrence.nextOccurrenceAfter(
-                spec = requireSpec,
-                firstFireAt = firstFireAt,
-                lastFiredAt = null,
-                zone = zone,
-                now = now,
-            )
+            // SC4: show exactly what the worker fires next, never a second date-math model. The
+            // repository persists `nextFireAt = firstFireAt` and fires the FIRST window there verbatim;
+            // only LATER windows advance on the grid (TaskScheduleRepository.claimDue). So while the
+            // first fire is still in the future it IS the next fire — emit firstFireAt, not the grid
+            // (which for a DAYS schedule whose firstFireAt time-of-day differs from `timeOfDay` would
+            // report a different, later instant the worker does not fire first). Once firstFireAt has
+            // passed, the next fire is the grid occurrence after `now`, matching the advanced nextFireAt.
+            // lastFiredAt = null per Assumption 6: it does not affect nextOccurrenceAfter's result.
+            val nextFire = if (firstFireAt > now) {
+                firstFireAt
+            } else {
+                Recurrence.nextOccurrenceAfter(
+                    spec = requireSpec,
+                    firstFireAt = firstFireAt,
+                    lastFiredAt = null,
+                    zone = zone,
+                    now = now,
+                )
+            }
             "${cadencePhrase(requireSpec)} — next run ${formatFire(nextFire)} ($timeZoneId)"
         }
     }

@@ -103,6 +103,10 @@ class ScheduleSummaryTest {
         // firstFireAt anchors before the spring-forward (2026-03-29) so the DAYS case crosses a DST gap.
         val daysAnchor = java.time.ZonedDateTime
             .parse("2026-03-27T09:00:00Z").toInstant().toEpochMilli()
+        // A DAYS first fire at 15:00 whose timeOfDay is 09:00 — the first window (15:00) diverges from
+        // the grid (09:00), exercising the SC4 first-window rule below.
+        val daysAnchor15 = java.time.ZonedDateTime
+            .parse("2026-03-27T15:00:00Z").toInstant().toEpochMilli()
         val gridAnchor = 1_700_000_000_000L
 
         data class Case(val spec: RecurrenceSpec, val firstFireAt: Long, val zone: String, val nowOffset: Long)
@@ -113,14 +117,25 @@ class ScheduleSummaryTest {
             Case(RecurrenceSpec(every = 1, unit = RecurrenceUnit.HOURS), gridAnchor, "UTC", -hour), // now before anchor
             Case(RecurrenceSpec(every = 2, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00"), daysAnchor, london, 5 * day),
             Case(RecurrenceSpec(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "23:30"), daysAnchor, jakarta, 3 * day + hour),
+            // SC4 first-window divergence: now is 2h before the 15:00 first fire but past today's 09:00
+            // grid point, so the bare grid would advance to tomorrow 09:00 while the worker fires 15:00.
+            Case(RecurrenceSpec(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00"), daysAnchor15, "UTC", -2 * hour),
         )
 
         for (case in cases) {
             val zone = ZoneId.of(case.zone)
             val now = case.firstFireAt + case.nowOffset
-            val engineMillis = Recurrence.nextOccurrenceAfter(
-                spec = case.spec, firstFireAt = case.firstFireAt, lastFiredAt = null, zone = zone, now = now,
-            )
+            // Worker-truth oracle: the repository persists nextFireAt = firstFireAt and fires the FIRST
+            // window verbatim; only later windows advance on the grid. So the next fire is firstFireAt
+            // while it is still future, else the grid occurrence after now (claimDue semantics) — NOT
+            // unconditionally nextOccurrenceAfter, which is the SC4 bug this case guards against.
+            val expectedFire = if (case.firstFireAt > now) {
+                case.firstFireAt
+            } else {
+                Recurrence.nextOccurrenceAfter(
+                    spec = case.spec, firstFireAt = case.firstFireAt, lastFiredAt = null, zone = zone, now = now,
+                )
+            }
             val summary = scheduleSummary(
                 kind = ScheduleKind.RECURRING,
                 spec = case.spec,
@@ -129,13 +144,47 @@ class ScheduleSummaryTest {
                 now = now,
                 locale = locale,
             )
-            val shownMillis = parseShownMillis(summary, zone, engineMillis)
+            val shownMillis = parseShownMillis(summary, zone, expectedFire)
             assertEquals(
-                "embedded next-fire must equal Recurrence.nextOccurrenceAfter (minute granularity) for $case: $summary",
-                truncateToMinute(engineMillis, zone),
+                "embedded next-fire must equal the worker's nextFireAt (minute granularity) for $case: $summary",
+                truncateToMinute(expectedFire, zone),
                 shownMillis,
             )
         }
+    }
+
+    /**
+     * SC4, first-window: the worker persists `nextFireAt = firstFireAt` and fires the FIRST window
+     * there verbatim; only LATER windows advance on the recurrence grid (TaskScheduleRepository
+     * claimDue). For a DAYS schedule whose first-fire local time differs from `timeOfDay`, the bare
+     * grid reports a different (later) instant for the first run than the worker actually fires — so
+     * the preview must show `firstFireAt` while it is still in the future (preview == worker, SC4).
+     */
+    @Test
+    fun `recurring preview shows firstFireAt for the first window, not the timeOfDay grid`() {
+        val zone = ZoneId.of(jakarta)
+        // Daily at 09:00, but the user picked a first fire at 15:00 the same day — the two diverge.
+        val spec = RecurrenceSpec(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00")
+        val firstFireAt = java.time.ZonedDateTime
+            .parse("2026-06-16T15:00:00+07:00").toInstant().toEpochMilli()
+        // now = 06-16 09:00: BEFORE the 15:00 first fire, but already AT today's 09:00 grid point, so the
+        // bare grid advances to 06-17 09:00 — a value the worker does NOT fire for the first window.
+        val now = firstFireAt - 6 * hour
+
+        val summary = scheduleSummary(
+            kind = ScheduleKind.RECURRING,
+            spec = spec,
+            firstFireAt = firstFireAt,
+            timeZoneId = jakarta,
+            now = now,
+            locale = locale,
+        )
+
+        assertEquals(
+            "first-window preview must equal firstFireAt (what the worker fires first), not the grid: $summary",
+            truncateToMinute(firstFireAt, zone),
+            parseShownMillis(summary, zone, firstFireAt),
+        )
     }
 
     @Test
