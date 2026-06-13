@@ -1,0 +1,129 @@
+package me.rerere.rikkahub.ui.pages.schedule
+
+import kotlinx.coroutines.runBlocking
+import me.rerere.ai.runtime.contract.ScheduleDraft
+import me.rerere.ai.runtime.contract.ScheduleKind
+import me.rerere.ai.runtime.contract.ScheduleMutationResult
+import me.rerere.ai.runtime.contract.ScheduleOwner
+import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.repository.TaskScheduleRepository
+import me.rerere.rikkahub.data.repository.fakes.FakeBoardTransactions
+import me.rerere.rikkahub.data.repository.fakes.FakeTaskScheduleDAO
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import kotlin.uuid.Uuid
+
+/**
+ * UI-path unit tests for [ScheduleVM] (SPEC.md M5 / task T10). The schedule screen WRITES through the
+ * SAME [TaskScheduleRepository] the schedule tools use, so a UI create is judged by the identical
+ * legality gates (no UI-only validation path). The distinguishing UI invariant proven here: a create
+ * with NO existing conversation creates a conversation bound to the target assistant FIRST and binds
+ * the new schedule to its id — never [me.rerere.rikkahub.data.ai.task.TaskCoordinator]'s `Uuid.random()`
+ * parent default (spec assumption 5).
+ */
+class ScheduleVMTest {
+
+    private class MutableClock {
+        private var t = 1_000L
+        fun current(): Long = ++t
+    }
+
+    /** Records the conversation-ensure seam so the test can assert it ran (or did not). */
+    private class RecordingEnsureConversation(private val produced: Uuid) {
+        var calledWithAssistant: Uuid? = null
+        val ensure: suspend (Uuid) -> Uuid = { assistantId ->
+            calledWithAssistant = assistantId
+            produced
+        }
+    }
+
+    private class Fixture(boundConversationId: Uuid?) {
+        val dao = FakeTaskScheduleDAO()
+        val target = Assistant(id = Uuid.random(), name = "agent", spawnable = true)
+        val createdConversationId = Uuid.random()
+        val ensure = RecordingEnsureConversation(createdConversationId)
+        val repository = TaskScheduleRepository(
+            dao = dao,
+            transactions = FakeBoardTransactions(),
+            resolveAssistant = { id -> if (id == target.id) target else null },
+            now = MutableClock()::current,
+        )
+        val vm = ScheduleVM(
+            targetAssistantId = target.id,
+            initialConversationId = boundConversationId,
+            repository = repository,
+            ensureConversation = ensure.ensure,
+        )
+
+        // The dialog never supplies a target — Uuid.NIL stands in, and the VM must stamp the
+        // screen's bound assistant before the draft reaches the repository.
+        fun oneShotDraft() = ScheduleDraft(
+            targetAssistantId = Uuid.NIL,
+            prompt = "remind me",
+            kind = ScheduleKind.ONE_SHOT,
+            firstFireAt = 10_000L,
+            timeZoneId = "UTC",
+        )
+    }
+
+    @Test
+    fun create_with_no_conversation_creates_one_first_and_binds_it() = runBlocking {
+        val f = Fixture(boundConversationId = null)
+
+        val result = f.vm.createSchedule(f.oneShotDraft())
+
+        // The ensure-conversation seam ran with the target assistant, up front.
+        assertEquals(f.target.id, f.ensure.calledWithAssistant)
+
+        assertTrue("expected Accepted, got $result", result is ScheduleMutationResult.Accepted)
+        // The schedule landed scoped to the NEWLY created conversation — not a random parent.
+        val rows = f.dao.listByConversation(f.createdConversationId.toString())
+        assertEquals(1, rows.size)
+        assertEquals(ScheduleOwner.USER.name, rows.single().owner)
+        // No row ever leaked onto any other (random) conversation id.
+        assertEquals(f.createdConversationId.toString(), rows.single().conversationId)
+        // The VM stamped the screen's bound assistant onto the draft (the dialog passed Uuid.NIL).
+        assertEquals(f.target.id.toString(), rows.single().targetAssistantId)
+    }
+
+    @Test
+    fun create_with_existing_conversation_does_not_create_another() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+
+        val result = f.vm.createSchedule(f.oneShotDraft())
+
+        assertNull("must not create a conversation when one is already bound", f.ensure.calledWithAssistant)
+        assertTrue(result is ScheduleMutationResult.Accepted)
+        val rows = f.dao.listByConversation(existing.toString())
+        assertEquals(1, rows.size)
+        assertEquals(existing.toString(), rows.single().conversationId)
+    }
+
+    @Test
+    fun list_is_scoped_to_the_bound_conversation() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+        f.vm.createSchedule(f.oneShotDraft())
+
+        val snapshots = f.vm.listSchedules()
+
+        assertEquals(1, snapshots.size)
+        assertEquals(f.target.id, snapshots.single().targetAssistantId)
+    }
+
+    @Test
+    fun delete_removes_a_bound_schedule() = runBlocking {
+        val existing = Uuid.random()
+        val f = Fixture(boundConversationId = existing)
+        val created = f.vm.createSchedule(f.oneShotDraft()) as ScheduleMutationResult.Accepted
+
+        val result = f.vm.deleteSchedule(created.snapshot.id)
+
+        assertTrue(result is ScheduleMutationResult.Accepted)
+        assertNull(f.dao.getById(created.snapshot.id.toString()))
+    }
+}

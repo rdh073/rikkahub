@@ -32,11 +32,13 @@ import me.rerere.rikkahub.ui.components.EmojiUtils
 import me.rerere.common.json.JsonInstant
 import me.rerere.rikkahub.ui.components.ai.chatinput.SoundEffectPlayer
 import me.rerere.rikkahub.ui.pages.chat.board.BoardViewModel
+import me.rerere.rikkahub.ui.pages.schedule.ScheduleVM
 import me.rerere.rikkahub.utils.lifecycle.UpdateChecker
 import me.rerere.rikkahub.web.WebServerManager
 import me.rerere.tts.provider.TTSManager
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
+import kotlin.uuid.Uuid
 
 val appModule = module {
     single<Json> { JsonInstant }
@@ -115,6 +117,31 @@ val appModule = module {
             id = params.get(),
             dao = get(),
             repository = get(),
+        )
+    }
+
+    // The schedule screen's view model (SPEC.md M5 / task T10). targetAssistantId + optional bound
+    // conversation id arrive as runtime params (the screen is opened against one assistant, possibly
+    // from inside a live conversation). It WRITES through the same TaskScheduleRepository the schedule
+    // tools use, so a UI create is gated identically to a tool create. The ensureConversation seam
+    // materializes a "Scheduled task" conversation bound to the target assistant when the screen has
+    // no conversation yet, so a UI-created schedule's parent is never TaskCoordinator's Uuid.random()
+    // default (spec assumption 5).
+    viewModel { params ->
+        val conversationRepo = get<me.rerere.rikkahub.data.repository.ConversationRepository>()
+        ScheduleVM(
+            targetAssistantId = params.get<Uuid>(0),
+            initialConversationId = params.get<Uuid?>(1),
+            repository = get(),
+            ensureConversation = { assistantId ->
+                val conversation = me.rerere.rikkahub.data.model.Conversation(
+                    assistantId = assistantId,
+                    title = "Scheduled task",
+                    messageNodes = emptyList(),
+                )
+                conversationRepo.insertConversation(conversation)
+                conversation.id
+            },
         )
     }
 
