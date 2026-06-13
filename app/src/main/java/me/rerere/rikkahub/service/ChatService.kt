@@ -67,8 +67,8 @@ import me.rerere.ai.runtime.mcp.McpTool
 import me.rerere.automation.act.AlwaysDeny
 import me.rerere.automation.cap.Capability
 import me.rerere.automation.cap.CapabilityGuard
-import me.rerere.automation.cap.Lease
 import me.rerere.automation.cap.Sink
+import me.rerere.automation.cap.toCapability
 import me.rerere.automation.cap.TrustClock
 import me.rerere.automation.cap.Verb
 import me.rerere.ai.runtime.contract.ToolAssemblyContext
@@ -177,10 +177,40 @@ internal fun backgroundTextGenerationParams(
 // 单 token 间隔，避免逐 token IPC。
 internal const val WAKE_LOCK_RENEW_INTERVAL_MS = 60L * 1000L
 
-// UI-automation lease bounds (#187 v1, design I5). A per-conversation grant is time-boxed and
-// step-capped so a session expires on its own (primary recovery) even if no STOP is pressed.
-private const val UI_AUTOMATION_LEASE_TTL_MS = 30L * 60L * 1000L // 30 min per task
-private const val UI_AUTOMATION_MAX_STEPS = 256 // ADMITs over the lease (P22)
+/**
+ * Map the persisted `:app` [AutomationGrant] mirror onto the Android-free, non-`@Serializable`
+ * kernel grant (Open Q1: mirror, not reuse — the kernel carries no serialization coupling). Pure
+ * name-for-name enum translation; the kernel grant's own [toCapability] then enforces the
+ * fail-closed gates (deny-all on absent surface, SUBMIT-strip, TTL/step bounds).
+ */
+private fun AutomationGrant.toKernelGrant(): me.rerere.automation.cap.AutomationGrant =
+    me.rerere.automation.cap.AutomationGrant(
+        enabled = enabled,
+        allowedPackages = allowedPackages,
+        verbs = verbs.map { Verb.valueOf(it.name) }.toSet(),
+        sinks = sinks.map { Sink.valueOf(it.name) }.toSet(),
+        ttlMinutes = ttlMinutes,
+        maxSteps = maxSteps,
+    )
+
+/**
+ * The capability a generation's automation lease derives from the effective grant — the per-run
+ * [pendingGrant] (if any) ELSE the assistant's standing [assistantGrant] (Assumption 4: per-run
+ * overrides the standing default). PURE so the deny-all root-cause invariant is JVM-testable without
+ * the service.
+ *
+ * Returns `null` (⇒ NO guard is minted ⇒ every request DENIED) when the effective grant is not a
+ * usable authorization (disabled, no approved package, zero TTL, or zero steps). This is exactly the
+ * pre-#187-v2 behavior an empty grant must preserve: the root cause of the inert subsystem was
+ * `surface = emptySet()` minted unconditionally; here a usable grant fills the surface the user
+ * approved while an empty/absent grant still denies all.
+ */
+internal fun effectiveAutomationCapability(
+    pendingGrant: AutomationGrant?,
+    assistantGrant: AutomationGrant,
+    sessionId: String,
+    now: Long,
+): Capability? = (pendingGrant ?: assistantGrant).toKernelGrant().toCapability(sessionId, now)
 
 // 自动压缩保留的最近消息数：与手动压缩对话框（CompressContextDialog）的默认值一致。
 private const val AUTO_COMPACT_KEEP_RECENT_MESSAGES = 32
@@ -1086,41 +1116,28 @@ class ChatService(
         session: ConversationSession,
         block: (CapabilityGuard?) -> R,
     ): R {
-        val automationGuard: CapabilityGuard? = if (assistant.uiAutomationEnabled) {
-            CapabilityGuard(
-                capability = Capability.root(
-                    sessionId = conversationId.toString(),
-                    // Surface stays empty-by-default = deny-all (S1): a per-app whitelist is a
-                    // separate later UI. This grant makes the nav verbs, the input sink, and the
-                    // general tap (Verb.TAP, #198 slice 10) AUTHORIZABLE but does NOT widen the
-                    // admitted surface — authorize still DENYs on the surface branch for any real
-                    // foreground app today, exactly as OBSERVE does.
-                    surface = emptySet(),
-                    verbs = setOf(Verb.OBSERVE, Verb.SCROLL, Verb.GLOBAL, Verb.SET_TEXT, Verb.TAP),
-                    // GLOBAL_NAV must be in budget for ui_global's authorize to pass the
-                    // sink-in-budget branch; TYPE_INTO for ui_set_text (#198 slice 9, the input
-                    // sink). ui_scroll and ui_tap (#198 slice 10) carry NO sink for an ordinary tap
-                    // (the SCROLL/TAP verb suffices). Sink.SUBMIT is INTENTIONALLY WITHHELD from this
-                    // default lease (#198 slice 11, the conservative default): a submit-class
-                    // (send/pay/checkout) tap derives SUBMIT in core.act, and with SUBMIT not in
-                    // budget the guard DENYs it at the sink-in-budget branch BEFORE the confirm gate
-                    // is even reached. So the confirm gate is fully wired and proven but un-reachable
-                    // through this default lease — submit-class automation is a separate, stricter,
-                    // explicit opt-in (a later grant that adds SUBMIT to the budget), exactly mirroring
-                    // how slices 8-10 made verbs AUTHORIZABLE without widening the admitted surface.
-                    // Surface stays empty = deny-all (S1): these grants make the verbs/sinks
-                    // AUTHORIZABLE but do NOT widen the admitted surface — authorize still DENYs on
-                    // surface for any real foreground app today.
-                    sinkBudget = setOf(Sink.GLOBAL_NAV, Sink.TYPE_INTO),
-                    lease = Lease(
-                        expiresAt = trustClock.now() + UI_AUTOMATION_LEASE_TTL_MS,
-                        maxSteps = UI_AUTOMATION_MAX_STEPS,
-                    ),
-                ),
-                clock = trustClock,
-            ).also { guard -> session.activeAutomationGuard = guard }
+        // Root cause (#187 v2): the lease used to mint `surface = emptySet()` UNCONDITIONALLY, so the
+        // guard DENIED every request — the automation subsystem was inert. The capability now derives
+        // from the EFFECTIVE grant (per-run `pendingAutomationGrant` ?: the assistant's standing
+        // `automationGrant`), filling exactly the surface/verbs/sinks/TTL/steps the user approved. An
+        // empty/absent grant ⇒ `effectiveAutomationCapability` returns null ⇒ NO guard is minted ⇒ the
+        // guard-closed-over tools still DENY (no regression). `uiAutomationEnabled` stays the master
+        // switch: with it off, no grant is consulted and no guard exists. SUBMIT is stripped inside the
+        // derivation (submit-class stays the stricter, separate opt-in), so a grant can never bypass
+        // the confirm gate. The STOP overlay below remains mandatory for ANY minted guard.
+        val capability: Capability? = if (assistant.uiAutomationEnabled) {
+            effectiveAutomationCapability(
+                pendingGrant = session.pendingAutomationGrant,
+                assistantGrant = assistant.automationGrant,
+                sessionId = conversationId.toString(),
+                now = trustClock.now(),
+            )
         } else {
             null
+        }
+        val automationGuard: CapabilityGuard? = capability?.let { cap ->
+            CapabilityGuard(capability = cap, clock = trustClock)
+                .also { guard -> session.activeAutomationGuard = guard }
         }
         if (automationGuard != null && !automationActivation.activate(conversationId)) {
             if (session.activeAutomationGuard === automationGuard) session.clearAutomationLeaseState()
