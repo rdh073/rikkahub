@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.rerere.automation.cap.CapabilityGuard
+import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.Conversation
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.uuid.Uuid
@@ -60,9 +61,29 @@ class ConversationSession(
     @Volatile
     var activeAutomationGuard: CapabilityGuard? = null
 
+    // Per-run automation scope grant (#187 v2). The transient, user-authorized scope (allowed
+    // packages / verbs / sinks / TTL / steps) from an in-chat grant, consumed by the lease derivation
+    // to mint activeAutomationGuard. Lives beside the guard because it is the SAME transient lease
+    // state on the SAME lifecycle: minted per generation, cleared when the lease tears down. Keeping
+    // it on the session lets the kill-switch thread reach it; cleared in lock-step with the guard so a
+    // stale prior-run grant can never leak into the next derivation. Same single-writer + kill-switch
+    // access shape as the guard, so @Volatile.
+    @Volatile
+    var pendingAutomationGrant: AutomationGrant? = null
+
     /** Kill-switch (design I9): revoke the active automation grant — future authorize ⇒ DENY. */
     fun revokeAutomation() {
         activeAutomationGuard?.revoke()
+    }
+
+    /**
+     * Tears down the transient automation lease state. The guard and the per-run grant are one unit
+     * with one lifecycle, so they are nulled together — never one without the other — to guarantee no
+     * stale grant outlives its guard. Idempotent: nulling already-null fields is a no-op.
+     */
+    fun clearAutomationLeaseState() {
+        activeAutomationGuard = null
+        pendingAutomationGrant = null
     }
 
     fun acquire(): Int = refCount.incrementAndGet().also {
@@ -138,5 +159,6 @@ class ConversationSession(
         _generationJob.value = null
         idleCheckJob?.cancel()
         idleCheckJob = null
+        clearAutomationLeaseState()
     }
 }

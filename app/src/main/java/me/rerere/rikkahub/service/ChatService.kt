@@ -1103,7 +1103,7 @@ class ChatService(
             null
         }
         if (automationGuard != null && !automationActivation.activate(conversationId)) {
-            if (session.activeAutomationGuard === automationGuard) session.activeAutomationGuard = null
+            if (session.activeAutomationGuard === automationGuard) session.clearAutomationLeaseState()
             automationGuard.revoke()
             throw IllegalStateException(context.getString(R.string.automation_kill_switch_unavailable))
         }
@@ -1111,7 +1111,7 @@ class ChatService(
             return block(automationGuard)
         } finally {
             if (automationGuard != null && session.activeAutomationGuard === automationGuard) {
-                session.activeAutomationGuard = null
+                session.clearAutomationLeaseState()
                 automationActivation.deactivate(conversationId)
             }
         }
