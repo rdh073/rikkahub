@@ -211,4 +211,96 @@ class SpawnToolHandleLifecycleTest {
         assertNull(item.ownerHandleId)
         assertNull("the failed handle must be unregistered", fx.registry.get(fx.handle!!.id))
     }
+
+    @Test
+    fun `a throwing tool assembly still tears the handle down - no parent job pin`(): Unit = runBlocking {
+        // Review mustFix #3a: buildSubagentTools runs after the handle is registered; if it
+        // throws outside the lifecycle closure the handle's child Job is never completed and the
+        // parent generation job hangs in `completing` forever.
+        val fx = Fixture()
+        val spawn = buildSpawnTool(
+            spawnableAssistants = listOf(sub),
+            coordinator = TaskCoordinator(generate = { _, _, _, _, _, _, _ -> flow {} }),
+            parentModelId = null,
+            settings = settings,
+            registry = fx.registry,
+            buildSubagentTools = { _, handle ->
+                fx.handle = handle
+                throw IllegalStateException("tool assembly exploded")
+            },
+            releaseOrphanedClaims = { handleId -> fx.repository.releaseClaimsOf(handleId) },
+            approvalGateFor = {
+                object : me.rerere.ai.runtime.contract.TaskApprovalGate {
+                    override suspend fun await(
+                        taskId: kotlin.uuid.Uuid,
+                        request: me.rerere.ai.runtime.task.TaskApprovalRequest,
+                    ): Boolean = false
+                }
+            },
+            processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
+            progressLabel = { "running $it" },
+            parentConversationId = conversationId,
+        )
+
+        runCatching {
+            spawn.execute(buildJsonObject {
+                put("subagent", sub.name)
+                put("prompt", "never starts")
+            })
+        }
+
+        assertNull("the handle must be unregistered", fx.registry.get(fx.handle!!.id))
+        assertTrue("the handle job must be completed", fx.handle!!.job.isCompleted)
+    }
+
+    @Test
+    fun `a throwing orphan release still unregisters the handle - no parent job pin`(): Unit = runBlocking {
+        // Review mustFix #3b: unregister must be unconditional — a failing claim release must
+        // not skip handle Job completion (the lease then bounds whatever the release left held).
+        val fx = Fixture()
+        val orphan = fx.seedItem("left-held")
+        val spawn = buildSpawnTool(
+            spawnableAssistants = listOf(sub),
+            coordinator = TaskCoordinator(
+                generate = { _, _, _, _, tools, _, _ ->
+                    flow {
+                        tools.single { it.name == "task_update" }.execute(buildJsonObject {
+                            put("id", orphan.toString())
+                            put("action", "claim")
+                        })
+                        emit(GenerationChunk.Messages(listOf(UIMessage.assistant("done"))))
+                    }
+                },
+            ),
+            parentModelId = null,
+            settings = settings,
+            registry = fx.registry,
+            buildSubagentTools = { spawned, handle ->
+                fx.handle = handle
+                subagentBoardTools(fx.repository, conversationId, fx.registry, handle, spawned)
+            },
+            releaseOrphanedClaims = { throw IllegalStateException("release path exploded") },
+            approvalGateFor = {
+                object : me.rerere.ai.runtime.contract.TaskApprovalGate {
+                    override suspend fun await(
+                        taskId: kotlin.uuid.Uuid,
+                        request: me.rerere.ai.runtime.task.TaskApprovalRequest,
+                    ): Boolean = false
+                }
+            },
+            processingStatus = kotlinx.coroutines.flow.MutableStateFlow(null),
+            progressLabel = { "running $it" },
+            parentConversationId = conversationId,
+        )
+
+        runCatching {
+            spawn.execute(buildJsonObject {
+                put("subagent", sub.name)
+                put("prompt", "claim then fail to release")
+            })
+        }
+
+        assertNull("the handle must be unregistered despite the failed release", fx.registry.get(fx.handle!!.id))
+        assertTrue("the handle job must be completed despite the failed release", fx.handle!!.job.isCompleted)
+    }
 }

@@ -152,26 +152,30 @@ fun buildSpawnTool(
         // on it — the gate's events/summaries land on the same row coordinator.run creates.
         val taskId = Uuid.random()
 
-        // The sub's own tool pool — its board claims owned by the handle — with approval-gated
-        // tools rewired through the parent's approval gate (Gap A): the child runtime sees only
-        // needsApproval=false tools (its approval UI is unreachable mid-subagent), and the gate
-        // forwards allowlisted calls to the parent while auto-denying the rest (decision #2). The
-        // spawn tool is additionally stripped inside TaskCoordinator.run (recursion guard,
-        // TASK_DEPTH_ONE).
-        val subTools = gateSubagentTools(
-            tools = buildSubagentTools(sub, handle),
-            taskId = taskId,
-            gate = approvalGateFor(sub),
-        )
-
         // Set-then-clear discipline (mirrors OcrTransformer / KnowledgeContextTransformer):
         // restore the prior status on EVERY terminal path so a stale "Running <sub>" label can't
-        // leak into the parent's loading UI — including the error() throw on an unknown subagent
-        // / unresolvable model bubbling out of runner.run.
+        // leak into the parent's loading UI. Captured before the guarded block; restoring an
+        // unset status is a no-op.
         val prevStatus = processingStatus.value
-        processingStatus.value = progressLabel(sub.name)
-        registry.markRunning(handle.id)
+        // The lifecycle closure starts IMMEDIATELY after the handle exists (review mustFix #3):
+        // tool assembly below can throw, and an exit between register and the old try meant the
+        // handle — whose Job is a child of the generation job — was never unregistered, pinning
+        // the parent's job in `completing` forever.
         val result = try {
+            // The sub's own tool pool — its board claims owned by the handle — with approval-gated
+            // tools rewired through the parent's approval gate (Gap A): the child runtime sees only
+            // needsApproval=false tools (its approval UI is unreachable mid-subagent), and the gate
+            // forwards allowlisted calls to the parent while auto-denying the rest (decision #2).
+            // The spawn tool is additionally stripped inside TaskCoordinator.run (recursion guard,
+            // TASK_DEPTH_ONE).
+            val subTools = gateSubagentTools(
+                tools = buildSubagentTools(sub, handle),
+                taskId = taskId,
+                gate = approvalGateFor(sub),
+            )
+
+            processingStatus.value = progressLabel(sub.name)
+            registry.markRunning(handle.id)
             coordinator.run(
                 sub = sub,
                 prompt = prompt,
@@ -206,9 +210,15 @@ fun buildSpawnTool(
             // The handle is dead on EVERY exit: release every board claim it still holds (orphan
             // recovery, decision #5 — the lease is only the backstop for paths recovery cannot
             // reach, i.e. process death), then drop it. NonCancellable because the release
-            // suspends and must still run on the cancellation path.
-            withContext(NonCancellable) { releaseOrphanedClaims(handle.id) }
-            registry.unregister(handle.id)
+            // suspends and must still run on the cancellation path. unregister is UNCONDITIONAL
+            // (review mustFix #3): a throwing release must still complete the handle Job, or the
+            // very job-pin this teardown exists to prevent comes back; the lease then bounds the
+            // claims the failed release left behind.
+            try {
+                withContext(NonCancellable) { releaseOrphanedClaims(handle.id) }
+            } finally {
+                registry.unregister(handle.id)
+            }
         }
         // Emit the structured {task:{...}} envelope (review finding #1) so the live renderer shows
         // the TERMINAL status, budget counters, and interrupted/budget-exhausted identity instead
