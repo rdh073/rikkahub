@@ -6,6 +6,7 @@ import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.AutomationVerb
 import me.rerere.rikkahub.data.model.Conversation
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 import kotlin.uuid.Uuid
 
@@ -53,6 +54,42 @@ class ConversationSessionAutomationLeaseStateTest {
 
         s.cleanup()
 
+        assertNull(s.pendingAutomationGrant)
+    }
+
+    /**
+     * Per-run-transient invariant: the pending grant is a one-derivation token bound to the immediate
+     * next generation. `consumePendingAutomationGrant` returns it AND nulls it in the same step, so the
+     * lease derivation that reads it cannot leave it on the session to authorize a LATER, unrelated run.
+     * The leak the old code allowed: the grant was cleared only by `clearAutomationLeaseState`, which a
+     * generation reaches only when a guard was actually minted -- so a grant that derived no guard (no
+     * approved package, expired TTL, or automation disabled at run time) survived onto the next turn.
+     */
+    @Test
+    fun `consuming the pending grant returns it and clears it in one step`() {
+        val s = session()
+        val grant = AutomationGrant(
+            enabled = true,
+            allowedPackages = setOf("com.example.target"),
+            verbs = setOf(AutomationVerb.OBSERVE),
+            ttlMinutes = 5,
+            maxSteps = 50,
+        )
+        s.pendingAutomationGrant = grant
+
+        val consumed = s.consumePendingAutomationGrant()
+
+        assertSame("consume returns the grant for this run's derivation", grant, consumed)
+        assertNull("a consumed grant must NOT remain to scope a later unrelated run", s.pendingAutomationGrant)
+    }
+
+    @Test
+    fun `consuming when no grant is pending returns null and stays null`() {
+        val s = session()
+
+        val consumed = s.consumePendingAutomationGrant()
+
+        assertNull(consumed)
         assertNull(s.pendingAutomationGrant)
     }
 }

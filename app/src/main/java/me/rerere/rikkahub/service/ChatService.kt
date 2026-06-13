@@ -1116,9 +1116,17 @@ class ChatService(
         session: ConversationSession,
         block: (CapabilityGuard?) -> R,
     ): R {
+        // Per-run-transient (#187 v2): consume the pending grant ONCE here, at the single point that
+        // derives the lease, binding it to exactly THIS generation. Consume-on-entry is unconditional —
+        // even when automation is disabled or the grant derives no guard — so a grant that authorizes no
+        // run for this turn cannot survive on the session to scope a LATER, unrelated turn. The old code
+        // cleared the grant only via the finally's `clearAutomationLeaseState`, which a generation
+        // reached only when a guard was actually minted; a null-deriving grant (no approved package,
+        // expired TTL/steps, or `uiAutomationEnabled` off at run time) leaked across runs.
+        val pendingGrant = session.consumePendingAutomationGrant()
         // Root cause (#187 v2): the lease used to mint `surface = emptySet()` UNCONDITIONALLY, so the
         // guard DENIED every request — the automation subsystem was inert. The capability now derives
-        // from the EFFECTIVE grant (per-run `pendingAutomationGrant` ?: the assistant's standing
+        // from the EFFECTIVE grant (consumed per-run grant ?: the assistant's standing
         // `automationGrant`), filling exactly the surface/verbs/sinks/TTL/steps the user approved. An
         // empty/absent grant ⇒ `effectiveAutomationCapability` returns null ⇒ NO guard is minted ⇒ the
         // guard-closed-over tools still DENY (no regression). `uiAutomationEnabled` stays the master
@@ -1127,7 +1135,7 @@ class ChatService(
         // the confirm gate. The STOP overlay below remains mandatory for ANY minted guard.
         val capability: Capability? = if (assistant.uiAutomationEnabled) {
             effectiveAutomationCapability(
-                pendingGrant = session.pendingAutomationGrant,
+                pendingGrant = pendingGrant,
                 assistantGrant = assistant.automationGrant,
                 sessionId = conversationId.toString(),
                 now = trustClock.now(),

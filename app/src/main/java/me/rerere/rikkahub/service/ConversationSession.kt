@@ -77,6 +77,21 @@ class ConversationSession(
     }
 
     /**
+     * Consume the per-run grant: return it AND null it in one step. The pending grant is a
+     * one-derivation token bound to the immediate next generation, so the lease derivation that reads
+     * it must also clear it — otherwise a grant that derives NO guard (no approved package, expired
+     * TTL/steps, or automation disabled at run time) would survive on the session and silently scope a
+     * LATER, unrelated run with authority the user intended for one specific run (#187 v2 per-run-grant
+     * is transient). Consume-once decouples this from `clearAutomationLeaseState`, which a generation
+     * reached only when a guard was actually minted. Returns null when nothing is pending.
+     */
+    fun consumePendingAutomationGrant(): AutomationGrant? {
+        val grant = pendingAutomationGrant
+        pendingAutomationGrant = null
+        return grant
+    }
+
+    /**
      * Tears down the transient automation lease state. The guard and the per-run grant are one unit
      * with one lifecycle, so they are nulled together — never one without the other — to guarantee no
      * stale grant outlives its guard. Idempotent: nulling already-null fields is a no-op.
