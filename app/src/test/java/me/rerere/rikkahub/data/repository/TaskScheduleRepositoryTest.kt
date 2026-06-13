@@ -273,4 +273,149 @@ class TaskScheduleRepositoryTest {
         val result = f.repository.delete(Uuid.random(), Uuid.random())
         assertTrue(result is ScheduleMutationResult.Rejected)
     }
+
+    // --- claimDue / finishRun (atomic, SPEC.md M3 / task T5) -------------------------------------
+
+    /** Create one schedule and return its persisted entity for direct claim-path manipulation. */
+    private suspend fun Fixture.seedOneShot(firstFireAt: Long): Uuid {
+        val conversationId = Uuid.random()
+        val created = repository.create(
+            conversationId,
+            ScheduleOwner.USER,
+            oneShotDraft(spawnable.id, firstFireAt = firstFireAt),
+        ) as ScheduleMutationResult.Accepted
+        return created.snapshot.id
+    }
+
+    private suspend fun Fixture.seedRecurring(
+        firstFireAt: Long,
+        every: Int,
+        unit: RecurrenceUnit,
+    ): Uuid {
+        val conversationId = Uuid.random()
+        val draft = ScheduleDraft(
+            targetAssistantId = spawnable.id,
+            prompt = "morning briefing",
+            kind = ScheduleKind.RECURRING,
+            firstFireAt = firstFireAt,
+            timeZoneId = zone,
+            recurrenceSpec = Json.encodeToString(RecurrenceSpec(every = every, unit = unit)),
+        )
+        val created = repository.create(conversationId, ScheduleOwner.USER, draft)
+            as ScheduleMutationResult.Accepted
+        return created.snapshot.id
+    }
+
+    @Test
+    fun two_concurrent_claims_yield_exactly_one_winner() = runBlocking {
+        val f = Fixture()
+        val id = f.seedOneShot(firstFireAt = 10_000L)
+        val now = 20_000L
+
+        // Two workers race for the same due window. The win is reported DIRECTLY by claimDue, so
+        // exactly one returns a ScheduleClaim and the other null — never two claims for one window.
+        val first = f.repository.claimDue(id, now)
+        val second = f.repository.claimDue(id, now)
+
+        val winners = listOfNotNull(first, second)
+        assertEquals("exactly one claim must win the window", 1, winners.size)
+        assertNotNull(winners.single().runId)
+        assertEquals(id, winners.single().snapshot.id)
+    }
+
+    @Test
+    fun claimDue_returns_null_when_not_yet_due() = runBlocking {
+        val f = Fixture()
+        val id = f.seedOneShot(firstFireAt = 50_000L)
+        // now < nextFireAt ⇒ not due ⇒ no claim, row untouched.
+        assertNull(f.repository.claimDue(id, now = 49_999L))
+        val row = f.dao.getById(id.toString())!!
+        assertNull(row.runningTaskRunId)
+        assertNull(row.lastFiredAt)
+        assertTrue(row.enabled)
+    }
+
+    @Test
+    fun claimDue_returns_null_for_an_unknown_schedule() = runBlocking {
+        val f = Fixture()
+        assertNull(f.repository.claimDue(Uuid.random(), now = 99_999L))
+    }
+
+    @Test
+    fun claiming_a_one_shot_disables_it_and_stamps_the_fire() = runBlocking {
+        val f = Fixture()
+        val id = f.seedOneShot(firstFireAt = 10_000L)
+        val now = 12_345L
+
+        val claim = f.repository.claimDue(id, now)
+
+        assertNotNull("a due one-shot must be claimable", claim)
+        val row = f.dao.getById(id.toString())!!
+        assertTrue("one-shot is disabled after it fires", !row.enabled)
+        assertEquals("lastFiredAt is stamped with now", now, row.lastFiredAt)
+        assertEquals(
+            "the claim's runId is pinned as runningTaskRunId",
+            claim!!.runId.toString(),
+            row.runningTaskRunId,
+        )
+    }
+
+    @Test
+    fun claiming_a_recurring_advances_next_fire_to_a_future_occurrence() = runBlocking {
+        val f = Fixture()
+        // Hourly schedule anchored at 0; firing late at now=10h must advance to 11h (strictly future),
+        // not replay each missed hour.
+        val firstFireAt = 0L
+        val hour = 60L * 60 * 1000
+        val id = f.seedRecurring(firstFireAt = firstFireAt, every = 1, unit = RecurrenceUnit.HOURS)
+        val now = 10 * hour
+
+        val claim = f.repository.claimDue(id, now)
+
+        assertNotNull(claim)
+        val row = f.dao.getById(id.toString())!!
+        assertTrue("a recurring schedule stays enabled after a fire", row.enabled)
+        assertTrue("nextFireAt advances strictly past now", row.nextFireAt > now)
+        // Coalesced: exactly ONE forward step to the first future hour boundary (11h), not N catch-ups.
+        assertEquals(11 * hour, row.nextFireAt)
+        assertEquals(now, row.lastFiredAt)
+        assertEquals(claim!!.runId.toString(), row.runningTaskRunId)
+    }
+
+    @Test
+    fun a_claimed_schedule_with_running_run_cannot_be_reclaimed() = runBlocking {
+        val f = Fixture()
+        // A recurring schedule keeps a future nextFireAt and enabled=true after the first claim, so the
+        // only thing stopping an immediate second claim is the runningTaskRunId guard.
+        val hour = 60L * 60 * 1000
+        val id = f.seedRecurring(firstFireAt = 0L, every = 1, unit = RecurrenceUnit.HOURS)
+        val firstClaim = f.repository.claimDue(id, now = 10 * hour)
+        assertNotNull(firstClaim)
+        val advancedNextFire = f.dao.getById(id.toString())!!.nextFireAt
+
+        // Even at a now past the advanced nextFireAt, the in-flight run blocks a re-claim.
+        val second = f.repository.claimDue(id, now = advancedNextFire + 1)
+        assertNull("a schedule with a running run must not be re-claimed", second)
+    }
+
+    @Test
+    fun finishRun_clears_running_id_and_records_last_task_run_id() = runBlocking {
+        val f = Fixture()
+        val id = f.seedOneShot(firstFireAt = 10_000L)
+        val claim = f.repository.claimDue(id, now = 12_000L)!!
+        val terminalRunId = Uuid.random()
+
+        f.repository.finishRun(id, claim.runId, terminalRunId)
+
+        val row = f.dao.getById(id.toString())!!
+        assertNull("finishRun clears running_task_run_id", row.runningTaskRunId)
+        assertEquals("finishRun records last_task_run_id", terminalRunId.toString(), row.lastTaskRunId)
+    }
+
+    @Test
+    fun finishRun_for_an_unknown_schedule_is_a_no_op() = runBlocking {
+        val f = Fixture()
+        // No row, no crash — finishRun is abort-safe (a worker may finish after the row was deleted).
+        f.repository.finishRun(Uuid.random(), Uuid.random(), Uuid.random())
+    }
 }

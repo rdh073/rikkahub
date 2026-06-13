@@ -7,12 +7,26 @@ import me.rerere.ai.runtime.contract.ScheduleMutationResult
 import me.rerere.ai.runtime.contract.ScheduleOwner
 import me.rerere.ai.runtime.contract.ScheduleSnapshot
 import me.rerere.ai.runtime.contract.MisfirePolicy
+import me.rerere.ai.runtime.schedule.Recurrence
 import me.rerere.ai.runtime.schedule.RecurrenceSpec
 import me.rerere.ai.runtime.schedule.RecurrenceUnit
 import me.rerere.rikkahub.data.db.dao.TaskScheduleDAO
 import me.rerere.rikkahub.data.db.entity.TaskScheduleEntity
 import me.rerere.rikkahub.data.model.Assistant
+import java.time.ZoneId
 import kotlin.uuid.Uuid
+
+/**
+ * The outcome of a winning [TaskScheduleRepository.claimDue]: the new run's id the worker will drive
+ * [TaskCoordinator.run] under, plus the schedule's post-claim [snapshot] (already advanced/disabled).
+ * The win is carried in this VALUE — a non-null [ScheduleClaim] means "you won this window" — so the
+ * caller never has to re-read the row and infer the win from post-state, exactly as `claimResume`
+ * reports its win as a `Boolean` rather than via a follow-up read.
+ */
+data class ScheduleClaim(
+    val runId: Uuid,
+    val snapshot: ScheduleSnapshot,
+)
 
 /**
  * The SINGLE legality path for task schedules (SPEC.md M3): the schedule tools and the schedule UI
@@ -39,8 +53,11 @@ import kotlin.uuid.Uuid
  * surfaces to its user/model. Never an exception: a rejected schedule edit must not abort the chat
  * turn that attempted it (mirrors [TaskBoardRepository]'s `BoardMutationResult`).
  *
- * The atomic `claimDue`/`finishRun` transactions and coalesced-recurrence advance are added in a
- * follow-on change (SPEC.md M3 task T5); this class lands the create/list/delete legality surface.
+ * The firing side ([claimDue]/[finishRun]) is the same single-writer discipline: [claimDue] is the
+ * atomic claim-and-advance a worker calls when a schedule's window is due — one transaction that
+ * decides the single winner, advances/disables the row, and reports the win DIRECTLY as a
+ * [ScheduleClaim] (mirrors `TaskRunRepository.claimResume`). [finishRun] clears the in-flight marker
+ * once the spawned run reaches a terminal state.
  */
 class TaskScheduleRepository(
     private val dao: TaskScheduleDAO,
@@ -139,6 +156,73 @@ class TaskScheduleRepository(
         val snapshot = row.toSnapshot()
         dao.deleteById(id.toString())
         ScheduleMutationResult.Accepted(snapshot)
+    }
+
+    /**
+     * Atomically claim schedule [scheduleId]'s due window at [now]. ONE transaction, validate before
+     * write: returns null unless the row exists AND is `enabled` AND has no in-flight run AND is due
+     * (`nextFireAt <= now`). On a win it mints a fresh `runningTaskRunId`, stamps `lastFiredAt`, and
+     * either DISABLES a one-shot or ADVANCES a recurring schedule's `nextFireAt` to the first
+     * occurrence strictly after [now] (coalescing every window missed while the process was dead into
+     * exactly that one fire — never N catch-up runs). The win is reported DIRECTLY: a non-null
+     * [ScheduleClaim] means this caller won, so a second concurrent claim for the same window — now
+     * seeing a non-null `runningTaskRunId` — loses with null. Mirrors `TaskRunRepository.claimResume`.
+     */
+    suspend fun claimDue(scheduleId: Uuid, now: Long): ScheduleClaim? = transactions.inTransaction {
+        val row = dao.getById(scheduleId.toString()) ?: return@inTransaction null
+        if (!row.enabled || row.runningTaskRunId != null || row.nextFireAt > now) {
+            return@inTransaction null
+        }
+
+        val advancedNextFire: Long? = when (ScheduleKind.valueOf(row.kind)) {
+            ScheduleKind.ONE_SHOT -> null // a one-shot fires once: disable after this claim.
+            ScheduleKind.RECURRING -> {
+                // A row that passed the create gate always carries a valid recurrence_spec; if it is
+                // somehow absent we cannot advance, so we disable rather than spin in place.
+                parseRecurrenceSpec(row.recurrenceSpec)?.let { spec ->
+                    Recurrence.nextOccurrenceAfter(
+                        spec = spec,
+                        firstFireAt = row.firstFireAt,
+                        lastFiredAt = row.lastFiredAt,
+                        zone = ZoneId.of(row.timeZoneId),
+                        now = now,
+                    )
+                }
+            }
+        }
+
+        val runId = Uuid.random()
+        val claimed = row.copy(
+            runningTaskRunId = runId.toString(),
+            lastFiredAt = now,
+            nextFireAt = advancedNextFire ?: row.nextFireAt,
+            enabled = advancedNextFire != null,
+            updatedAt = now,
+        )
+        dao.update(claimed)
+        ScheduleClaim(runId = runId, snapshot = claimed.toSnapshot())
+    }
+
+    /**
+     * Mark the fire identified by [runId] finished: clear `running_task_run_id` so the schedule is no
+     * longer pinned in-flight and record [terminalTaskRunId] as `last_task_run_id`. Abort-safe — an
+     * absent row (the conversation was deleted mid-run) or a stale [runId] (the schedule was already
+     * re-claimed) is a no-op, never an exception. One transaction.
+     */
+    suspend fun finishRun(scheduleId: Uuid, runId: Uuid, terminalTaskRunId: Uuid) {
+        transactions.inTransaction<Unit> {
+            val row = dao.getById(scheduleId.toString()) ?: return@inTransaction
+            // Only the worker that owns the in-flight marker may clear it; a stale finisher (the row
+            // was re-claimed under a new runId) must not stomp the live claim.
+            if (row.runningTaskRunId != runId.toString()) return@inTransaction
+            dao.update(
+                row.copy(
+                    runningTaskRunId = null,
+                    lastTaskRunId = terminalTaskRunId.toString(),
+                    updatedAt = now(),
+                )
+            )
+        }
     }
 
     // --- gate helpers (transaction-internal) ----------------------------------------------------
