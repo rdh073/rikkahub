@@ -1,10 +1,16 @@
 package me.rerere.rikkahub.ui.pages.assistant.detail
 
+import me.rerere.ai.runtime.hooks.GuardrailMode
+import me.rerere.ai.runtime.hooks.HookConfig
+import me.rerere.ai.runtime.hooks.HookEvent
+import me.rerere.ai.runtime.hooks.HookHandler
+import me.rerere.ai.runtime.hooks.HookMatcher
 import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.AutomationSink
 import me.rerere.rikkahub.data.model.AutomationVerb
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -120,6 +126,47 @@ class AssistantAutomationPageTest {
             .withRemovedPackage("a.b")
 
         assertEquals(setOf("c.d"), grant.allowedPackages)
+    }
+
+    // --- guardrail trust gate (H4) ---
+
+    private fun importedUntrustedHooks() = HookConfig(
+        hooks = mapOf(
+            HookEvent.PreToolUse to listOf(
+                HookMatcher(matcher = "search", handlers = listOf(HookHandler.Llm(prompt = "imported"))),
+            ),
+        ),
+        trusted = false,
+    )
+
+    @Test
+    fun `enabling the guardrail on the user's own config grants trust`() {
+        // The user IS the author of the guardrail toggle, so enabling it grants trust to their own
+        // (trusted/empty) config — which is also what the dispatcher requires to actually run it.
+        val config = HookConfig().withGuardrail(GuardrailMode.ASK)
+
+        assertTrue(config.trusted)
+        assertEquals(GuardrailMode.ASK, config.guardrailMode())
+    }
+
+    @Test
+    fun `enabling the guardrail while imported hooks await review is rejected`() {
+        // Regression: withGuardrail used to set trusted=true unconditionally, which un-quarantined the
+        // unreviewed imported hooks (H4). Enabling the guardrail must never piggyback trust onto them.
+        assertThrows(IllegalArgumentException::class.java) {
+            importedUntrustedHooks().withGuardrail(GuardrailMode.ASK)
+        }
+    }
+
+    @Test
+    fun `enabling the guardrail does not trust an unreviewed imported config`() {
+        // The mutation must be rejected entirely, not silently turned into a trusted config.
+        val imported = importedUntrustedHooks()
+
+        runCatching { imported.withGuardrail(GuardrailMode.DENY) }
+
+        assertFalse(imported.trusted)
+        assertTrue(imported.requiresTrustReview())
     }
 
     // --- round-trip ---

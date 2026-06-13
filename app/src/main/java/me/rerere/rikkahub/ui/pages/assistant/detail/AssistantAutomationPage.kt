@@ -177,8 +177,14 @@ internal fun HookConfig.guardrailMode(): GuardrailMode? =
  * re-applying replaces the prior managed entry (so flipping Deny<->Ask never stacks duplicates) and
  * leaves every user-authored hook untouched. Enabling a managed guardrail grants trust — the user IS
  * the author of this toggle — which is also required for the dispatcher to actually run it.
+ *
+ * The `require(!requiresTrustReview())` guard mirrors `withAuthoredHook`: granting trust must never
+ * piggyback onto unreviewed imported hooks (H4). Without it, enabling the guardrail on an assistant
+ * that carries quarantined imported LLM hooks would flip `trusted=true` and un-quarantine them all on
+ * the next turn. The page must surface the import-trust review flow before offering this toggle.
  */
 internal fun HookConfig.withGuardrail(mode: GuardrailMode): HookConfig {
+    require(!requiresTrustReview()) { "imported hooks must be reviewed before enabling the guardrail" }
     val entry = HookMatcher(
         matcher = HIGH_RISK_GUARDRAIL_MATCHER,
         handlers = listOf(HookHandler.Static(mode = mode)),
@@ -297,6 +303,12 @@ private fun AutomationScopeContent(
 @Composable
 private fun GuardrailEditor(hooks: HookConfig, onUpdate: (HookConfig) -> Unit) {
     val mode = hooks.guardrailMode()
+    // H4: enabling the guardrail grants trust, so it must never be offered while imported hooks await
+    // review — surface the review pointer instead of the (now `require`-guarded) toggle.
+    if (hooks.requiresTrustReview()) {
+        GuardrailNeedsReviewCard()
+        return
+    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = stringResource(R.string.assistant_page_automation_guardrail_title),
@@ -347,6 +359,41 @@ private fun GuardrailEditor(hooks: HookConfig, onUpdate: (HookConfig) -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/**
+ * Shown in place of the guardrail toggle while imported hooks await review (H4). Enabling the
+ * guardrail grants trust, so the toggle is withheld until the user reviews and trusts the imported
+ * hooks on the Hooks page — keeping the trust grant scoped to the user's own authored config.
+ */
+@Composable
+private fun GuardrailNeedsReviewCard() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.assistant_page_automation_guardrail_title),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ),
+        ) {
+            Row(
+                modifier = Modifier.padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(imageVector = HugeIcons.AlertCircle, contentDescription = null)
+                Text(
+                    text = stringResource(R.string.assistant_page_automation_guardrail_needs_review),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }

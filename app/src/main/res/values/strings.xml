@@ -1271,6 +1271,7 @@
   <string name="assistant_page_automation_guardrail_mode_deny">Deny</string>
   <string name="assistant_page_automation_guardrail_mode_ask_desc">Each call is held for your confirmation before it runs.</string>
   <string name="assistant_page_automation_guardrail_mode_deny_desc">Each call is blocked outright; the assistant cannot use these tools.</string>
+  <string name="assistant_page_automation_guardrail_needs_review">This assistant arrived with hooks that have not been reviewed. Review and trust them on the Hooks page before enabling the guardrail.</string>
   <string name="chat_automation_grant_open">Grant automation</string>
   <string name="chat_automation_grant_title">Grant automation for this run</string>
   <string name="chat_automation_grant_desc">Authorize the assistant to read and act on the current app for a limited time. The grant covers only the foreground app and is cleared when this run ends.</string>
