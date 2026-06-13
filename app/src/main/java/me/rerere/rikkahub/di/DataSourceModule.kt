@@ -334,6 +334,17 @@ val dataSourceModule = module {
         )
     }
 
+    // Cold-start lifecycle orchestrator (SPEC.md M6 / SC#4 + T11). RikkaHubApp runs this in ONE
+    // coroutine so the interrupt-scan completes BEFORE the rescheduler reads run state to decide which
+    // running markers are orphans — without that ordering the rescheduler can race ahead, miss a
+    // not-yet-Interrupted killed run, and leave a recurring schedule pinned "running" forever.
+    single {
+        me.rerere.rikkahub.data.ai.task.StartupRecoveryRunner(
+            recover = { get<me.rerere.rikkahub.data.ai.task.TaskRecoveryRunner>().runStartupRecovery() },
+            reschedule = { get<me.rerere.rikkahub.data.ai.schedule.ScheduleRescheduler>().rescheduleOverdue() },
+        )
+    }
+
     single {
         KnowledgeStoreFactory(
             providerManager = get(),
