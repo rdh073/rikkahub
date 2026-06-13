@@ -88,6 +88,104 @@ class ScheduleSummaryTest {
         assertTrue("recurring summary must name the zone: $summary", summary.contains("($jakarta)"))
     }
 
+    /**
+     * METAMORPHIC (SC4), the strong form: across a spread of specs / now-offsets / zones, the
+     * instant the summary actually shows — recovered from the rendered string back to epoch millis —
+     * equals [Recurrence.nextOccurrenceAfter] for the same inputs, truncated to the formatter's
+     * minute granularity. The `contains(expectedShown)` checks above can be satisfied by ANY instant
+     * that happens to format to the same minute; this case rebuilds the instant from the text and
+     * compares millis, so a divergent-but-same-minute embedded value would fail. Spec coverage spans
+     * all three cadence families and a DAYS case in a DST-bearing zone.
+     */
+    @Test
+    fun `recurring summary embeds the same next-fire millis as Recurrence across a spread of specs`() {
+        val london = "Europe/London"
+        // firstFireAt anchors before the spring-forward (2026-03-29) so the DAYS case crosses a DST gap.
+        val daysAnchor = java.time.ZonedDateTime
+            .parse("2026-03-27T09:00:00Z").toInstant().toEpochMilli()
+        val gridAnchor = 1_700_000_000_000L
+
+        data class Case(val spec: RecurrenceSpec, val firstFireAt: Long, val zone: String, val nowOffset: Long)
+        val cases = listOf(
+            Case(RecurrenceSpec(every = 30, unit = RecurrenceUnit.MINUTES), gridAnchor, "UTC", 5 * hour + 7 * minute),
+            Case(RecurrenceSpec(every = 1, unit = RecurrenceUnit.MINUTES), gridAnchor, jakarta, 90 * minute),
+            Case(RecurrenceSpec(every = 3, unit = RecurrenceUnit.HOURS), gridAnchor, jakarta, 10 * hour),
+            Case(RecurrenceSpec(every = 1, unit = RecurrenceUnit.HOURS), gridAnchor, "UTC", -hour), // now before anchor
+            Case(RecurrenceSpec(every = 2, unit = RecurrenceUnit.DAYS, timeOfDay = "09:00"), daysAnchor, london, 5 * day),
+            Case(RecurrenceSpec(every = 1, unit = RecurrenceUnit.DAYS, timeOfDay = "23:30"), daysAnchor, jakarta, 3 * day + hour),
+        )
+
+        for (case in cases) {
+            val zone = ZoneId.of(case.zone)
+            val now = case.firstFireAt + case.nowOffset
+            val engineMillis = Recurrence.nextOccurrenceAfter(
+                spec = case.spec, firstFireAt = case.firstFireAt, lastFiredAt = null, zone = zone, now = now,
+            )
+            val summary = scheduleSummary(
+                kind = ScheduleKind.RECURRING,
+                spec = case.spec,
+                firstFireAt = case.firstFireAt,
+                timeZoneId = case.zone,
+                now = now,
+                locale = locale,
+            )
+            val shownMillis = parseShownMillis(summary, zone, engineMillis)
+            assertEquals(
+                "embedded next-fire must equal Recurrence.nextOccurrenceAfter (minute granularity) for $case: $summary",
+                truncateToMinute(engineMillis, zone),
+                shownMillis,
+            )
+        }
+    }
+
+    @Test
+    fun `one-shot summary embeds firstFireAt directly, never recurrence math`() {
+        val zone = ZoneId.of(jakarta)
+        val firstFireAt = java.time.ZonedDateTime
+            .parse("2026-06-16T09:00:00+07:00").toInstant().toEpochMilli()
+        // A now AFTER firstFireAt must not advance a one-shot's shown instant (no recurrence grid).
+        val now = firstFireAt + 10 * day
+
+        val summary = scheduleSummary(
+            kind = ScheduleKind.ONE_SHOT,
+            spec = null,
+            firstFireAt = firstFireAt,
+            timeZoneId = jakarta,
+            now = now,
+            locale = locale,
+        )
+
+        assertEquals(
+            "one-shot must show firstFireAt itself (minute granularity): $summary",
+            truncateToMinute(firstFireAt, zone),
+            parseShownMillis(summary, zone, firstFireAt),
+        )
+    }
+
+    /**
+     * Recover the epoch millis the summary actually rendered. The `EEE d MMM HH:mm` pattern drops the
+     * year, so the year is supplied from [reference] (the instant under test) to disambiguate — this
+     * only resolves the year, the day/month/time still come from the rendered text, so a divergent
+     * embedded instant in a different month/day/minute still fails the equality assertion.
+     */
+    private fun parseShownMillis(summary: String, zone: ZoneId, reference: Long): Long {
+        val match = Regex("""[A-Za-z]{3} \d{1,2} [A-Za-z]{3} \d{2}:\d{2}""").find(summary)
+            ?: error("no 'EEE d MMM HH:mm' fragment in summary: $summary")
+        val refYear = Instant.ofEpochMilli(reference).atZone(zone).year
+        val parser = DateTimeFormatter.ofPattern("EEE d MMM HH:mm", locale)
+        val partial = java.time.format.DateTimeFormatterBuilder()
+            .append(parser)
+            .parseDefaulting(java.time.temporal.ChronoField.YEAR, refYear.toLong())
+            .toFormatter(locale)
+        val local = java.time.LocalDateTime.parse(match.value, partial)
+        return local.atZone(zone).toInstant().toEpochMilli()
+    }
+
+    private fun truncateToMinute(millis: Long, zone: ZoneId): Long =
+        Instant.ofEpochMilli(millis).atZone(zone)
+            .truncatedTo(java.time.temporal.ChronoUnit.MINUTES)
+            .toInstant().toEpochMilli()
+
     @Test
     fun `recurring minutes cadence phrase reads naturally`() {
         val spec = RecurrenceSpec(every = 30, unit = RecurrenceUnit.MINUTES)
