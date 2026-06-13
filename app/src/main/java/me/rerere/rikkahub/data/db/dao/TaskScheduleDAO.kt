@@ -36,6 +36,15 @@ interface TaskScheduleDAO {
     suspend fun listByConversation(conversationId: String): List<TaskScheduleEntity>
 
     /**
+     * Per-owner active-schedule cap key (SPEC.md M3): the count of ENABLED schedules owned by
+     * [owner] across ALL conversations. The cap is computed per owner class so an agent cannot
+     * starve the user's quota (spec assumption 4); the per-conversation cap is derived from
+     * [listByConversation] instead, so no separate per-conversation count query is needed.
+     */
+    @Query("SELECT COUNT(*) FROM task_schedules WHERE owner = :owner AND enabled = 1")
+    suspend fun countEnabledByOwner(owner: String): Int
+
+    /**
      * Startup-rescheduler key (SPEC.md M6): every enabled schedule whose next fire is at or before
      * [now], i.e. overdue and still armed. The single-claim invariant (one worker wins the window)
      * is enforced by the repository's `claimDue` transaction, not by this read.
