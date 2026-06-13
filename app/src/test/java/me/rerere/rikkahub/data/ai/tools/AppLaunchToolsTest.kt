@@ -44,6 +44,27 @@ class AppLaunchToolsTest {
     }
 
     @Test
+    fun `open_app returns error result when the launch itself throws and never propagates`() = runBlocking {
+        // A non-null launch intent does NOT guarantee startActivity succeeds: the app can be
+        // uninstalled between resolve and launch (ActivityNotFoundException) or its activity may not be
+        // exported (SecurityException). The launcher surfaces that as a thrown exception; open_app's
+        // spec contract is to return {success:false,error}, NEVER to throw (the runtime would otherwise
+        // convert the throw into a generic stacktrace error, not the structured payload).
+        val launcher = object : AppLauncher {
+            override fun launch(packageName: String): Boolean =
+                throw SecurityException("activity not exported: $packageName")
+            override fun listApps(): List<AppInfo> = emptyList()
+        }
+        val tool = openAppTool(launcher)
+
+        val args = buildJsonObject { put("package", JsonPrimitive("com.example.guarded")) }
+        val payload = payloadOf(tool.execute(args))
+
+        assertFalse(payload["success"]!!.jsonPrimitive.content.toBoolean())
+        assertNotNull("error must explain the launch failure to the model", payload["error"])
+    }
+
+    @Test
     fun `open_app on a launchable package returns success and echoes package`() = runBlocking {
         val launched = mutableListOf<String>()
         val launcher = object : AppLauncher {

@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -87,8 +88,19 @@ interface AppLauncher {
 class AndroidAppLauncher(private val context: Context) : AppLauncher {
     override fun launch(packageName: String): Boolean {
         val intent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return false
-        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        return true
+        // A non-null launch intent does NOT guarantee startActivity succeeds: the package can be
+        // uninstalled between resolve and launch (ActivityNotFoundException) or the target activity may
+        // not be exported (SecurityException). Honor the interface contract — every launch failure maps
+        // to false, never an escaping throw — so the caller reports the structured error payload. The
+        // failure is fully surfaced to the model via that payload, not swallowed.
+        return try {
+            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        } catch (e: ActivityNotFoundException) {
+            false
+        } catch (e: SecurityException) {
+            false
+        }
     }
 
     override fun listApps(): List<AppInfo> {
@@ -127,11 +139,15 @@ fun openAppTool(launcher: AppLauncher): Tool = Tool(
     execute = {
         val pkg = it.jsonObject["package"]?.jsonPrimitive?.contentOrNull
             ?: error("package is required")
-        val launched = launcher.launch(pkg)
+        // Spec contract: open_app returns a structured {success:false,error} payload, NEVER throws.
+        // The launcher's no-throw contract is enforced at this boundary too — a misbehaving launcher
+        // (or a launch failure surfaced as a throw) maps to launched=false, not an escaping exception
+        // that the runtime would otherwise rewrite into a generic stacktrace error.
+        val launched = runCatching { launcher.launch(pkg) }.getOrDefault(false)
         val payload = if (!launched) {
             buildJsonObject {
                 put("success", false)
-                put("error", "Package '$pkg' is not installed or has no launchable activity.")
+                put("error", "Package '$pkg' could not be launched (not installed, no launchable activity, or launch was rejected).")
             }
         } else {
             buildJsonObject {
