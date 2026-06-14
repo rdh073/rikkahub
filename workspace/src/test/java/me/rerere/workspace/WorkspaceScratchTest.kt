@@ -233,6 +233,39 @@ class WorkspaceScratchTest {
         assertEquals("must not follow the link out of the workspace", filesDir.canonicalFile, result.canonicalFile)
     }
 
+    // ---- W-I6 (containment parity): seededRelativeCwd rejects a working_dir that escapes via symlink ----
+    // exec resolves the seed through WorkspaceFileSystem.resolve (canonical containment) before mapping
+    // to -w; the terminal calls seededRelativeCwd and maps straight to -w with no resolve. So a persisted
+    // working_dir reaching through an escaping symlink (`<files>/inside` -> /outside) was REJECTED by exec
+    // but ACCEPTED by the terminal — an asymmetry. The shared seededRelativeCwd is the single containment
+    // authority, so it must reject the identical set of paths both sinks reduce to.
+    @Test
+    fun `W-I6 seededRelativeCwd rejects a working_dir escaping the files root via symlink`() {
+        val filesDir = tmp.newFolder("files")
+        val outside = tmp.newFolder("outside")
+        File(outside, "secret").mkdirs()
+        java.nio.file.Files.createSymbolicLink(
+            File(filesDir, "inside").toPath(),
+            outside.toPath(),
+        )
+
+        try {
+            seededRelativeCwd(filesDir, workingDir = "inside/secret")
+            throw AssertionError("seededRelativeCwd must reject a working_dir that escapes via symlink")
+        } catch (e: IllegalArgumentException) {
+            // expected — the canonical-containment resolver rejects the escape, same as exec
+        }
+    }
+
+    // ---- W-I6: a contained working_dir (real in-root dir) is accepted and returns the relative path ----
+    @Test
+    fun `W-I6 seededRelativeCwd accepts a contained working_dir`() {
+        val filesDir = tmp.newFolder("files")
+        File(filesDir, "project/sub").mkdirs()
+
+        assertEquals("project/sub", seededRelativeCwd(filesDir, workingDir = "project/sub"))
+    }
+
     // ---- W-B6: mkdirTolerant still reports failure when a NON-DIRECTORY blocks the path ----
     @Test
     fun `mkdirTolerant reports failure when a non-directory blocks the path`() {

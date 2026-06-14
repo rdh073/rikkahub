@@ -92,6 +92,41 @@ class WorkspaceTerminalCwdTest {
         }
     }
 
+    // --- W-I6 (containment parity): the terminal seed rejects the SAME escaping symlink exec rejects --
+
+    /**
+     * exec resolves the seed through WorkspaceFileSystem.resolve (canonical containment) before mapping
+     * to `-w`; the terminal builds `-w` straight from [workspaceTerminalCwd] and never calls
+     * `WorkspaceManager.executeCommand`. So a persisted `working_dir` reaching THROUGH an escaping
+     * in-root symlink (`<files>/inside` -> /outside) was REJECTED by exec but ACCEPTED by the terminal.
+     * Both now reduce to the shared `seededRelativeCwd`, the single containment authority, so the
+     * terminal must throw on the identical escaping seed.
+     */
+    @Test
+    fun `W-I6 terminal -w rejects a working_dir that escapes the files root via symlink`() {
+        val files = freshFilesDir()
+        val outside = temp.newFolder("outside_${System.nanoTime()}")
+        File(outside, "secret").mkdirs()
+        java.nio.file.Files.createSymbolicLink(
+            File(files, "inside").toPath(),
+            outside.toPath(),
+        )
+
+        // exec rejects it (its resolve guard); the terminal must reject the IDENTICAL seed.
+        try {
+            execShellCwd(files, workingDir = "inside/secret")
+            throw AssertionError("precondition: exec must reject the escaping seed")
+        } catch (e: IllegalArgumentException) {
+            // expected — exec's canonical containment
+        }
+        try {
+            workspaceTerminalCwd(files, workingDir = "inside/secret")
+            throw AssertionError("terminal -w must reject the same escaping seed exec rejects (W-I6)")
+        } catch (e: IllegalArgumentException) {
+            // expected — same single containment authority
+        }
+    }
+
     // --- W-S3: opened-before keeps initial cwd; opened-after uses the new default ------------------
 
     /**
