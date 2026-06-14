@@ -44,6 +44,32 @@ class WorkspaceScratchTest {
         )
     }
 
+    // ---- W-B1 (property): under any filesDir LOCATION, default-create yields the contained ----
+    // `.xcloudz/scratch` directory. Generates an arbitrary (dot-dir-inclusive, via arbRelativePath)
+    // location for an EXISTING filesDir — the helper's contract is a real app data dir (Context.filesDir),
+    // not a not-yet-created path — so the helper never depends on filesDir being one specific path, and
+    // the result is always the same contained scratch dir at the exact relative location.
+    @Test
+    fun `W-B1 property default-create yields the contained xcloudz scratch dir for any filesDir`() {
+        runBlocking {
+            checkAll(100, arbRelativePath()) { sub ->
+                // An existing files dir at an arbitrary location (Context.filesDir always exists at call time).
+                val filesDir = File(tmp.newFolder(), sub).apply { mkdirs() }
+
+                val scratch = ensureDefaultScratch(filesDir)
+
+                assertTrue("scratch dir exists", scratch.exists())
+                assertTrue("scratch is a directory", scratch.isDirectory)
+                assertEquals(scratchDir(filesDir).canonicalFile, scratch.canonicalFile)
+                assertEquals(
+                    ".xcloudz/scratch",
+                    scratch.canonicalFile.relativeTo(filesDir.canonicalFile).path
+                        .replace(File.separatorChar, '/'),
+                )
+            }
+        }
+    }
+
     // ---- W-D2: calling twice returns the SAME dir and preserves any tree already inside it ----
     @Test
     fun `W-D2 ensureDefaultScratch is idempotent and preserves the existing tree`() {
@@ -58,6 +84,36 @@ class WorkspaceScratchTest {
         assertEquals("twice returns the same dir", first.canonicalFile, second.canonicalFile)
         assertTrue("the existing tree is preserved", seeded.exists())
         assertEquals("payload", seeded.readText())
+    }
+
+    // ---- W-D2 (property): for an ARBITRARY nested tree, a second ensure preserves it byte-for-byte ----
+    // The single-file example above only guards a top-level file; a wrong impl that `deleteRecursively()`d
+    // the scratch dir before re-creating it would survive that example yet corrupt a real project tree.
+    // This property seeds an arbitrary-depth file path and asserts the second ensure call is a pure no-op.
+    @Test
+    fun `W-D2 property a second ensure preserves an arbitrary nested tree and returns the same dir`() {
+        runBlocking {
+            checkAll(
+                100,
+                arbRelativePath(),
+                Arb.string(0..16),
+            ) { nested, payload ->
+                val filesDir = tmp.newFolder()
+
+                val first = ensureDefaultScratch(filesDir)
+                // Materialize an arbitrary-depth file INSIDE the scratch dir, then ensure again.
+                val seeded = File(first, "$nested/keep.txt").apply {
+                    parentFile?.mkdirs()
+                    writeText(payload)
+                }
+
+                val second = ensureDefaultScratch(filesDir)
+
+                assertEquals("twice returns the same dir", first.canonicalFile, second.canonicalFile)
+                assertTrue("the nested tree is preserved", seeded.exists())
+                assertEquals("contents are preserved byte-for-byte", payload, seeded.readText())
+            }
+        }
     }
 
     // ---- W-B6: a NON-DIRECTORY at `.xcloudz` is never overwritten; fall back to files root ----
