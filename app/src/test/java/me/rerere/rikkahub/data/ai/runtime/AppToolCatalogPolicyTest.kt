@@ -8,6 +8,7 @@ import me.rerere.ai.runtime.contract.ToolAssemblyContext
 import me.rerere.ai.runtime.contract.TurnMode
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.runtime.mcp.McpTool
+import me.rerere.rikkahub.data.ai.subagent.SPAWN_TOOL_MODEL_NAME
 import me.rerere.rikkahub.data.ai.subagent.SPAWN_TOOL_NAME
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -125,6 +126,51 @@ class AppToolCatalogPolicyTest {
         assertTrue("non-approval mcp tool retained", names.contains("mcp__remote_call"))
     }
 
+    /**
+     * The recursion guard must strip BOTH spawn-tool names from a subagent pool — the advertised
+     * `agent` ([SPAWN_TOOL_MODEL_NAME]) AND the legacy execution alias `task` ([SPAWN_TOOL_NAME]).
+     * After the `task` -> `agent` rename (issue #286), a base tool literally named `agent` could
+     * otherwise hand a subagent a spawn-capable tool under the new name, letting it spawn recursively
+     * and defeating TASK_DEPTH_ONE. The work-board `task_*` family (and any other lookalike) must NOT
+     * be touched — only the two exact spawn names are reserved.
+     */
+    @Test
+    fun subagentTurnStripsBothSpawnNamesButKeepsTaskFamily() = runBlocking {
+        val catalog = catalog(
+            serverTools = emptyMap(),
+            baseTools = { _, _ ->
+                listOf(
+                    tool(SPAWN_TOOL_MODEL_NAME),
+                    tool(SPAWN_TOOL_NAME),
+                    tool("task_create"),
+                    tool("task_get"),
+                    tool("task_list"),
+                    tool("task_update"),
+                    tool("local_read"),
+                )
+            },
+        )
+        val sub = assistant(Uuid.random(), mcpServers = emptySet())
+
+        val names = catalog.tools(
+            ToolAssemblyContext(
+                mode = TurnMode.Subagent,
+                targetAssistant = sub,
+                parentModelId = Uuid.random(),
+                allowApprovalTools = false,
+                includeSpawnTool = false,
+            )
+        ).map { it.name }
+
+        assertFalse("advertised spawn name `agent` stripped on subagent pool", names.contains(SPAWN_TOOL_MODEL_NAME))
+        assertFalse("legacy spawn alias `task` stripped on subagent pool", names.contains(SPAWN_TOOL_NAME))
+        assertTrue("board task_create survives", names.contains("task_create"))
+        assertTrue("board task_get survives", names.contains("task_get"))
+        assertTrue("board task_list survives", names.contains("task_list"))
+        assertTrue("board task_update survives", names.contains("task_update"))
+        assertTrue("non-spawn base tool retained", names.contains("local_read"))
+    }
+
     @Test
     fun mcpSelectionKeysOffTargetNotParent() = runBlocking {
         val serverA = Uuid.random()
@@ -209,16 +255,19 @@ class AppToolCatalogPolicyTest {
 
     /**
      * The spawn-strip (recursion guard) is orthogonal to the approval-strip. A base tool literally
-     * named `task` (== [SPAWN_TOOL_NAME]) must be stripped on ANY subagent context, even one that
+     * named with EITHER spawn name — the advertised `agent` ([SPAWN_TOOL_MODEL_NAME]) or the legacy
+     * alias `task` ([SPAWN_TOOL_NAME]) — must be stripped on ANY subagent context, even one that
      * allows approval tools — production strips spawn unconditionally on every subagent pool
      * (SubagentRunner -> filterToolsForSubagent), independent of approval stripping. Coupling the
-     * two would leak this tool whenever `allowApprovalTools` is true.
+     * two would leak either tool whenever `allowApprovalTools` is true.
      */
     @Test
     fun spawnNamedBaseToolStrippedOnSubagentEvenWhenApprovalAllowed() = runBlocking {
         val catalog = catalog(
             serverTools = emptyMap(),
-            baseTools = { _, _ -> listOf(tool("local_read"), tool(SPAWN_TOOL_NAME)) },
+            baseTools = { _, _ ->
+                listOf(tool("local_read"), tool(SPAWN_TOOL_MODEL_NAME), tool(SPAWN_TOOL_NAME))
+            },
         )
         val sub = assistant(Uuid.random(), mcpServers = emptySet())
 
@@ -228,13 +277,14 @@ class AppToolCatalogPolicyTest {
                 targetAssistant = sub,
                 parentModelId = Uuid.random(),
                 // The orthogonality boundary: a subagent context that nonetheless allows approval
-                // tools must STILL strip the recursion-guarded `task` tool.
+                // tools must STILL strip both recursion-guarded spawn names.
                 allowApprovalTools = true,
                 includeSpawnTool = false,
             )
         ).map { it.name }
 
-        assertFalse("spawn-named base tool stripped on subagent pool", names.contains(SPAWN_TOOL_NAME))
+        assertFalse("advertised `agent` spawn name stripped on subagent pool", names.contains(SPAWN_TOOL_MODEL_NAME))
+        assertFalse("legacy `task` spawn alias stripped on subagent pool", names.contains(SPAWN_TOOL_NAME))
         assertTrue("non-spawn base tool retained", names.contains("local_read"))
     }
 
