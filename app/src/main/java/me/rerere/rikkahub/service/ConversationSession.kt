@@ -77,28 +77,24 @@ class ConversationSession(
     }
 
     /**
-     * Consume the per-run grant: return it AND null it in one step. The pending grant is a
-     * one-derivation token bound to the immediate next generation, so the lease derivation that reads
-     * it must also clear it — otherwise a grant that derives NO guard (no approved package, expired
-     * TTL/steps, or automation disabled at run time) would survive on the session and silently scope a
-     * LATER, unrelated run with authority the user intended for one specific run (#187 v2 per-run-grant
-     * is transient). Consume-once decouples this from `clearAutomationLeaseState`, which a generation
-     * reached only when a guard was actually minted. Returns null when nothing is pending.
+     * Tears down the transient automation lease state. The per-generation guard is ALWAYS dropped —
+     * it is minted fresh per `withAutomationLease` entry and never reused. The per-run grant, however,
+     * is scoped to the whole TURN, which can span more than one lease entry: an ASK-guardrail approval
+     * breaks the turn (a Pending tool waits for the user) and the lease tears down, then the
+     * approval-resume re-enters the lease and must re-mint the SAME guard from the SAME grant.
+     *
+     * So [preserveGrant] decides the grant's fate (finding 3):
+     *  - `true`  — the turn is still open (a Pending tool approval is outstanding); KEEP the grant so
+     *    the resume re-mints the guard. Clearing it here is the bug: on resume no guard is minted, the
+     *    `ui_*` tools are not assembled, and the approved call errors "Tool not found".
+     *  - `false` — the turn truly ended; clear the grant too, so a per-run authorization can never
+     *    leak onto a LATER, unrelated run (the #187 v2 transient-grant invariant).
+     *
+     * Idempotent: nulling already-null fields is a no-op.
      */
-    fun consumePendingAutomationGrant(): AutomationGrant? {
-        val grant = pendingAutomationGrant
-        pendingAutomationGrant = null
-        return grant
-    }
-
-    /**
-     * Tears down the transient automation lease state. The guard and the per-run grant are one unit
-     * with one lifecycle, so they are nulled together — never one without the other — to guarantee no
-     * stale grant outlives its guard. Idempotent: nulling already-null fields is a no-op.
-     */
-    fun clearAutomationLeaseState() {
+    fun clearAutomationLeaseState(preserveGrant: Boolean = false) {
         activeAutomationGuard = null
-        pendingAutomationGrant = null
+        if (!preserveGrant) pendingAutomationGrant = null
     }
 
     fun acquire(): Int = refCount.incrementAndGet().also {

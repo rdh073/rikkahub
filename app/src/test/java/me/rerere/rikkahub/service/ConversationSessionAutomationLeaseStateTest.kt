@@ -11,12 +11,13 @@ import org.junit.Test
 import kotlin.uuid.Uuid
 
 /**
- * T8 invariant: the per-run automation grant (`pendingAutomationGrant`) is transient lease state that
- * shares the EXACT lifecycle of `activeAutomationGuard`. When the automation lease tears down (the one
- * lifecycle that nulls the guard), the grant must be cleared in the SAME step -- otherwise a stale
- * per-run grant from a prior generation could leak its surface into the next lease derivation (T11).
- * Both live on the session because the kill-switch thread must reach them, so the teardown is a single
- * unified clear, not two scattered null-assignments.
+ * T8 invariant + finding 3: the per-run automation grant (`pendingAutomationGrant`) is transient lease
+ * state, but its lifecycle is the whole TURN, not a single lease entry. The per-generation guard
+ * (`activeAutomationGuard`) is always dropped at teardown; the grant is dropped TOO when the turn
+ * truly ended (no pending approval), so a stale per-run grant cannot leak onto a LATER, unrelated run
+ * (T11). When an ASK-guardrail approval breaks the turn (a Pending tool waits for the user), the lease
+ * tears down but the grant is PRESERVED so the approval-resume re-mints the guard from it. Both fields
+ * live on the session because the kill-switch thread must reach them.
  */
 class ConversationSessionAutomationLeaseStateTest {
 
@@ -58,15 +59,16 @@ class ConversationSessionAutomationLeaseStateTest {
     }
 
     /**
-     * Per-run-transient invariant: the pending grant is a one-derivation token bound to the immediate
-     * next generation. `consumePendingAutomationGrant` returns it AND nulls it in the same step, so the
-     * lease derivation that reads it cannot leave it on the session to authorize a LATER, unrelated run.
-     * The leak the old code allowed: the grant was cleared only by `clearAutomationLeaseState`, which a
-     * generation reaches only when a guard was actually minted -- so a grant that derived no guard (no
-     * approved package, expired TTL, or automation disabled at run time) survived onto the next turn.
+     * Finding 3: a per-run grant authorizes a whole TURN, not a single lease entry. An ASK-guardrail
+     * approval breaks the turn (a Pending tool waits for the user) and the lease tears down BUT the
+     * turn has not ended — the approval-resume re-enters the lease and must re-mint the SAME guard from
+     * the SAME grant. So the lease teardown must be able to drop the per-generation guard while
+     * PRESERVING the per-run grant for the resume. Clearing both (the old single-step teardown) is the
+     * bug: on resume the grant is gone, no guard is minted, and the approved `ui_*` call errors
+     * "Tool not found". The terminal teardown (no pending approval) still clears both.
      */
     @Test
-    fun `consuming the pending grant returns it and clears it in one step`() {
+    fun `preserving the grant on teardown nulls the guard but keeps the grant for the resume`() {
         val s = session()
         val grant = AutomationGrant(
             enabled = true,
@@ -77,19 +79,33 @@ class ConversationSessionAutomationLeaseStateTest {
         )
         s.pendingAutomationGrant = grant
 
-        val consumed = s.consumePendingAutomationGrant()
+        s.clearAutomationLeaseState(preserveGrant = true)
 
-        assertSame("consume returns the grant for this run's derivation", grant, consumed)
-        assertNull("a consumed grant must NOT remain to scope a later unrelated run", s.pendingAutomationGrant)
+        assertNull("the per-generation guard is always dropped at teardown", s.activeAutomationGuard)
+        assertSame(
+            "the per-run grant must survive an approval-break teardown so the resume re-mints it",
+            grant,
+            s.pendingAutomationGrant,
+        )
     }
 
     @Test
-    fun `consuming when no grant is pending returns null and stays null`() {
+    fun `the terminal teardown still clears both the guard and the grant`() {
         val s = session()
+        s.pendingAutomationGrant = AutomationGrant(
+            enabled = true,
+            allowedPackages = setOf("com.example.target"),
+            verbs = setOf(AutomationVerb.OBSERVE),
+            ttlMinutes = 5,
+            maxSteps = 50,
+        )
 
-        val consumed = s.consumePendingAutomationGrant()
+        s.clearAutomationLeaseState(preserveGrant = false)
 
-        assertNull(consumed)
-        assertNull(s.pendingAutomationGrant)
+        assertNull(
+            "a turn that truly ended (no pending approval) must not leak its grant to a later run",
+            s.pendingAutomationGrant,
+        )
+        assertNull(s.activeAutomationGuard)
     }
 }

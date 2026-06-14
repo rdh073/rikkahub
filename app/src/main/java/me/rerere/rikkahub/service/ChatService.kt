@@ -228,6 +228,37 @@ internal fun effectiveAutomationCapability(
     return effectiveGrant.toKernelGrant().toCapability(sessionId, now)
 }
 
+/**
+ * The turn-boundary signal for the per-run automation grant (finding 3). A per-run grant authorizes a
+ * whole TURN, but one `withAutomationLease` entry is NOT the whole turn: an ASK-guardrail approval
+ * breaks the turn — a [ToolApprovalState.Pending] tool waits for the user — and the lease tears down,
+ * then the approval-resume re-enters the lease. So the lease teardown must KEEP the grant while the
+ * turn is still open and clear it only when the turn truly ended; an outstanding Pending tool approval
+ * in the conversation is exactly "still open". PURE so the boundary is JVM-testable without the
+ * service. (Mirrors the inline Pending checks the approval-resume + Stop-hook paths already use.)
+ */
+internal fun conversationHasPendingToolApproval(conversation: Conversation): Boolean =
+    conversation.currentMessages.any { message ->
+        message.parts.any { it is UIMessagePart.Tool && it.isPending }
+    }
+
+/**
+ * Whether `withAutomationLease`'s teardown must PRESERVE the per-run grant for an approval-resume
+ * (finding 3). The grant survives the lease entry ONLY when BOTH hold:
+ *  - [completedNormally] — the generation block returned normally (the ASK-guardrail break: the
+ *    runtime paused and the flow finished without error). A non-normal exit — an error, or a
+ *    CancellationException from a Stop / a newer entry superseding this job — is a turn ABANDON: the
+ *    turn will not resume, so the grant must clear or it would scope the next, unrelated turn.
+ *  - [hasPendingApproval] — a Pending tool approval is still outstanding, i.e. the turn is genuinely
+ *    paused waiting for the user (not simply finished).
+ * Any other combination clears the grant (the #187 v2 transient-grant invariant). PURE so the
+ * boundary is JVM-testable without the service.
+ */
+internal fun shouldPreservePerRunGrant(
+    completedNormally: Boolean,
+    hasPendingApproval: Boolean,
+): Boolean = completedNormally && hasPendingApproval
+
 // 自动压缩保留的最近消息数：与手动压缩对话框（CompressContextDialog）的默认值一致。
 private const val AUTO_COMPACT_KEEP_RECENT_MESSAGES = 32
 
@@ -1132,14 +1163,17 @@ class ChatService(
         session: ConversationSession,
         block: (CapabilityGuard?) -> R,
     ): R {
-        // Per-run-transient (#187 v2): consume the pending grant ONCE here, at the single point that
-        // derives the lease, binding it to exactly THIS generation. Consume-on-entry is unconditional —
-        // even when automation is disabled or the grant derives no guard — so a grant that authorizes no
-        // run for this turn cannot survive on the session to scope a LATER, unrelated turn. The old code
-        // cleared the grant only via the finally's `clearAutomationLeaseState`, which a generation
-        // reached only when a guard was actually minted; a null-deriving grant (no approved package,
-        // expired TTL/steps, or `uiAutomationEnabled` off at run time) leaked across runs.
-        val pendingGrant = session.consumePendingAutomationGrant()
+        // Per-run-transient (#187 v2): PEEK the pending grant to derive THIS generation's lease — do
+        // NOT consume (null) it here. A per-run grant is scoped to the whole TURN, and a turn can span
+        // more than one lease entry: an ASK-guardrail approval breaks the turn (a Pending tool waits
+        // for the user) and the lease tears down, then the approval-resume re-enters this lease and
+        // must re-mint the SAME guard from the SAME grant (finding 3). Consuming on entry destroyed the
+        // grant on the first pass, so the resume minted no guard, assembled no ui_* tools, and the
+        // approved call errored "Tool not found". The grant's clearing instead happens in the finally,
+        // gated on the real turn boundary (no pending approval) — which still prevents a per-run grant
+        // from leaking onto a LATER, unrelated turn (the transient-grant invariant the consume-once
+        // step was protecting, just keyed on the correct boundary).
+        val pendingGrant = session.pendingAutomationGrant
         // Root cause (#187 v2): the lease used to mint `surface = emptySet()` UNCONDITIONALLY, so the
         // guard DENIED every request — the automation subsystem was inert. The capability now derives
         // from the EFFECTIVE grant (consumed per-run grant ?: the assistant's standing
@@ -1169,11 +1203,29 @@ class ChatService(
             automationGuard.revoke()
             throw IllegalStateException(context.getString(R.string.automation_kill_switch_unavailable))
         }
+        // Tracks a NORMAL return from [block] vs an exceptional exit. Only a normal completion that
+        // PAUSED on an approval is a resumable break; a CancellationException (Stop, or a newer entry
+        // superseding this job via the previousJob.join barrier) is a turn ABANDON, after which the
+        // grant must NOT survive — otherwise the next, unrelated turn inherits this run's authorization.
+        var completedNormally = false
         try {
-            return block(automationGuard)
+            val result = block(automationGuard)
+            completedNormally = true
+            return result
         } finally {
             if (automationGuard != null && session.activeAutomationGuard === automationGuard) {
-                session.clearAutomationLeaseState()
+                // Keep the per-run grant alive ONLY when the turn is still open AND was not abandoned:
+                // a normal completion that left a Pending tool approval is the ASK-guardrail break
+                // (finding 3) — the resume re-enters this lease and re-mints the guard + STOP overlay
+                // from the preserved grant. Every OTHER terminal path — normal finish with no pending
+                // approval, an error, or a cancellation (Stop / supersede / regenerate) — clears the
+                // grant so a one-run authorization can never scope a LATER, unrelated turn. The
+                // per-generation guard and the STOP overlay are torn down regardless.
+                val preserveGrant = shouldPreservePerRunGrant(
+                    completedNormally = completedNormally,
+                    hasPendingApproval = conversationHasPendingToolApproval(session.state.value),
+                )
+                session.clearAutomationLeaseState(preserveGrant = preserveGrant)
                 automationActivation.deactivate(conversationId)
             }
         }
@@ -2051,7 +2103,9 @@ class ChatService(
         // The in-app Stop is the second kill-switch (#187 §7): revoke THIS conversation's automation
         // grant before cancelling so a tool step that is mid-authorize fails closed. Cancelling the
         // job tears down only this conversation's in-flight capture (the capture is a child of this
-        // generation coroutine) — a concurrent automation session is untouched.
+        // generation coroutine) — a concurrent automation session is untouched. The cancellation
+        // propagates through withAutomationLease as a non-normal exit, so its finally clears the
+        // per-run grant too (finding 3): a stopped turn will not resume, so the grant must not survive.
         sessions[conversationId]?.revokeAutomation()
         job.cancel()
         runCatching { job.join() }
