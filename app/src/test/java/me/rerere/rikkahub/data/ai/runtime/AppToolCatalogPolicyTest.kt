@@ -64,8 +64,12 @@ class AppToolCatalogPolicyTest {
     private fun tool(name: String, needsApproval: Boolean = false): Tool =
         Tool(name = name, description = "", needsApproval = needsApproval, execute = { emptyList() })
 
+    // Production-shaped: the real spawn tool advertises under the model-facing name `agent`
+    // (SPAWN_TOOL_MODEL_NAME) after the issue #286 rename. The catalog adds the hidden legacy `task`
+    // alias from THIS tool via Tool.copy(name = SPAWN_TOOL_NAME), so the stub must NOT be named `task`
+    // itself or the alias entry would be indistinguishable from the advertised one.
     private fun spawnToolStub(): Tool =
-        Tool(name = SPAWN_TOOL_NAME, description = "", execute = { emptyList() })
+        Tool(name = SPAWN_TOOL_MODEL_NAME, description = "", execute = { emptyList() })
 
     // serverId -> the McpTool that server exposes.
     private fun catalog(
@@ -102,7 +106,73 @@ class AppToolCatalogPolicyTest {
 
         assertTrue("mcp tool carries mcp__ prefix", names.contains("mcp__remote_call"))
         assertTrue("approval tool present in main turn", names.contains("dangerous_write"))
-        assertTrue("spawn tool present in main turn", names.contains(SPAWN_TOOL_NAME))
+        assertTrue("advertised spawn tool `agent` present in main turn", names.contains(SPAWN_TOOL_MODEL_NAME))
+        assertTrue("legacy spawn alias `task` present in main turn", names.contains(SPAWN_TOOL_NAME))
+    }
+
+    /**
+     * The main pool carries the spawn tool under BOTH the advertised model-facing name `agent`
+     * ([SPAWN_TOOL_MODEL_NAME]) AND a hidden legacy alias `task` ([SPAWN_TOOL_NAME]) — the issue #286
+     * dual-presence decision. Resolution by exact name (`find { it.name == toolName }`, the way
+     * `ChatTurnRuntime` resolves a pending call) must therefore succeed for a fresh `agent` call AND
+     * a replayed pending `task` call from a pre-rename transcript, with no "Tool task not found".
+     * The alias is the SAME spawn tool, not the board family's `task_create` — verified by execute
+     * IDENTITY, not just name (`Tool.copy(name = …)` preserves the execute reference), so the legacy
+     * `task` lookup runs the exact spawn impl rather than an impostor.
+     */
+    @Test
+    fun mainPoolResolvesBothSpawnNamesToSameExecute() = runBlocking {
+        val catalog = catalog(emptyMap())
+        val main = assistant(Uuid.random(), mcpServers = emptySet())
+
+        val pool = catalog.tools(
+            ToolAssemblyContext(
+                mode = TurnMode.Main,
+                targetAssistant = main,
+                parentModelId = null,
+                allowApprovalTools = true,
+                includeSpawnTool = true,
+            )
+        )
+
+        // The exact-name resolution ChatTurnRuntime performs for a pending tool call.
+        val agentTool = pool.find { it.name == SPAWN_TOOL_MODEL_NAME }
+        val taskTool = pool.find { it.name == SPAWN_TOOL_NAME }
+
+        assertTrue("fresh `agent` call resolves in the main pool", agentTool != null)
+        assertTrue("replayed legacy `task` call resolves in the main pool", taskTool != null)
+        // The alias is the spawn impl itself, not a board-family lookalike: data-class copy keeps the
+        // execute reference, so identity equality proves the legacy call runs the same spawn execute.
+        assertTrue(
+            "legacy `task` alias shares the advertised tool's execute (same spawn impl, not the board family)",
+            agentTool!!.execute === taskTool!!.execute,
+        )
+    }
+
+    /**
+     * The alias is added ONLY where the real spawn tool is added (Main + includeSpawnTool). A
+     * subagent pool must contain NEITHER spawn name — the recursion guard strips both — so the alias
+     * must never leak into a subagent turn even when the spawn factory yields a tool. Verified by
+     * feeding a production-shaped spawn stub (named `agent`) and asserting the subagent pool drops
+     * both `agent` and the legacy `task` alias.
+     */
+    @Test
+    fun legacyAliasAbsentFromSubagentPool() = runBlocking {
+        val catalog = catalog(emptyMap())
+        val sub = assistant(Uuid.random(), mcpServers = emptySet())
+
+        val names = catalog.tools(
+            ToolAssemblyContext(
+                mode = TurnMode.Subagent,
+                targetAssistant = sub,
+                parentModelId = Uuid.random(),
+                allowApprovalTools = false,
+                includeSpawnTool = false,
+            )
+        ).map { it.name }
+
+        assertFalse("advertised `agent` absent from subagent pool", names.contains(SPAWN_TOOL_MODEL_NAME))
+        assertFalse("legacy `task` alias absent from subagent pool", names.contains(SPAWN_TOOL_NAME))
     }
 
     @Test

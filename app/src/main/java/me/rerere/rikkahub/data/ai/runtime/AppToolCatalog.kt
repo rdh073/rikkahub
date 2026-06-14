@@ -8,6 +8,7 @@ import me.rerere.ai.runtime.contract.ToolCatalog
 import me.rerere.ai.runtime.contract.TurnMode
 import me.rerere.ai.runtime.mcp.McpTool
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.subagent.SPAWN_TOOL_NAME
 import me.rerere.rikkahub.data.ai.subagent.stripSpawnTools
 import me.rerere.rikkahub.service.mapMcpTool
 import kotlin.uuid.Uuid
@@ -74,7 +75,18 @@ class AppToolCatalog(
                 // (ChatService.buildGenerationTools). An unpinned subagent must inherit it via
                 // resolveSubagentModel, so it is the TARGET (= main) assistant here, not
                 // ctx.parentModelId (which is the SUBAGENT-turn carrier, null on a main turn).
-                spawnTool(ctx.targetAssistant.chatModelId)?.let { add(it) }
+                spawnTool(ctx.targetAssistant.chatModelId)?.let {
+                    add(it) // advertised, model-facing `agent` (SPAWN_TOOL_MODEL_NAME)
+                    // Hidden legacy execution alias `task` (SPAWN_TOOL_NAME) — issue #286 dual-presence.
+                    // A turn interrupted mid-spawn (approval pending, app restarted) replays a persisted
+                    // UIMessagePart.Tool(toolName = "task"); ChatTurnRuntime resolves it by EXACT name
+                    // (find { it.name == toolName }), so without a `task`-named entry that replay throws
+                    // "Tool task not found". `Tool.copy(name = …)` keeps the identical
+                    // execute/parameters/needsApproval, so the legacy call runs the exact same spawn impl.
+                    // Added ONLY here (Main + includeSpawnTool) so subagent pools never gain it; the
+                    // subagent recursion strip ([stripSpawnTools]) removes both names belt-and-suspenders.
+                    add(it.copy(name = SPAWN_TOOL_NAME))
+                }
             }
         }
         // The spawn-strip (recursion guard) and the approval-strip are orthogonal policies, mirrored
