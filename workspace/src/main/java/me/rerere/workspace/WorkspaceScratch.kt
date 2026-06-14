@@ -16,16 +16,31 @@ import java.io.File
  * is the one place that touches the filesystem to materialize that default.
  */
 fun ensureDefaultScratch(filesDir: File): File {
+    val rootCanon = filesDir.canonicalFile
     var dir = filesDir
     for (segment in WorkspaceCwdPolicy.DEFAULT_SCRATCH) {
         val next = File(dir, segment)
         // A pre-existing non-directory at this segment is a user file we must not destroy. Fall back
-        // to the files root rather than mkdir over it / delete it (W-B6) — never clobber.
+        // to the files root rather than mkdir over it / delete it (W-B6) — never clobber. NOTE this
+        // alone does NOT catch a symlinked DIRECTORY: `isDirectory` follows links, so a pre-existing
+        // `.xcloudz` -> /outside symlink would pass it and `mkdir(File(link, "scratch"))` would write
+        // OUTSIDE filesDir before any resolve() containment runs.
         if (next.exists() && !next.isDirectory) return filesDir
         if (!mkdirTolerant(next)) return filesDir
+        // Canonical-containment guard (same primitive as WorkspaceFileSystem.resolvePath): the segment
+        // we just materialized must still resolve UNDER filesDir. A symlinked segment canonicalizes to
+        // its out-of-workspace target and fails this check, so we fall back to the files root rather
+        // than follow the link out of the sandbox — the unscoped-write the `!isDirectory` guard misses.
+        if (!next.isContainedUnder(rootCanon)) return filesDir
         dir = next
     }
     return dir
+}
+
+/** True iff this file's canonical path is [root] itself or a child of it (no symlink escape). */
+private fun File.isContainedUnder(root: File): Boolean {
+    val canon = canonicalFile.path
+    return canon == root.path || canon.startsWith(root.path + File.separator)
 }
 
 /**

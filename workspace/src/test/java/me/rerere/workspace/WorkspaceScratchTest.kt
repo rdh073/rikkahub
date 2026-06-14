@@ -197,6 +197,42 @@ class WorkspaceScratchTest {
         )
     }
 
+    // ---- W-B6 (symlink escape): a SYMLINKED directory at a scratch segment is never followed ----
+    // `File.isDirectory` follows symlinks, so a pre-existing symlink at `.xcloudz` -> /outside passes
+    // the non-clobber `!isDirectory` guard, and mkdir(File(symlink, "scratch")) then creates
+    // `/outside/scratch` — an unscoped write OUTSIDE filesDir, before any resolve() containment runs.
+    // The invariant: every dir ensureDefaultScratch materializes stays canonically under filesDir.
+    // Fix falls back to the files root rather than following the link out of the workspace.
+    @Test
+    fun `W-B6 a symlinked xcloudz pointing outside filesDir is never followed`() {
+        val filesDir = tmp.newFolder("files")
+        val outside = tmp.newFolder("outside")
+        val link = File(filesDir, WorkspaceCwdPolicy.DEFAULT_SCRATCH[0])
+        java.nio.file.Files.createSymbolicLink(link.toPath(), outside.toPath())
+
+        val result = ensureDefaultScratch(filesDir)
+
+        assertEquals("must not follow the link out of the workspace", filesDir.canonicalFile, result.canonicalFile)
+        assertFalse(
+            "no scratch dir may be created under the out-of-workspace target",
+            File(outside, WorkspaceCwdPolicy.DEFAULT_SCRATCH[1]).exists(),
+        )
+    }
+
+    // ---- W-B6 (symlink escape): a SYMLINK at `.xcloudz/scratch` (with `.xcloudz` a real dir) is never followed ----
+    @Test
+    fun `W-B6 a symlinked scratch pointing outside filesDir is never followed`() {
+        val filesDir = tmp.newFolder("files")
+        val outside = tmp.newFolder("outside")
+        File(filesDir, WorkspaceCwdPolicy.DEFAULT_SCRATCH[0]).mkdirs()
+        val link = File(File(filesDir, WorkspaceCwdPolicy.DEFAULT_SCRATCH[0]), WorkspaceCwdPolicy.DEFAULT_SCRATCH[1])
+        java.nio.file.Files.createSymbolicLink(link.toPath(), outside.toPath())
+
+        val result = ensureDefaultScratch(filesDir)
+
+        assertEquals("must not follow the link out of the workspace", filesDir.canonicalFile, result.canonicalFile)
+    }
+
     // ---- W-B6: mkdirTolerant still reports failure when a NON-DIRECTORY blocks the path ----
     @Test
     fun `mkdirTolerant reports failure when a non-directory blocks the path`() {
