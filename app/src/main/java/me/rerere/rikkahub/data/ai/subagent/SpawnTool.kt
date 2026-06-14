@@ -67,11 +67,14 @@ fun stripSpawnTools(tools: List<Tool>): List<Tool> =
     filterToolsForSubagent(filterToolsForSubagent(tools, SPAWN_TOOL_MODEL_NAME), SPAWN_TOOL_NAME)
 
 /**
- * The spawn ("task") [Tool] that lets the parent assistant delegate a self-contained sub-task to a
- * named, `spawnable` [Assistant] (issue #201; rewired onto [TaskCoordinator] in SPEC.md M4).
+ * The spawn ("agent", legacy alias "task") [Tool] that lets the parent assistant delegate a
+ * self-contained sub-task to a named, `spawnable` [Assistant] (issue #201; rewired onto
+ * [TaskCoordinator] in SPEC.md M4; model-facing name decoupled to `agent` in #286).
  *
- * The tool's wire surface is UNCHANGED — same reserved name [SPAWN_TOOL_NAME], same `subagent` /
- * `prompt` args, same `UIMessagePart` output — so existing callers and transcripts keep working.
+ * The tool is advertised to the model under [SPAWN_TOOL_MODEL_NAME] (`agent`); [SPAWN_TOOL_NAME]
+ * (`task`) survives as the legacy resolution / UI / approval alias. The rest of the wire surface is
+ * UNCHANGED — same `subagent` / `prompt` args, same `UIMessagePart` output — so existing callers and
+ * transcripts keep working.
  * What changed under it: the child now runs through [TaskCoordinator] instead of `SubagentRunner`,
  * so the run is a persisted, lifecycle-tracked, budget/concurrency-gated [me.rerere.ai.runtime.task.TaskState]
  * machine. The final answer still lands in the same `UIMessagePart.Tool` output (the parent's
