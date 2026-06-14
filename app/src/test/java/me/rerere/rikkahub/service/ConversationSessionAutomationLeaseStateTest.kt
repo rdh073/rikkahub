@@ -2,11 +2,18 @@ package me.rerere.rikkahub.service
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import me.rerere.ai.core.MessageRole
+import me.rerere.ai.ui.ToolApprovalState
+import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.AutomationVerb
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.toMessageNode
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.uuid.Uuid
 
@@ -26,6 +33,25 @@ class ConversationSessionAutomationLeaseStateTest {
         initial = Conversation.ofId(id = Uuid.random()),
         scope = CoroutineScope(Dispatchers.Unconfined),
         onIdle = {},
+    )
+
+    private fun session(initial: Conversation): ConversationSession = ConversationSession(
+        id = initial.id,
+        initial = initial,
+        scope = CoroutineScope(Dispatchers.Unconfined),
+        onIdle = {},
+    )
+
+    private fun pendingTool(): UIMessagePart.Tool = UIMessagePart.Tool(
+        toolCallId = "call_1",
+        toolName = "ui_set_text",
+        input = """{"selector":{"tid":0},"text":"hi"}""",
+        approvalState = ToolApprovalState.Pending,
+    )
+
+    private fun cancelToolForTest(tool: UIMessagePart.Tool): UIMessagePart.Tool = tool.copy(
+        output = listOf(UIMessagePart.Text("""{"status":"cancelled"}""")),
+        approvalState = ToolApprovalState.Denied("new send abandoned pending tool"),
     )
 
     @Test
@@ -107,5 +133,60 @@ class ConversationSessionAutomationLeaseStateTest {
             s.pendingAutomationGrant,
         )
         assertNull(s.activeAutomationGuard)
+    }
+
+    @Test
+    fun `abandoning a pending tool for a new send clears the grant before the next derivation`() {
+        val conversation = Conversation.ofId(
+            id = Uuid.random(),
+            messages = listOf(
+                UIMessage.user("drive the app").toMessageNode(),
+                UIMessage(
+                    role = MessageRole.ASSISTANT,
+                    parts = listOf(pendingTool()),
+                ).toMessageNode(),
+            ),
+        )
+        val s = session(conversation)
+        s.pendingAutomationGrant = AutomationGrant(
+            enabled = true,
+            allowedPackages = setOf("com.example.target"),
+            verbs = setOf(AutomationVerb.OBSERVE),
+            ttlMinutes = 5,
+            maxSteps = 50,
+        )
+        assertNotNull(
+            "the pending grant is usable before the abandon path runs",
+            effectiveAutomationCapability(
+                pendingGrant = s.pendingAutomationGrant,
+                assistantGrant = AutomationGrant(),
+                masterSwitchEnabled = true,
+                sessionId = conversation.id.toString(),
+                now = 1_000L,
+            ),
+        )
+
+        val updatedConversation = finishInterruptedPendingToolsForNewSend(
+            session = s,
+            cancelTool = ::cancelToolForTest,
+        )
+
+        assertNotNull("the pending tool should be finalized for persistence", updatedConversation)
+        assertNull(
+            "a new-send abandon finalizes the pending tool, so its one-operation grant must be reset",
+            s.pendingAutomationGrant,
+        )
+        assertNull(
+            "the next derivation must not inherit the abandoned run's pending grant",
+            effectiveAutomationCapability(
+                pendingGrant = s.pendingAutomationGrant,
+                assistantGrant = AutomationGrant(),
+                masterSwitchEnabled = true,
+                sessionId = conversation.id.toString(),
+                now = 1_000L,
+            ),
+        )
+        val finalizedTool = updatedConversation!!.currentMessages.last().parts.single() as UIMessagePart.Tool
+        assertTrue(finalizedTool.approvalState is ToolApprovalState.Denied)
     }
 }

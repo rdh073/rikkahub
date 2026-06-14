@@ -255,6 +255,32 @@ internal fun shouldPreservePerRunGrant(
     hasPendingApproval: Boolean,
 ): Boolean = completedNormally && hasPendingApproval
 
+internal fun finishInterruptedPendingToolsForNewSend(
+    session: ConversationSession,
+    cancelTool: (UIMessagePart.Tool) -> UIMessagePart.Tool,
+): Conversation? {
+    val currentConversation = session.state.value
+    val lastNode = currentConversation.messageNodes.lastOrNull() ?: return null
+    val lastMessage = lastNode.currentMessage
+    val updatedMessage = lastMessage.finishPendingTools(cancelTool)
+    if (updatedMessage == lastMessage) {
+        return null
+    }
+
+    // A new-send/stop abandon finalizes the paused tool instead of resuming it. The preserved
+    // per-run grant was only for that paused operation, so clear it before the updated conversation
+    // is saved and before a later generation can derive a guard from stale state.
+    session.pendingAutomationGrant = null
+
+    return currentConversation.copy(
+        messageNodes = currentConversation.messageNodes.dropLast(1) + lastNode.copy(
+            messages = lastNode.messages.map { message ->
+                if (message.id == lastMessage.id) updatedMessage else message
+            }
+        )
+    )
+}
+
 // 自动压缩保留的最近消息数：与手动压缩对话框（CompressContextDialog）的默认值一致。
 private const val AUTO_COMPACT_KEEP_RECENT_MESSAGES = 32
 
@@ -1650,21 +1676,11 @@ class ChatService(
     }
 
     private suspend fun finishInterruptedPendingTools(conversationId: Uuid) {
-        val currentConversation = getConversationFlow(conversationId).value
-        val lastNode = currentConversation.messageNodes.lastOrNull() ?: return
-        val lastMessage = lastNode.currentMessage
-        val updatedMessage = lastMessage.finishPendingTools(::cancelToolByUser)
-        if (updatedMessage == lastMessage) {
-            return
-        }
-
-        val updatedConversation = currentConversation.copy(
-            messageNodes = currentConversation.messageNodes.dropLast(1) + lastNode.copy(
-                messages = lastNode.messages.map { message ->
-                    if (message.id == lastMessage.id) updatedMessage else message
-                }
-            )
-        )
+        val session = getOrCreateSession(conversationId)
+        val updatedConversation = finishInterruptedPendingToolsForNewSend(
+            session = session,
+            cancelTool = ::cancelToolByUser,
+        ) ?: return
         saveConversation(conversationId, updatedConversation)
     }
 
