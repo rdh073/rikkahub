@@ -104,10 +104,16 @@ private fun WorkspaceTerminalContent(
     val terminalTypeface = remember(context) {
         ResourcesCompat.getFont(context, R.font.jetbrains_mono) ?: Typeface.MONOSPACE
     }
-    var finished by remember(root) { mutableStateOf(false) }
+    // `finished` and `sessionClient` MUST share the session's key (root, workingDir), not just `root`.
+    // The session is recreated when working_dir changes (see `remember(root, workingDir)` below); the
+    // old session's onDispose calls finishIfRunning(), which fires sessionClient -> finished = true. If
+    // these survived a working_dir change (keyed on `root` alone) the stale finished=true would render
+    // the "exited" overlay over the freshly-created, still-running replacement session, and the reused
+    // client's terminalView would be nulled while bound to the new session.
+    var finished by remember(root, workingDir) { mutableStateOf(false) }
     var controlDown by remember(root) { mutableStateOf(false) }
     var altDown by remember(root) { mutableStateOf(false) }
-    val sessionClient = remember(root) {
+    val sessionClient = remember(root, workingDir) {
         WorkspaceTerminalSessionClient(context.applicationContext) {
             finished = true
         }
