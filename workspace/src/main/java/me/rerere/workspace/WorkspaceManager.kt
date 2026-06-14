@@ -111,20 +111,15 @@ class WorkspaceManager(
         val override =
             if (cwd == null) WorkspaceCwdPolicy.CwdOverride.Absent
             else WorkspaceCwdPolicy.CwdOverride.Explicit(cwd)
-        // ABSENT + UNSET working_dir is the only path that auto-creates a directory: the scratch
-        // default must exist before we `cd` into it. ensureDefaultScratch is clobber-safe — if a user
-        // file already occupies `.xcloudz`/`scratch` it falls back to the files root, so we derive the
-        // resolved RELATIVE path from the File it actually returns rather than trusting the policy
-        // string (the two agree except on the W-B6 fallback).
-        val resolved: String
-        val workingDirFile: File
-        if (override is WorkspaceCwdPolicy.CwdOverride.Absent && workingDir.isBlank()) {
-            workingDirFile = ensureDefaultScratch(files)
-            resolved = workingDirFile.relativeTo(files).path.replace(File.separatorChar, '/')
-        } else {
-            resolved = WorkspaceCwdPolicy.resolveRelative(override, workingDir)
-            workingDirFile = fileSystem.resolve(files, resolved)
+        // ABSENT routes through the SAME [seededRelativeCwd] the sideload terminal uses, so the exec
+        // `-w` and the terminal `-w` are the IDENTICAL normalized value for a given workspace (W-I6).
+        // seededRelativeCwd materializes the scratch default clobber-safely on the unset path; an
+        // EXPLICIT override stays on the central policy resolver (override > files-root, no auto-mkdir).
+        val resolved: String = when (override) {
+            is WorkspaceCwdPolicy.CwdOverride.Absent -> seededRelativeCwd(files, workingDir)
+            is WorkspaceCwdPolicy.CwdOverride.Explicit -> WorkspaceCwdPolicy.resolveRelative(override, workingDir)
         }
+        val workingDirFile: File = fileSystem.resolve(files, resolved)
         require(workingDirFile.exists()) { "Working directory does not exist: $resolved" }
         require(workingDirFile.isDirectory) { "Working path is not a directory: $resolved" }
 

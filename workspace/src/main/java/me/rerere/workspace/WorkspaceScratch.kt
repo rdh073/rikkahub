@@ -27,3 +27,23 @@ fun ensureDefaultScratch(filesDir: File): File {
     }
     return dir
 }
+
+/**
+ * The ONE resolved FILES-relative cwd for the "no per-call override, seeded from the workspace
+ * `working_dir`" case — the value the LLM exec sink and the interactive sideload terminal both map to
+ * PRoot `-w` (issue #282, W-I6 primary guard). Both `WorkspaceManager.executeCommand`'s ABSENT branch
+ * and the terminal call THIS function so a path accepted by the repository can never become a
+ * DIFFERENT path in the exec argv vs the terminal argv.
+ *
+ * `workingDir` blank == UNSET -> materialize and resolve the default `.xcloudz/scratch` clobber-safely
+ * via [ensureDefaultScratch] (which falls back to the files root if a user file already occupies it,
+ * W-B6), then report the relative path of the dir it actually returned. Non-blank -> the central
+ * policy resolves it (`normalize(workingDir)`); the directory's existence is the caller's concern
+ * (exec already `require`s it). This is the seed only — runtime `cd` drift is never written back.
+ */
+fun seededRelativeCwd(filesDir: File, workingDir: String): String =
+    if (workingDir.isBlank()) {
+        ensureDefaultScratch(filesDir).relativeTo(filesDir).path.replace(File.separatorChar, '/')
+    } else {
+        WorkspaceCwdPolicy.resolveRelative(WorkspaceCwdPolicy.CwdOverride.Absent, workingDir)
+    }
