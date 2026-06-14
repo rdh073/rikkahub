@@ -250,6 +250,28 @@ class WorkspaceCwdPolicyTest {
         }
     }
 
+    // ---- W-M6: normalize itself rejects a rootfs-absolute path (no silent coercion) ----
+    // The KDoc on WorkspaceRepository.setWorkingDir asserts "a `..`/NUL/absolute escape is rejected at
+    // the source". But normalize only stripped the leading-/ empty segment, turning `/root/x` -> `root/x`
+    // — a silent absolute->relative coercion that violates the documented invariant. normalize is the ONE
+    // funnel both setWorkingDir AND resolveRelative(Absent, workingDir) use, so the rejection belongs here.
+    // The `/workspace` alias is the only absolute that survives (it is the mount alias, stripped first).
+    @Test
+    fun `W-M6 normalize rejects a rootfs-absolute path instead of coercing it`() {
+        listOf("/root", "/root/x", "/etc/passwd", "/usr/bin", "/data/x", "/proc/1").forEach { abs ->
+            assertRejected(abs)
+        }
+        // The /workspace mount alias is NOT rejected — it is stripped to its files-relative remainder.
+        assertEquals("", WorkspaceCwdPolicy.normalize("/workspace"))
+        assertEquals(".xcloudz/scratch", WorkspaceCwdPolicy.normalize("/workspace/.xcloudz/scratch"))
+        runBlocking {
+            // Every generated rootfs-absolute path (never a /workspace alias) is rejected by normalize.
+            checkAll(300, arbRootfsAbsolutePath()) { abs ->
+                assertRejected(abs)
+            }
+        }
+    }
+
     // ---- W-M6: explicit "/root/..." rejected as a cwd arg (a `cd /root` command TEXT is not seen here) ----
     @Test
     fun `W-M6 explicit rootfs-absolute override is rejected as a cwd arg`() {

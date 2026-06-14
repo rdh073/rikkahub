@@ -29,15 +29,22 @@ object WorkspaceCwdPolicy {
      * segment that is NOT `.`/`..` (e.g. `.xcloudz`) is an ORDINARY segment and survives unchanged
      * (W-I9) — the default scratch path must never be stripped.
      *
-     * Throws [IllegalArgumentException] on any escape attempt (a `..` segment, a NUL, or a
-     * whitespace-only segment). The result has no leading `/`, no empty/`.` middle segment, and
-     * `""` means the files root.
+     * Throws [IllegalArgumentException] on any escape attempt: a `..` segment, a NUL, a
+     * whitespace-only segment, OR a rootfs-absolute path that is not the `/workspace` mount alias
+     * (W-M6) — `/root/x` is REJECTED, never silently coerced to `root/x`. This is the one funnel both
+     * [WorkspaceRepository.setWorkingDir] and `resolveRelative(Absent, workingDir)` pass through, so
+     * the absolute-rejection invariant the repository KDoc documents holds at this single source.
+     * The result has no leading `/`, no empty/`.` middle segment, and `""` means the files root.
      */
     fun normalize(path: String): String {
         require(!path.contains('\u0000')) { "Path contains NUL: $path" }
         val slashed = path.replace('\\', '/')
         // Strip a leading `/workspace` alias so a shell-form path round-trips through the policy.
         val withoutAlias = stripWorkspaceAlias(slashed)
+        // A leading `/` that SURVIVED the alias strip is a non-`/workspace` rootfs-absolute path. The
+        // empty-segment filter below would otherwise coerce `/root/x` -> `root/x` silently; reject at
+        // the source instead so a user-supplied working_dir matches the documented invariant (W-M6).
+        require(!withoutAlias.startsWith("/")) { "Path may not be rootfs-absolute: $path" }
         val segments = withoutAlias.split('/')
             .filter { it.isNotEmpty() && it != "." } // drop empty/`.` segments (W-M1)
         segments.forEach { seg ->
