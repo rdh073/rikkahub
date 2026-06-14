@@ -22,11 +22,26 @@ fun ensureDefaultScratch(filesDir: File): File {
         // A pre-existing non-directory at this segment is a user file we must not destroy. Fall back
         // to the files root rather than mkdir over it / delete it (W-B6) — never clobber.
         if (next.exists() && !next.isDirectory) return filesDir
-        if (!next.exists() && !next.mkdir()) return filesDir
+        if (!mkdirTolerant(next)) return filesDir
         dir = next
     }
     return dir
 }
+
+/**
+ * Materialize [dir] as a directory, tolerating a benign concurrent mkdir race. `mkdir()` returns
+ * false both when creation genuinely fails AND when another thread/process created the directory
+ * between this caller's check and its `mkdir()` (TOCTOU); only the latter is benign. So after a failed
+ * `mkdir()` we re-check `isDirectory`: if the directory is now there, the lost race is a success — the
+ * dir exists, which is the whole point. Returning false here (the old `!next.mkdir()` path) would make
+ * a concurrent first-use caller fall back to the files ROOT while another lands in scratch, splitting
+ * the seeded cwd (issue #282, W-I6) and breaking the safe default (W-B1/W-D2).
+ *
+ * A non-directory blocking the path is NOT a tolerable race: `mkdir()` fails and `isDirectory` stays
+ * false, so this returns false and the caller falls back without clobbering (W-B6). The check-then-act
+ * `exists()` guard is intentionally absent — `mkdir()`'s own atomic result is the source of truth.
+ */
+internal fun mkdirTolerant(dir: File): Boolean = dir.mkdir() || dir.isDirectory
 
 /**
  * The ONE resolved FILES-relative cwd for the "no per-call override, seeded from the workspace

@@ -145,6 +145,69 @@ class WorkspaceScratchTest {
         assertEquals("not a dir", scratchAsFile.readText())
     }
 
+    // ---- W-B1/W-I6 (race): a benign lost-mkdir race must NOT fall back to the files root ----
+    // TOCTOU window: a concurrent caller materializes `.xcloudz`/`.xcloudz/scratch` AFTER this caller's
+    // `!exists()` check but BEFORE its `mkdir()`, so `mkdir()` returns false even though the dir now
+    // exists. The buggy impl (`if (!exists && !mkdir) return filesDir`) then returns the files ROOT
+    // instead of the scratch dir, so under concurrent first-use one caller lands in scratch and another
+    // in the files root — violating the safe-default (W-B1) and same-cwd (W-I6) guarantees.
+    //
+    // The race condition reduces to one deterministic primitive: `mkdir()` returns false on a directory
+    // that ALREADY EXISTS (standard JDK behaviour). `mkdirTolerant` must treat that as success — the dir
+    // is there, which is the whole point. This test exercises exactly that case with no threads/sleeps:
+    // the scratch dir is pre-created (the concurrent winner already ran), then `mkdirTolerant` is asked
+    // to create it. The buggy `next.mkdir()`-only path returns false here and would lose the dir.
+    @Test
+    fun `mkdirTolerant treats a lost race (dir already exists) as success`() {
+        val filesDir = tmp.newFolder("files")
+        val scratch = scratchDir(filesDir).apply { mkdirs() } // concurrent winner already created it
+
+        assertTrue(
+            "mkdir() returns false on a pre-existing dir; tolerant create must still succeed",
+            mkdirTolerant(scratch),
+        )
+        assertTrue("the pre-existing dir survives", scratch.isDirectory)
+    }
+
+    // ---- W-B1/W-I6 (race, end-to-end): ensureDefaultScratch never returns the files root on a race ----
+    // Drives the full helper through a real concurrent race: many callers ensure the default scratch on
+    // a FRESH filesDir at once, so the lost-mkdir window is exercised. Every caller MUST resolve to the
+    // SAME scratch dir; not one may fall back to the files root. With the buggy impl, a racing caller
+    // returns filesDir (W-I6 split-brain); with the fix, all agree. High thread count + barrier makes
+    // the window reliably hit; the assertion (no caller sees the root) is correct regardless of timing.
+    @Test
+    fun `W-I6 concurrent ensureDefaultScratch callers all resolve to the same scratch dir`() {
+        val filesDir = tmp.newFolder("files")
+        val expected = scratchDir(filesDir).canonicalFile
+        val threads = 16
+        val barrier = java.util.concurrent.CyclicBarrier(threads)
+        val results = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+        (1..threads).map {
+            Thread {
+                barrier.await()
+                results.add(ensureDefaultScratch(filesDir).canonicalFile.path)
+            }.apply { start() }
+        }.forEach { it.join() }
+
+        assertEquals(
+            "every concurrent caller must resolve to the one scratch dir, never the files root",
+            setOf(expected.path),
+            results,
+        )
+    }
+
+    // ---- W-B6: mkdirTolerant still reports failure when a NON-DIRECTORY blocks the path ----
+    @Test
+    fun `mkdirTolerant reports failure when a non-directory blocks the path`() {
+        val filesDir = tmp.newFolder("files")
+        val blocked = File(filesDir, "blocker").apply { writeText("not a dir") }
+
+        assertFalse("a file blocking the path is not a tolerable race", mkdirTolerant(blocked))
+        assertFalse("the blocking file is not turned into a directory", blocked.isDirectory)
+        assertEquals("not a dir", blocked.readText())
+    }
+
     // ---- W-B6 (property): for any pre-existing non-dir at either segment, never clobber ----
     @Test
     fun `W-B6 property never overwrites an existing non-directory at either scratch segment`() {
