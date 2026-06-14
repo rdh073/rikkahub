@@ -1283,5 +1283,6 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="assistant_page_automation_guardrail_mode_deny">拒否</string>
   <string name="assistant_page_automation_guardrail_mode_ask_desc">各呼び出しは実行前に保留され、あなたの確認を待ちます。</string>
   <string name="assistant_page_automation_guardrail_mode_deny_desc">各呼び出しは直接ブロックされ、アシスタントはこれらのツールを使用できません。</string>
+  <string name="assistant_page_automation_guardrail_needs_review">このアシスタントには未確認のフックが含まれています。ガードレールを有効にする前に、フックページで確認して信頼してください。</string>
 </resources>
 

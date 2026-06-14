@@ -1281,5 +1281,6 @@
   <string name="assistant_page_automation_guardrail_mode_deny">拒絕</string>
   <string name="assistant_page_automation_guardrail_mode_ask_desc">每次呼叫都會先暫停，等待你確認後才執行。</string>
   <string name="assistant_page_automation_guardrail_mode_deny_desc">每次呼叫都會被直接阻擋；助理無法使用這些工具。</string>
+  <string name="assistant_page_automation_guardrail_needs_review">此助理附帶了尚未審核的鉤子。請先在鉤子頁面審核並信任它們，然後再啟用工具防護。</string>
 </resources>
 

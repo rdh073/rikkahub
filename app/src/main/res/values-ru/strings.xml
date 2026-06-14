@@ -1283,5 +1283,6 @@
   <string name="assistant_page_automation_guardrail_mode_deny">Запретить</string>
   <string name="assistant_page_automation_guardrail_mode_ask_desc">Каждый вызов приостанавливается и ждёт вашего подтверждения перед выполнением.</string>
   <string name="assistant_page_automation_guardrail_mode_deny_desc">Каждый вызов блокируется сразу; ассистент не может использовать эти инструменты.</string>
+  <string name="assistant_page_automation_guardrail_needs_review">Этот ассистент содержит непроверенные хуки. Проверьте и доверьте их на странице «Хуки», прежде чем включать ограждение инструментов.</string>
 </resources>
 
