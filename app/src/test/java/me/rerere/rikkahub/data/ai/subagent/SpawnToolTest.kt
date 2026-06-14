@@ -149,6 +149,54 @@ class SpawnToolTest {
         put("prompt", prompt)
     }
 
+    private fun buildSpawnToolFor(spawnable: List<Assistant>): Tool = buildSpawnTool(
+        spawnableAssistants = spawnable,
+        coordinator = fakeCoordinator(mutableListOf()),
+        parentModelId = null,
+        settings = settingsWith(subModel),
+        registry = ExecutionHandleRegistry(),
+        buildSubagentTools = { _, _ -> emptyList() },
+        releaseOrphanedClaims = {},
+        approvalGateFor = {
+            object : me.rerere.ai.runtime.contract.TaskApprovalGate {
+                override suspend fun await(
+                    taskId: kotlin.uuid.Uuid,
+                    request: me.rerere.ai.runtime.task.TaskApprovalRequest,
+                ): me.rerere.ai.runtime.task.TaskApprovalDecision =
+                    me.rerere.ai.runtime.task.TaskApprovalDecision.Denied()
+            }
+        },
+        processingStatus = MutableStateFlow(null),
+        progressLabel = { "Running $it" },
+        parentConversationId = Uuid.random(),
+    )
+
+    @Test
+    fun `buildSpawnTool advertises the spawn tool under the model-facing name agent`() {
+        // The model-facing tool name was renamed task -> agent (issue #286) to remove the collision
+        // with the work-board task_* family. The factory must advertise the NEW name; SPAWN_TOOL_NAME
+        // is kept only as the legacy execution/UI/approval alias.
+        val tool = buildSpawnToolFor(emptyList())
+
+        assertEquals("agent", tool.name)
+        assertEquals("agent", SPAWN_TOOL_MODEL_NAME)
+    }
+
+    @Test
+    fun `advertiseSpawnableAssistants prompt names the agent tool, not the legacy task tool`() {
+        // The system-prompt text the model reads must use the model-facing name. A `task` reference
+        // here would steer the model back at the renamed name.
+        val sub = Assistant(name = "Researcher", description = "Researches topics", spawnable = true)
+
+        val prompt = advertiseSpawnableAssistants(listOf(sub))
+
+        assertTrue("prompt must mention the agent tool, was: $prompt", prompt.contains("agent"))
+        assertTrue(
+            "prompt must not reference the legacy `task` tool name, was: $prompt",
+            !prompt.contains("`task`"),
+        )
+    }
+
     @Test
     fun `execute restores processingStatus to its prior value on success`() {
         val status = MutableStateFlow<String?>(null)

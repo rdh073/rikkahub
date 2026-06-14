@@ -27,11 +27,23 @@ import me.rerere.rikkahub.data.model.Assistant
 import kotlin.uuid.Uuid
 
 /**
- * The reserved tool NAME the spawn ("task") tool occupies. A subagent must never be able to
- * spawn further subagents (recursion guard, depth bounded at 1), so this name is filtered out
- * of any tool pool handed to a subagent — see [filterToolsForSubagent], which takes this name as
- * its caller-supplied reserved name. This identity is app-side because the spawn [Tool] itself is
- * built only here; the neutral `:ai-runtime` recursion-guard names no concrete tool.
+ * The advertised (model-facing) NAME of the spawn tool. The model sees ONLY this name and the
+ * system prompt refers to it. Renamed `task` -> `agent` (issue #286) so it no longer collides with
+ * the work-board `task_*` family the model also sees in the same turn pool — a bare `task` was
+ * ambiguously readable as the board's "create" verb. This is the name [buildSpawnTool] advertises.
+ */
+const val SPAWN_TOOL_MODEL_NAME: String = "agent"
+
+/**
+ * The legacy execution / UI / approval alias for the spawn tool — kept, NOT advertised for fresh
+ * turns. Pre-rename transcripts and in-flight pending calls carry this name in their persisted
+ * `UIMessagePart.Tool.toolName`; keeping it resolvable on every read path (pool resolution, renderer
+ * registry, child-approval anchor) means stored conversations keep working byte-for-byte without
+ * rewriting any stored row. A subagent must never be able to spawn further subagents (recursion
+ * guard, depth bounded at 1), so BOTH this name and [SPAWN_TOOL_MODEL_NAME] are filtered out of any
+ * tool pool handed to a subagent — see [filterToolsForSubagent], which takes a name as its
+ * caller-supplied reserved name. This identity is app-side because the spawn [Tool] itself is built
+ * only here; the neutral `:ai-runtime` recursion-guard names no concrete tool.
  *
  * Raw MCP tools are prefixed `mcp__` at the ChatService build site, so a malicious MCP tool
  * literally named `task` becomes `mcp__task` and cannot collide with this reserved name. Filtering
@@ -103,7 +115,7 @@ fun buildSpawnTool(
     progressLabel: (subName: String) -> String,
     parentConversationId: Uuid,
 ): Tool = Tool(
-    name = SPAWN_TOOL_NAME,
+    name = SPAWN_TOOL_MODEL_NAME,
     description = "Delegate a self-contained sub-task to a specialized subagent and return its result.",
     parameters = {
         InputSchema.Obj(
@@ -249,7 +261,7 @@ internal fun advertiseSpawnableAssistants(spawnableAssistants: List<Assistant>):
         .map { "- ${it.name}: ${it.description}" }
     if (lines.isEmpty()) return ""
     return buildString {
-        append("Available subagents you can run via the `$SPAWN_TOOL_NAME` tool ")
+        append("Available subagents you can run via the `$SPAWN_TOOL_MODEL_NAME` tool ")
         append("(pass the subagent's name as `subagent` and a self-contained task as `prompt`):")
         append("\n")
         append(lines.joinToString("\n"))
