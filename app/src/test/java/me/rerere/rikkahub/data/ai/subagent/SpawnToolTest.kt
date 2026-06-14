@@ -264,6 +264,33 @@ class SpawnToolTest {
     }
 
     @Test
+    fun `stripSpawnTools removes both spawn names while leaving the board family and lookalikes intact`() {
+        // The depth-1 recursion guard must strip BOTH the advertised name (agent) and the legacy
+        // execution alias (task) from any subagent pool — neither can be allowed to let a child
+        // spawn. Everything that merely LOOKS like a spawn name (the work-board task_* family, the
+        // mcp__-prefixed tools, the plural lookalikes) must survive untouched (issue #286).
+        val pool = listOf(
+            tool(SPAWN_TOOL_MODEL_NAME), // "agent" — advertised spawn name, must be stripped
+            tool(SPAWN_TOOL_NAME),       // "task"  — legacy spawn alias, must be stripped
+            tool("task_create"),
+            tool("task_get"),
+            tool("task_list"),
+            tool("task_update"),
+            tool("mcp__agent"),
+            tool("mcp__task"),
+            tool("agents"),
+            tool("tasks"),
+        )
+
+        val survivors = stripSpawnTools(pool).map { it.name }
+
+        assertEquals(
+            listOf("task_create", "task_get", "task_list", "task_update", "mcp__agent", "mcp__task", "agents", "tasks"),
+            survivors,
+        )
+    }
+
+    @Test
     fun `execute gates needsApproval tools instead of dropping them and uses the sub's own pool`() {
         val capturedTools = mutableListOf<Tool>()
         val status = MutableStateFlow<String?>(null)

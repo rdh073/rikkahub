@@ -16,6 +16,7 @@ import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.runtime.contract.TaskApprovalGate
+import me.rerere.ai.runtime.subagent.filterToolsForSubagent
 import me.rerere.ai.runtime.task.TaskState
 import me.rerere.rikkahub.data.ai.task.ExecutionHandle
 import me.rerere.rikkahub.data.ai.task.ExecutionHandleRegistry
@@ -50,6 +51,20 @@ const val SPAWN_TOOL_MODEL_NAME: String = "agent"
  * by the exact name is therefore a sound structural guard.
  */
 const val SPAWN_TOOL_NAME: String = "task"
+
+/**
+ * Strip BOTH spawn-tool names from a subagent's tool pool — the advertised [SPAWN_TOOL_MODEL_NAME]
+ * (`agent`) AND the legacy execution alias [SPAWN_TOOL_NAME] (`task`). A subagent must never be
+ * able to spawn further subagents (recursion guard, depth bounded at 1), and either name reaching a
+ * child pool would defeat that — so the depth-1 guard must remove both.
+ *
+ * The two-name policy lives in `:app` (where both names are defined), not in the neutral
+ * `:ai-runtime` primitive: [filterToolsForSubagent] takes ONE caller-supplied name and stays
+ * name-agnostic. This helper chains it for both names so the two-call pattern is not duplicated at
+ * the strip sites (catalog subagent branch, [TaskCoordinator.run], [TaskCoordinator.resume]).
+ */
+fun stripSpawnTools(tools: List<Tool>): List<Tool> =
+    filterToolsForSubagent(filterToolsForSubagent(tools, SPAWN_TOOL_MODEL_NAME), SPAWN_TOOL_NAME)
 
 /**
  * The spawn ("task") [Tool] that lets the parent assistant delegate a self-contained sub-task to a
