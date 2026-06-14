@@ -6,6 +6,7 @@ import me.rerere.rikkahub.data.model.AutomationGrant
 import me.rerere.rikkahub.data.model.AutomationSink
 import me.rerere.rikkahub.data.model.AutomationVerb
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,13 +15,21 @@ import org.junit.Test
  * T11 root-cause: `ChatService.withAutomationLease` used to mint the guard with a HARD-CODED
  * `surface = emptySet()`, so `CapabilityGuard` DENIED every request regardless of any user grant —
  * the automation subsystem was inert. The fix derives the lease `Capability` from the effective
- * grant (`session.pendingAutomationGrant ?: assistant.automationGrant`) via the pure
- * [effectiveAutomationCapability], which maps the `:app` `AutomationGrant` mirror onto the kernel
- * grant and runs `toCapability`.
+ * grant via the pure [effectiveAutomationCapability], which maps the `:app` `AutomationGrant` mirror
+ * onto the kernel grant and runs `toCapability`.
+ *
+ * #187 v2 activation policy (finding 1): the per-run pending grant is its OWN activation — the
+ * in-chat sheet that mints it is the explicit, time-boxed, package-scoped user action authorizing
+ * exactly that one run, so it derives a capability REGARDLESS of the persisted
+ * [me.rerere.rikkahub.data.model.Assistant.uiAutomationEnabled] master switch. The STANDING
+ * `assistantGrant`, by contrast, only activates when the master switch is on — that switch is the
+ * gate for the standing default, never for a fresh per-run grant. Without this split, confirming the
+ * in-chat grant while the switch is off "succeeds" in the UI but mints no guard and silently denies.
  *
  * These properties pin the seam: (1) no grant ⇒ null capability ⇒ NO guard ⇒ DENY (no regression);
- * (2) per-run grant overrides the assistant default; (3) a real grant fills the surface/verbs the
- * user approved while SUBMIT stays withheld.
+ * (2) per-run grant overrides the assistant default AND activates with the switch off; (3) the
+ * standing grant stays inert with the switch off; (4) a real grant fills the surface/verbs the user
+ * approved while SUBMIT stays withheld.
  */
 class EffectiveAutomationCapabilityTest {
 
@@ -32,6 +41,7 @@ class EffectiveAutomationCapabilityTest {
         val cap = effectiveAutomationCapability(
             pendingGrant = null,
             assistantGrant = AutomationGrant(),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )
@@ -50,6 +60,7 @@ class EffectiveAutomationCapabilityTest {
                 ttlMinutes = 5,
                 maxSteps = 50,
             ),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )
@@ -68,6 +79,7 @@ class EffectiveAutomationCapabilityTest {
                 maxSteps = 50,
             ),
             assistantGrant = AutomationGrant(),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )
@@ -80,6 +92,7 @@ class EffectiveAutomationCapabilityTest {
                 maxSteps = 0,
             ),
             assistantGrant = AutomationGrant(),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )
@@ -99,6 +112,7 @@ class EffectiveAutomationCapabilityTest {
                 ttlMinutes = 5,
                 maxSteps = 50,
             ),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )!!
@@ -122,6 +136,7 @@ class EffectiveAutomationCapabilityTest {
                 ttlMinutes = 5,
                 maxSteps = 50,
             ),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )!!
@@ -147,6 +162,7 @@ class EffectiveAutomationCapabilityTest {
                 ttlMinutes = 30,
                 maxSteps = 256,
             ),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )!!
@@ -167,10 +183,89 @@ class EffectiveAutomationCapabilityTest {
                 ttlMinutes = 7,
                 maxSteps = 20,
             ),
+            masterSwitchEnabled = true,
             sessionId = sessionId,
             now = now,
         )!!
 
         assertEquals(setOf("com.assistant.default"), cap.surface)
+    }
+
+    // --- #187 v2 activation policy: per-run grant vs the master switch (finding 1) ---
+
+    @Test
+    fun `a usable per-run grant activates even when the master switch is off`() {
+        val cap = effectiveAutomationCapability(
+            pendingGrant = AutomationGrant(
+                enabled = true,
+                allowedPackages = setOf("com.perrun.app"),
+                verbs = setOf(AutomationVerb.OBSERVE),
+                ttlMinutes = 5,
+                maxSteps = 50,
+            ),
+            assistantGrant = AutomationGrant(),
+            masterSwitchEnabled = false,
+            sessionId = sessionId,
+            now = now,
+        )
+
+        assertNotNull(
+            "an explicit per-run grant is its own activation — it must mint a capability " +
+                "regardless of the standing master switch",
+            cap,
+        )
+        assertEquals(setOf("com.perrun.app"), cap!!.surface)
+    }
+
+    @Test
+    fun `the standing grant stays inert when the master switch is off`() {
+        val cap = effectiveAutomationCapability(
+            pendingGrant = null,
+            assistantGrant = AutomationGrant(
+                enabled = true,
+                allowedPackages = setOf("com.assistant.default"),
+                verbs = setOf(AutomationVerb.OBSERVE),
+                ttlMinutes = 30,
+                maxSteps = 256,
+            ),
+            masterSwitchEnabled = false,
+            sessionId = sessionId,
+            now = now,
+        )
+
+        assertNull(
+            "the master switch gates the STANDING grant — with it off, the standing default " +
+                "never activates (only a fresh per-run grant may)",
+            cap,
+        )
+    }
+
+    @Test
+    fun `with the switch off a per-run grant wins even over a usable standing grant`() {
+        val cap = effectiveAutomationCapability(
+            pendingGrant = AutomationGrant(
+                enabled = true,
+                allowedPackages = setOf("com.perrun.app"),
+                verbs = setOf(AutomationVerb.OBSERVE),
+                ttlMinutes = 5,
+                maxSteps = 50,
+            ),
+            assistantGrant = AutomationGrant(
+                enabled = true,
+                allowedPackages = setOf("com.assistant.default"),
+                verbs = setOf(AutomationVerb.OBSERVE, AutomationVerb.TAP),
+                ttlMinutes = 30,
+                maxSteps = 256,
+            ),
+            masterSwitchEnabled = false,
+            sessionId = sessionId,
+            now = now,
+        )!!
+
+        assertEquals(
+            "the per-run grant is the active authorization; the gated standing grant is irrelevant",
+            setOf("com.perrun.app"),
+            cap.surface,
+        )
     }
 }
