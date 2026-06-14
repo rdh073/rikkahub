@@ -148,20 +148,18 @@ class UiAutomationToolsTest {
     }
 
     @Test
-    fun `factory exposes the tools for a per-run guard regardless of the persisted master switch`() {
-        // Finding 1: an in-chat per-run grant mints a guard even when uiAutomationEnabled == false
-        // (the grant is its own explicit activation). The guard is the single source of truth for
-        // activation here — its mere existence means authority was granted, so the tools MUST surface.
-        // Gating on uiAutomationEnabled in addition to the guard dropped the tools for exactly this
-        // case, so the approved per-run grant then errored "Tool not found".
+    fun `factory exposes the tools for any guard ChatService already minted`() {
+        // The guard is the single source of truth for activation here — its mere existence means
+        // ChatService already applied the master switch and derived usable authority, so the tools
+        // MUST surface. Gating on uiAutomationEnabled in addition to the guard would split that source
+        // of truth and could hide tools for an otherwise valid guard.
         val backend = FakeBackend(targetTree())
         val tools = allTools(
             guard = healthyGuard(),
             backend = backend,
         )
         assertTrue(
-            "a minted guard (per-run grant) must surface the automation tools regardless of the " +
-                "persisted master switch",
+            "a minted guard must surface the automation tools because activation already happened",
             tools.isNotEmpty(),
         )
     }
@@ -551,9 +549,9 @@ class UiAutomationToolsTest {
     }
 
     // (Presence + needsApproval==false for all three tools is asserted by
-    // `factory exposes the observe plus nav act tools when a guard is present` above. The per-run
-    // grant case — guard present while the master switch is off — is pinned by
-    // `factory exposes the tools for a per-run guard regardless of the persisted master switch`.)
+    // `factory exposes the observe plus nav act tools when a guard is present` above. The guard
+    // source-of-truth invariant is pinned by
+    // `factory exposes the tools for any guard ChatService already minted`.)
 
     // --- 7b. GROUNDING — an act before any ui_observe must not touch the backend ---
 

@@ -53,8 +53,9 @@ import me.rerere.automation.observe.UiSnapshot
  * Safety wiring (the design's hard prerequisites, all enforced here):
  *  - **Default-OFF / empty surface (S1):** returns `emptyList()` unless a non-null [CapabilityGuard]
  *    is supplied. The guard is the single source of truth for activation — `ChatService` mints one
- *    only when an active, usable grant exists (the standing grant gated by the master switch, OR a
- *    fresh per-run grant which is its own activation). A null guard = no authority = no tool.
+ *    only when the master switch is enabled and an active, usable grant exists (a fresh per-run grant
+ *    can override the standing grant, but cannot bypass the switch). A null guard = no authority =
+ *    no tool.
  *  - **Guard BEFORE backend (S2):** `ui_observe` calls [CapabilityGuard.authorize] before reaching
  *    [AutomationCore.observe]; the act tools delegate to [AutomationCore.act], which authorizes
  *    internally before any [me.rerere.automation.backend.AutomationBackend.perform]. The backend is
@@ -104,11 +105,11 @@ fun getUiAutomationTools(
     confirm: ConfirmChannel,
 ): List<Tool> {
     // The minted [guard] is the single source of truth for activation: ChatService only mints one
-    // when an ACTIVE, usable grant exists (the standing grant gated by `uiAutomationEnabled`, OR a
-    // fresh per-run grant which is its own activation — finding 1). A null guard ⇒ no authority ⇒ no
-    // tool at all (default-OFF, empty surface; design §2/§5/S1). Re-checking `uiAutomationEnabled`
-    // here in ADDITION to the guard wrongly dropped the tools for a per-run grant minted while the
-    // master switch is off, so the approved per-run `ui_*` call then errored "Tool not found".
+    // when `uiAutomationEnabled` is on and an ACTIVE, usable grant exists. A fresh per-run grant can
+    // override the standing grant, but cannot bypass that master gate. A null guard ⇒ no authority ⇒
+    // no tool at all (default-OFF, empty surface; design §2/§5/S1). Re-checking `uiAutomationEnabled`
+    // here in ADDITION to the guard would split the activation source of truth and risk dropping tools
+    // even after ChatService minted a valid guard.
     if (guard == null) return emptyList()
 
     // The last snapshot ui_observe grounded this turn. The act tools (ui_scroll/ui_global) resolve

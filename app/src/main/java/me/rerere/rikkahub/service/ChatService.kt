@@ -199,20 +199,16 @@ private fun AutomationGrant.toKernelGrant(): me.rerere.automation.cap.Automation
  * overrides the standing default). PURE so the deny-all root-cause invariant is JVM-testable without
  * the service.
  *
- * #187 v2 activation policy (finding 1): the two grant sources have DIFFERENT activation gates.
- *  - The per-run [pendingGrant] is its OWN activation. The in-chat grant sheet that mints it is the
- *    explicit, time-boxed, package-scoped user action authorizing exactly this one run, so it derives
- *    a capability REGARDLESS of [masterSwitchEnabled]. Gating it on the persisted master switch made
- *    the sheet a lie: confirming a grant "succeeded" in the UI but minted no guard (the switch
- *    defaults off), so the `ui_*` tools stayed unavailable and every action silently denied.
- *  - The standing [assistantGrant] is the persisted per-assistant default; [masterSwitchEnabled]
- *    ([Assistant.uiAutomationEnabled]) is its gate. With the switch off it never activates.
+ * #187 v2 activation policy (finding 1): [masterSwitchEnabled]
+ * ([Assistant.uiAutomationEnabled]) is the single gate for every grant source. The per-run
+ * [pendingGrant] can override the assistant's standing [assistantGrant], but it cannot bypass the
+ * master switch. With the switch off, neither source activates.
  *
  * Returns `null` (⇒ NO guard is minted ⇒ every request DENIED) when no source is both active AND a
  * usable authorization (disabled, no approved package, zero TTL, or zero steps). This preserves the
  * pre-#187-v2 deny-all an empty grant must keep: the root cause of the inert subsystem was
  * `surface = emptySet()` minted unconditionally; here a usable grant fills the surface the user
- * approved while an empty/absent grant — and a standing grant whose switch is off — still denies all.
+ * approved while an empty/absent grant — or any grant whose switch is off — still denies all.
  */
 internal fun effectiveAutomationCapability(
     pendingGrant: AutomationGrant?,
@@ -221,10 +217,10 @@ internal fun effectiveAutomationCapability(
     sessionId: String,
     now: Long,
 ): Capability? {
-    // The standing grant is consulted only when the master switch gates it on; a fresh per-run grant
-    // is always its own activation. An absent/gated-off source contributes nothing, so the deny-all
-    // posture is preserved when neither source is active.
-    val effectiveGrant = pendingGrant ?: assistantGrant.takeIf { masterSwitchEnabled } ?: return null
+    // The master switch gates the whole expression; a pending grant may override the standing grant,
+    // but neither branch contributes authority while UI automation is disabled.
+    if (!masterSwitchEnabled) return null
+    val effectiveGrant = pendingGrant ?: assistantGrant
     return effectiveGrant.toKernelGrant().toCapability(sessionId, now)
 }
 
@@ -1183,10 +1179,9 @@ class ChatService(
         // (submit-class stays the stricter, separate opt-in), so a grant can never bypass the confirm
         // gate. The STOP overlay below remains mandatory for ANY minted guard.
         //
-        // Finding 1: `uiAutomationEnabled` is now passed INTO the derivation as the gate for the
-        // STANDING grant only — NOT an outer all-or-nothing switch. The in-chat per-run grant is its
-        // own explicit, time-boxed activation, so it mints a guard even when the master switch is off;
-        // otherwise the grant sheet "succeeded" but silently denied (the switch defaults off).
+        // Finding 1: `uiAutomationEnabled` is passed into the derivation as the single master gate
+        // for BOTH grant sources. A per-run grant can override the standing grant only after that gate
+        // is open; with the switch off, no automation guard is minted.
         val capability: Capability? = effectiveAutomationCapability(
             pendingGrant = pendingGrant,
             assistantGrant = assistant.automationGrant,
